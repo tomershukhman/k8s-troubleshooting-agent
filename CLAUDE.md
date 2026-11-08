@@ -14,6 +14,10 @@ Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
   `AGENT_ACCEPT_REUSE_SCENARIOS=false` = fresh and removed (needed after deleting an object from a
   manifest). M1 always deploys and deletes: that's its test.
 - One test: `uv run pytest tests/unit/test_agent.py::test_founded_evidence_passes_straight_through -q`
+- **Tuning prompts, with Claude Code reading the answers itself:** `uv run agent scenario list` for the
+  questions, then `uv run agent investigate "<question>" --json` per scenario (agent only, ~$0.09 a
+  run), or `uv run agent eval --runs 1` (adds the judges): `eval-results/<time>.json` holds each run's
+  full record (every tool call and output, the critic's verdicts) beside every score and judge reason.
 - Run from the repo root (`AGENT_SCENARIOS_DIR` defaults to `./scenarios`). Unit tests run in an empty
   temp dir with AGENT_* cleared and a kubeconfig that doesn't exist (`tests/unit/conftest.py`), so
   they never read `.env` or reach a cluster.

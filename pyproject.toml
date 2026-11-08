@@ -20,6 +20,11 @@ dependencies = [
     "typer>=0.28.0",
 ]
 
+[project.optional-dependencies]
+# `agent eval` only: mlflow.genai.evaluate and its judges. The agent itself traces with the slim
+# mlflow-tracing package above.
+eval = ["mlflow>=3.18.0"]
+
 [project.scripts]
 agent = "k8s_agent.cli:app"
 
@@ -29,6 +34,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "k8s-agent[eval]",
     "pytest>=9.2.0",
     "ruff>=0.17.4",
 ]
@@ -40,6 +46,8 @@ addopts = "-ra"
 filterwarnings = [
     # langsmith's pytest plugin (installed with langchain) on Python 3.14; not our code
     "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:langsmith",
+    # mlflow (eval extra) on import, with SQLAlchemy 2.1; not our code
+    "ignore:The ``noload`` loader strategy is deprecated:DeprecationWarning",
 ]
 
 [tool.ruff]

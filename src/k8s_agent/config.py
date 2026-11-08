@@ -98,6 +98,21 @@ class Settings(BaseSettings):
     # The first install pulls a ~1.4 GB image (about 2.5 min on the M4 spike's machine).
     mlflow_install_timeout_seconds: PositiveInt = 600
 
+    # Evals (SPEC 2.3, 3.6): each scenario's question, asked this many times. The diagnosis and
+    # the two judges must pass in at least EVAL_PASS_MIN_RUNS of them; the exact checks (evidence
+    # exists, the right tools, safe actions) in every run.
+    eval_runs_per_scenario: PositiveInt = 3
+    eval_pass_min_runs: PositiveInt = 2
+    # The two judges, as an MLflow model URI: stronger than the agent, so it doesn't grade itself.
+    judge_model: str = "anthropic:/claude-opus-5-5"
+    # Tries per judge verdict: a judge call that fails or gives no readable verdict is asked
+    # again. Still none: that run fails the check.
+    judge_attempts: PositiveInt = 3
+    eval_mlflow_experiment_name: str = (
+        "k8s-agent-evals"  # so MLFLOW_EXPERIMENT_NAME shows real runs
+    )
+    eval_results_dir: Path = Path("eval-results")  # one JSON file per `agent eval`
+
     # Acceptance tests: how long an assertion may keep retrying for state that flips between
     # polls (e.g. CrashLoopBackOff).
     accept_assert_timeout_seconds: PositiveFloat = 30
@@ -123,6 +138,8 @@ class Settings(BaseSettings):
             raise ValueError("AGENT_MAX_MODEL_CALLS can't exceed AGENT_RUN_MAX_MODEL_CALLS")
         if self.max_tool_calls > self.run_max_tool_calls:
             raise ValueError("AGENT_MAX_TOOL_CALLS can't exceed AGENT_RUN_MAX_TOOL_CALLS")
+        if self.eval_pass_min_runs > self.eval_runs_per_scenario:
+            raise ValueError("AGENT_EVAL_PASS_MIN_RUNS can't exceed AGENT_EVAL_RUNS_PER_SCENARIO")
         return self
 
     @property

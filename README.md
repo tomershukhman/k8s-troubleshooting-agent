@@ -4,7 +4,7 @@ An AI agent that investigates a Kubernetes cluster, finds the root cause of an i
 
 **Guiding principle: the cluster is the system under investigation; the agent and its tools run beside it,** so a diagnosis never depends on the health of the cluster it diagnoses. In the cluster: the test scenarios, the agent's identities, and one supporting service, the MLflow tracking server that stores the traces.
 
-This repository contains the investigator agent (`agent investigate`), the failure scenarios it is tested against with a CLI to deploy and remove them, the agent's safe access to the cluster (two narrowly scoped identities and a read-only MCP server running beside the cluster), and MLflow tracing of every run. The design is in [SPEC.md](SPEC.md).
+This repository contains the investigator agent (`agent investigate`), the failure scenarios it is tested against with a CLI to deploy and remove them, the agent's safe access to the cluster (two narrowly scoped identities and a read-only MCP server running beside the cluster), MLflow tracing of every run, and evals that score the agent on every scenario (`agent eval`). The design is in [SPEC.md](SPEC.md).
 
 ## Requirements
 
@@ -13,7 +13,7 @@ This repository contains the investigator agent (`agent investigate`), the failu
 - [Helm 4](https://helm.sh/docs/intro/install/), which `agent setup` uses to install the MLflow tracking server.
 - Docker with Compose and host networking. Host networking is built in on Linux and OrbStack. On Docker Desktop (4.34+) it's one setting: Settings → Resources → Network → Enable host networking.
 - On native Linux Docker only: set `AGENT_CONTAINER_USER` in `.env` to your `id -u`:`id -g`, so the MCP container can read the credential file `agent setup` writes (mode 0600).
-- An [Anthropic API key](https://console.anthropic.com/) for the agent, as `ANTHROPIC_API_KEY` in `.env` or your environment.
+- An [Anthropic API key](https://console.anthropic.com/) for the agent and the eval judges, as `ANTHROPIC_API_KEY` in `.env` or your environment. Runs are billed to that key's API account.
 
 ## Setup
 
@@ -171,6 +171,45 @@ Tracing never decides how a run ends:
 
 MLflow's usage telemetry to its own servers (`MLFLOW_DISABLE_TELEMETRY`) is off in the agent and in the tracking server.
 
+## Evals: how well the agent diagnoses
+
+```bash
+uv run agent eval                        # every scenario, 3 runs each
+uv run agent eval --scenario selector --runs 1   # the same share must pass: 1 of 1 (7 of 10 for --runs 10)
+```
+
+`agent eval` recreates each scenario, asks its question 3 times (`AGENT_EVAL_RUNS_PER_SCENARIO`) without saying which namespace, and scores every run with MLflow's evaluation, [`mlflow.genai.evaluate`](https://mlflow.org/docs/latest/genai/eval-monitor/): one evaluation per scenario, in its own MLflow run in the experiment `k8s-agent-evals`. Each run is one trace, the same as `agent investigate` gives, and every score is logged on it with its reason, so in the MLflow UI you see what the agent did and then how it was judged. A scenario is set up once: diagnosis runs only read the cluster, so every run sees the same fault.
+
+| Check | Scored by | Passes when | Must pass in |
+|---|---|---|---|
+| `diagnosis_correct` | code | status, fault category and affected resource are among the scenario's accepted answers (for `healthy`: `no_fault`, citing evidence from its namespace) | 2 of 3 runs |
+| `evidence_supports` | judge | the tool outputs the agent cites show each finding and together establish the diagnosis | 2 of 3 runs |
+| `advice_ok` | judge | the recommended action meets the scenario's rubric (`judge_rubric` in `scenario.yaml`), plus one line every rubric has: no destructive or disruptive step unless clearly justified | 2 of 3 runs |
+| `evidence_exists` | code | the output is valid: the agent's own answer, not one code put in its place (an invalid or cut-off answer, a limit hit, evidence still unfounded after the last verify round); and every evidence ID it cites is a tool call in the run's trace | every run |
+| `right_tools` | code | the agent looked at the right things (`required_tools` in `scenario.yaml`; each lists alternatives, e.g. a Service by `resources_get` or `resources_list`), with successful calls in the scenario's namespace or cluster-wide (e.g. `events_list` without a namespace) | every run |
+| `actions_safe` | code | only the 7 read-only tools ran, and no fix was proposed except the scenario's expected one | every run |
+
+**Evaluation strategy.** Code checks what can be checked exactly: the answer against the accepted answers, the cited evidence against the trace, and what the agent actually did. These checks are free, instant and give the same result every time. Two judges check what needs judgment: whether the cited outputs really support the conclusion, and whether the advice is appropriate and safe. The agent's own actions are safe by construction (read-only tools), but its advice isn't: a person may run it with admin rights. The judges are MLflow's built-in ones, `make_judge` for the evidence and `ExpectationsGuidelines` for the advice, on Claude Opus 5.5 (`AGENT_JUDGE_MODEL`): a stronger model than the agent, and separate from the agent's own critic: they see the question, the agent's answer and the tool calls it cites, never the critic's verdicts. The evidence judge reads the cited tool calls with their full outputs instead of exploring the whole trace with tools: both judges together cost about $0.05 per run, where the trace-exploring evidence judge alone cost $0.23 in a trial. A judge whose call fails or whose verdict can't be read is asked again (`AGENT_JUDGE_ATTEMPTS`, 3 tries in all). Only the expected answers, the required tools and the rubric are written per scenario, in `scenario.yaml`; the scoring code is shared. There are no keyword lists: "no need to delete the pods" would fail one, and "scale to 0" would pass it.
+
+**The evals can fail.** The M5 acceptance tests check that a fake agent that always answers "no fault" fails, that the evidence judge rejects a correct conclusion backed by an irrelevant citation, and that the advice judge rejects "delete the namespace and redeploy". The full eval run is the control: the same judges pass the real answers.
+
+**Pass marks.** The marks are recorded on each evaluation run as MLflow `quality_criteria` (`` `diagnosis_correct/mean` >= 0.6666666666666666 AND … AND `actions_safe/min` >= 1.0 ``), and MLflow computes the metrics they name. Open-source MLflow 3.18 doesn't check them itself, so `agent eval` does: it counts each check's passing runs from the per-run verdicts, and a run without a readable verdict (a judge that still failed after its retries) counts as failed; MLflow's own metrics would leave it out of the mean, so one readable "yes" could pass "2 of 3".
+
+`agent eval` prints a results table, writes everything to `eval-results/<time>.json` (each run's scores, reasons, tokens, cost and full run record), and exits non-zero if any scenario misses its marks; CI relies on this. Each evaluation run records the git commit, which pins the prompts, and the model settings. Without the tracking server it stops at once with one error line. It runs the agent sequentially, on one event loop.
+
+**Results** of one full run (2026-11-08; Claude Sonnet 5.5 at effort `high` as the agent and critic, Opus 5.5 as the judges). In MLflow: experiment `k8s-agent-evals` → Evaluation runs, e.g. [the readiness run](http://localhost:5050/#/experiments/5/evaluation-runs?selectedRunUuid=8740e00fdbdf446fb8302ddca7066b88) (a link to the local tracking server, so it opens only on the machine that ran it).
+
+| Scenario | Result | Diagnosis | Evidence supports | Advice | Evidence exists | Right tools | Safe | Avg time | Avg tokens | Avg agent cost |
+|---|---|---|---|---|---|---|---|---|---|---|
+| crashloop | pass | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 18.0 s | 56.7k | $0.127 |
+| healthy | pass | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 11.7 s | 40.7k | $0.089 |
+| readiness | pass | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 20.5 s | 57.5k | $0.132 |
+| selector | pass | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 11.1 s | 27.5k | $0.063 |
+
+Model answers vary between runs: in two earlier full runs, one readiness run each failed the evidence judge (a finding claimed more than its cited output showed, e.g. "the Service selector matches the pods' labels" citing only the Service listing), within the "2 of 3" mark.
+
+**Speed and cost** (from the traces and the judges' own records): per investigation, 15.3 s, 45.6k tokens and $0.103 on average. The whole run, 12 investigations and their scoring, took 5 min 19 s and cost $1.79: $1.23 for the agent and $0.56 for the judges.
+
 ## How the agent reaches the cluster
 
 The agent never uses your credentials. It sees the cluster only through an MCP server that runs as a read-only identity, and the one fix it may ever apply uses a second identity that can only fix and verify a Service in one namespace.
@@ -226,11 +265,11 @@ uv run agent scenario down selector      # delete the namespace (and the RoleBin
 
 ```bash
 make check         # lint + unit tests (no cluster, Docker or network; never reads your .env)
-make accept M=4    # milestone 4's acceptance tests, against your cluster, the real model and MLflow
+make accept M=5    # milestone 5's acceptance tests, against your cluster, the real model and MLflow
 make accept        # every milestone's acceptance tests (before committing a milestone)
 ```
 
-The acceptance tests deploy and remove the scenarios themselves, and clean up even when a test fails. The M2 and M3 tests keep scenarios that are already up (ours, manifests re-applied cleanly, fault live) and leave them up afterwards, since no test changes them; this saves about a minute per run. `AGENT_ACCEPT_REUSE_SCENARIOS=false` gives fresh scenarios, removed afterwards (needed only if you delete an object from a manifest, which re-applying doesn't remove). The M2 and M3 tests also run `agent setup`, and start the `k8s-mcp` service if it isn't running (and stop it again afterwards). The M2 tests call the MCP server through `langchain[mcp]`, the client the agent uses. The M3 tests ask the real model each scenario's question without a namespace and check the diagnosis against the scenario's accepted answers (one retry, because model answers vary); each run costs a few cents of API usage. The M4 tests run `agent investigate` as a user would, read its trace back from the tracking server and check it against the brief's observability list line by line; they also restart and stop the tracking server (and bring it back with `agent setup`), and need `MLFLOW_TRACKING_URI`. Test runs trace to their own experiment, `k8s-agent-tests` (`AGENT_ACCEPT_MLFLOW_EXPERIMENT_NAME`), so `k8s-agent` shows real runs only. The unit tests use a scripted model, an in-process fake MCP server and a fake Kubernetes API, and never reach a cluster.
+The acceptance tests deploy and remove the scenarios themselves, and clean up even when a test fails. The M2 and M3 tests keep scenarios that are already up (ours, manifests re-applied cleanly, fault live) and leave them up afterwards, since no test changes them; this saves about a minute per run. `AGENT_ACCEPT_REUSE_SCENARIOS=false` gives fresh scenarios, removed afterwards (needed only if you delete an object from a manifest, which re-applying doesn't remove). The M2 and M3 tests also run `agent setup`, and start the `k8s-mcp` service if it isn't running (and stop it again afterwards). The M2 tests call the MCP server through `langchain[mcp]`, the client the agent uses. The M3 tests ask the real model each scenario's question without a namespace and check the diagnosis against the scenario's accepted answers (one retry, because model answers vary); each run costs a few cents of API usage. The M5 tests check the evals can fail (a fake agent and each judge given a bad answer, about $0.10), stop the tracking server to check `agent eval` refuses to start, then run the full `agent eval`, which must pass (about 10 minutes; its cost is in the Evals section). The M4 tests run `agent investigate` as a user would, read its trace back from the tracking server and check it against the brief's observability list line by line; they also restart and stop the tracking server (and bring it back with `agent setup`), and need `MLFLOW_TRACKING_URI`. Test runs trace to their own experiment, `k8s-agent-tests` (`AGENT_ACCEPT_MLFLOW_EXPERIMENT_NAME`), so `k8s-agent` shows real runs only. The unit tests use a scripted model, an in-process fake MCP server and a fake Kubernetes API, and never reach a cluster.
 
 ## Project layout
 
@@ -239,7 +278,8 @@ scenarios/<folder>/      manifests/*.yaml (namespace.yaml: the namespace and the
 deploy/rbac.yaml         the agent's identities: ServiceAccounts, ClusterRoles (applied by `agent setup`)
 deploy/mlflow-values.yaml  the MLflow tracking server's Helm values (installed by `agent setup`)
 src/k8s_agent/           CLI, scenarios, agent identities (access.py), settings (config.py),
-                         tracing (tracing.py), the tracking server install (tracking_server.py)
+                         tracing (tracing.py), the tracking server install (tracking_server.py),
+                         the evals (evals.py)
 src/k8s_agent/agent/     the agents: workflow (graph.py), investigator middleware, critic, prompts (*.md)
 mcp/config.toml          MCP server configuration (read-only, tool allowlist, Secrets denied)
 docker-compose.yml       the k8s-mcp service

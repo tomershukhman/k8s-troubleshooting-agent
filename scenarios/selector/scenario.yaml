@@ -5,9 +5,9 @@ expected:
   fault_categories: [selector_mismatch]
   resources:
     - {kind: Service, name: checkout}
-required_tools:
-  - {tool: resources_get, args: {kind: Service}}
-  - {tool: pods_list_in_namespace}
+required_tools:  # each entry: alternatives, any one satisfies it
+  - [{tool: resources_get, args: {kind: Service}}, {tool: resources_list, args: {kind: Service}}]
+  - [{tool: pods_list_in_namespace}, {tool: resources_list, args: {kind: Pod}}]
 judge_rubric:
   - "Names the mismatch between the Service selector (app=check-out) and the pod label (app=checkout)"
   - "Recommends fixing the Service selector rather than recreating or relabelling the pods"

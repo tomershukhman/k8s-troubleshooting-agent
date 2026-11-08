@@ -44,6 +44,13 @@ class ExpectedFix(Strict):
     selector: dict[str, str]
 
 
+class ToolUse(Strict):
+    """A tool call the agent should make: this tool, with at least these arguments."""
+
+    tool: str
+    args: dict[str, str] = {}
+
+
 class ReadyWhen(Strict):
     """Proof the fault is live: at least this many pods Ready, Running but not Ready, and
     restarts of one container."""
@@ -57,8 +64,10 @@ class ScenarioSpec(Strict):
     question: str
     ready_when: ReadyWhen
     expected: Expected
-    required_tools: list[dict[str, Any]] = Field(min_length=1)  # for the evals (M5)
-    judge_rubric: list[str] = Field(min_length=1)
+    # What the agent must have looked at (evals): each entry is a list of alternatives, any one
+    # of which satisfies it.
+    required_tools: list[list[ToolUse]] = Field(min_length=1)
+    judge_rubric: list[str] = Field(min_length=1)  # the advice judge's guidelines (evals)
     expected_fix: ExpectedFix | None = None
 
 

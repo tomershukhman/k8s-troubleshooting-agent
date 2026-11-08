@@ -33,6 +33,11 @@ class Tracing:
         base = f"{self.uri.rstrip('/')}/#/experiments/{self.experiment_id}/traces"
         return f"{base}?selectedEvaluationId={trace_id}"
 
+    def run_url(self, run_id: str) -> str:
+        """An evaluation run in the MLflow UI: its scores, and each scored trace."""
+        base = f"{self.uri.rstrip('/')}/#/experiments/{self.experiment_id}/evaluation-runs"
+        return f"{base}?selectedRunUuid={run_id}"
+
 
 _on: Tracing | None = None  # mirrors MLflow's own process-wide state (autolog, tracking URI)
 
@@ -49,6 +54,8 @@ def enable(settings: Settings) -> Tracing | None:
     os.environ["MLFLOW_HTTP_REQUEST_TIMEOUT"] = str(settings.mlflow_http_request_timeout)
     os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] = str(settings.mlflow_http_request_max_retries)
     os.environ["MLFLOW_DISABLE_TELEMETRY"] = str(settings.mlflow_disable_telemetry).lower()
+    # The full mlflow package (installed for the evals) logs a hint for coding agents on import.
+    os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "true")
     import mlflow
 
     mlflow.set_tracking_uri(uri)

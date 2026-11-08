@@ -1,10 +1,13 @@
 """`agent` command line. Interface only: core modules never import this."""
 
 import asyncio
+import json
 import logging
+import math
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, redirect_stdout
+from datetime import UTC, datetime
 from typing import Annotated, NoReturn
 
 import typer
@@ -132,6 +135,103 @@ def investigate(
     else:
         Console().print(ui.summary(result))
     if result.status is RunStatus.failed:
+        raise typer.Exit(EXIT_FAILED)
+
+
+@app.command("eval")
+def eval_(
+    scenario: Annotated[
+        str | None, typer.Option("--scenario", help="Only this one (default: every scenario)")
+    ] = None,
+    runs: Annotated[
+        int | None,
+        typer.Option(
+            "--runs", min=1, help="Runs per scenario (default: AGENT_EVAL_RUNS_PER_SCENARIO)"
+        ),
+    ] = None,
+) -> None:
+    """Run the evals with mlflow.genai.evaluate and print the results.
+
+    For each scenario: recreate it, ask its question --runs times (no namespace given), and
+    score every run with the exact checks and the two judges. Scores land on each run's trace
+    in MLflow; the results also go to AGENT_EVAL_RESULTS_DIR. Needs the tracking server.
+    Exit codes:
+
+    0: every scenario passed.
+    1: a scenario missed its pass marks.
+    2: nothing ran (settings, tracking server, MCP server, or the eval extra missing)."""
+    s = _settings(EXIT_NOT_STARTED)
+    if runs:  # the same share of runs must pass: 2 of 3 is 7 of 10, and 1 of 1
+        least = math.ceil(runs * s.eval_pass_min_runs / s.eval_runs_per_scenario)
+        s = s.model_copy(update={"eval_runs_per_scenario": runs, "eval_pass_min_runs": least})
+    setup_logging(s.log_level, s.log_file, enabled=bool(s.log_file) or not sys.stderr.isatty())
+    try:
+        from k8s_agent import evals  # the full mlflow package: the `eval` extra
+    except ImportError as e:
+        _fail(f"agent eval needs the eval extra (uv sync --extra eval): {e}", EXIT_NOT_STARTED)
+    try:
+        trace = tracing.enable(
+            s.model_copy(update={"mlflow_experiment_name": s.eval_mlflow_experiment_name})
+        )
+    except tracing.TracingUnavailable as e:
+        _fail(str(e), EXIT_NOT_STARTED)
+    if trace is None:
+        _fail("the evals store their results in MLflow: set MLFLOW_TRACKING_URI", EXIT_NOT_STARTED)
+    evals.configure(s)
+    with _clean_errors():
+        found = scenarios.load_all(s.scenarios_dir)
+        if scenario:
+            found = {scenario: scenarios.get_scenario(s.scenarios_dir, scenario)}
+        c = admin_clients(s)
+    started = datetime.now(UTC)
+    path = s.eval_results_dir / f"{started:%Y%m%dT%H%M%SZ}.json"
+    agent, results = evals.Agent(s), []
+
+    def save() -> None:  # after each scenario, so a later failure keeps what was scored
+        report = {
+            "started_at": started.isoformat(),
+            "passed": all(r.passed for r in results),
+            "settings": {**s.model_settings, "judge_model": s.judge_model,
+                         "runs": s.eval_runs_per_scenario, "pass_min_runs": s.eval_pass_min_runs},
+            "scenarios": [
+                {"name": r.name, "passed": r.passed, "failures": r.failures, "metrics": r.metrics,
+                 "mlflow_run": trace.run_url(r.run_id), "runs": r.runs}
+                for r in results
+            ],
+        }  # fmt: skip
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2, default=str))
+
+    try:
+        for scn in found.values():
+            with _clean_errors():
+                scenarios.up(
+                    scn,
+                    c,
+                    ready_timeout=s.scenario_ready_timeout_seconds,
+                    delete_timeout=s.scenario_delete_timeout_seconds,
+                    poll=s.scenario_poll_seconds,
+                    progress=lambda msg, name=scn.name: _say(f"{name}: {msg}"),
+                )
+            _say(f"{scn.name}: {s.eval_runs_per_scenario} runs, then scoring")
+            with redirect_stdout(sys.stderr):  # MLflow prints its own summary; stdout: the table
+                result = evals.evaluate(scn, s, agent)
+            results.append(result)
+            save()
+            verdict = "passed" if result.passed else "FAILED: " + "; ".join(result.failures)
+            _say(f"{scn.name}: {verdict}\n  {trace.run_url(result.run_id)}")
+    except McpUnavailable as e:
+        _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", EXIT_NOT_STARTED)
+    except NotStarted as e:
+        _fail(str(e), EXIT_NOT_STARTED)
+    finally:
+        agent.close()
+        tracing.flush()
+    out = Console()
+    out.width = max(out.width, 140)  # the table, unwrapped, when piped (80 columns by default)
+    out.print(ui.eval_table(results))
+    _say(f"results: {path}")
+    if not all(r.passed for r in results):
         raise typer.Exit(EXIT_FAILED)
 
 

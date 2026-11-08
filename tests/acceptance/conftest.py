@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from fastmcp import Client as FastMCPClient
+from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 from langchain_core._api import suppress_langchain_beta_warning
 from typer.testing import CliRunner
@@ -150,3 +151,28 @@ def cluster(kube: AdminClients, request):
         print("starting k8s-mcp (stopped again afterwards)")
     compose("up", "-d", "--wait", "k8s-mcp")
     return kube
+
+
+def mlflow_deployment(kube: AdminClients) -> tuple[client.AppsV1Api, client.V1Deployment]:
+    s, apps = get_settings(), client.AppsV1Api(kube.api)
+    selector = f"app.kubernetes.io/instance={s.mlflow_release}"
+    [deployment] = apps.list_namespaced_deployment(
+        s.mlflow_namespace, label_selector=selector
+    ).items
+    return apps, deployment
+
+
+@pytest.fixture
+def tracking_server_stopped(kube: AdminClients, request) -> None:
+    """The MLflow tracking server scaled to zero, until the test ends (`agent setup` brings it
+    back, ready)."""
+    apps, deployment = mlflow_deployment(kube)
+    ns, name = deployment.metadata.namespace, deployment.metadata.name
+    request.addfinalizer(lambda: agent("setup"))
+    apps.patch_namespaced_deployment_scale(name, ns, {"spec": {"replicas": 0}})
+
+    def stopped():
+        pods = kube.core.list_namespaced_pod(ns, label_selector="app.kubernetes.io/name=mlflow")
+        assert not pods.items
+
+    eventually(stopped)

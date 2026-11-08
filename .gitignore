@@ -20,3 +20,6 @@ build/
 .DS_Store
 .idea/
 .vscode/
+
+# `agent eval` results (the scores are also in MLflow)
+eval-results/

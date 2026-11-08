@@ -6,9 +6,9 @@ expected:
   resources:
     - {kind: ConfigMap, name: orders-config}
     - {kind: Deployment, name: orders}
-required_tools:
-  - {tool: pods_log}  # not previous=true: on some runtimes the previous log is gone after a few restarts
-  - {tool: resources_get, args: {kind: ConfigMap}}
+required_tools:  # each entry: alternatives, any one satisfies it
+  - [{tool: pods_log}]  # not previous=true: on some runtimes the previous log is gone after a few restarts
+  - [{tool: resources_get, args: {kind: ConfigMap}}]
 judge_rubric:
   - "Names the misspelled ConfigMap key (DATABSE_URL instead of DATABASE_URL) as the cause"
   - "Recommends renaming the key to DATABASE_URL in ConfigMap orders-config (restarting the rollout is optional: the crashing container re-reads envFrom on its next start)"

@@ -5,9 +5,10 @@ expected:
   fault_categories: [probe_failure]
   resources:
     - {kind: Deployment, name: catalog}
-required_tools:
-  - {tool: events_list}
-  - {tool: resources_get, args: {kind: Deployment}}
+required_tools:  # each entry: alternatives, any one satisfies it
+  - [{tool: events_list}]
+  # the probe spec: in the Deployment, or in a pod made from it
+  - [{tool: resources_get, args: {kind: Deployment}}, {tool: pods_get}, {tool: resources_get, args: {kind: Pod}}]
 judge_rubric:
   - "Names the readiness probe path /healthz returning 404 as the reason the pods are not Ready"
   - "Recommends pointing the probe at a path the app serves (e.g. /) or adding the endpoint"

@@ -192,3 +192,52 @@ def summary(result: RunResult) -> RenderableType:
     return Panel(
         Group(*parts), title=title, title_align="left", subtitle=footer, border_style=color
     )
+
+
+# The eval checks, in the results table's order: (MLflow scorer, column header).
+EVAL_COLUMNS = (
+    ("diagnosis_correct", "Diagnosis"),
+    ("evidence_supports", "Evidence\nsupports"),
+    ("advice_ok", "Advice"),
+    ("evidence_exists", "Evidence\nexists"),
+    ("right_tools", "Right\ntools"),
+    ("actions_safe", "Safe"),
+)
+
+
+def eval_table(results: list[Any]) -> Table:
+    """`agent eval`'s results (evals.ScenarioResult): runs passed per check, then speed and
+    cost per investigation (from the traces) and the judges' cost."""
+    table = Table(title="Eval results", header_style="bold")
+    table.add_column("Scenario")
+    table.add_column("Result")
+    for _, header in EVAL_COLUMNS:
+        table.add_column(header, justify="right")
+    for header in ("Avg time", "Avg tokens", "Avg cost", "Judges"):
+        table.add_column(header, justify="right")
+    every = [run for r in results for run in r.runs]
+    for r in results:
+        passed = [f"{r.passes.get(name, 0)}/{r.planned}" for name, _ in EVAL_COLUMNS]
+        table.add_row(
+            r.name,
+            "[green]pass[/]" if r.passed else "[red]FAIL[/]",
+            *passed,
+            *_costs(r.runs),
+        )
+    table.add_section()
+    table.add_row("All", f"{sum(r.passed for r in results)}/{len(results)} pass",
+                  *[""] * len(EVAL_COLUMNS), *_costs(every, total=True))  # fmt: skip
+    return table
+
+
+def _costs(runs: list[dict[str, Any]], total: bool = False) -> list[str]:
+    n = len(runs) or 1
+    agent_cost = sum(r["cost_usd"] for r in runs)
+    judges = sum(r["judge_cost_usd"] for r in runs)
+    cost = f"${agent_cost / n:.3f}" + (f" (${agent_cost:.2f} total)" if total else "")
+    return [
+        f"{sum(r['duration_ms'] for r in runs) / n / 1000:.1f} s",
+        f"{sum(r['tokens'] for r in runs) / n / 1000:.1f}k",
+        cost,
+        f"${judges:.2f}",
+    ]

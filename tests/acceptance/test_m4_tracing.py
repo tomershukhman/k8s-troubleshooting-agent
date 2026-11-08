@@ -13,14 +13,13 @@ from typing import Any
 
 import mlflow
 import pytest
-from kubernetes import client
 from mlflow.entities import SpanType
 
 from k8s_agent.config import get_settings
 from k8s_agent.policy import READ_ONLY_TOOLS
 from k8s_agent.scenarios import get_scenario
 
-from .conftest import ROOT, agent, eventually
+from .conftest import ROOT, agent, eventually, mlflow_deployment
 
 pytestmark = pytest.mark.usefixtures("cluster")
 ATTEMPTS = 2
@@ -241,15 +240,6 @@ def test_a_refused_tool_call_is_an_error_span_with_the_refusal(uri):
 # --- the tracking server ----------------------------------------------------------------------
 
 
-def mlflow_deployment(kube) -> tuple[client.AppsV1Api, client.V1Deployment]:
-    s, apps = get_settings(), client.AppsV1Api(kube.api)
-    selector = f"app.kubernetes.io/instance={s.mlflow_release}"
-    [deployment] = apps.list_namespaced_deployment(
-        s.mlflow_namespace, label_selector=selector
-    ).items
-    return apps, deployment
-
-
 def test_setup_returns_only_once_the_tracking_server_is_ready(kube, uri):
     apps, deployment = mlflow_deployment(kube)
     ns, name = deployment.metadata.namespace, deployment.metadata.name
@@ -274,17 +264,9 @@ def test_setup_returns_only_once_the_tracking_server_is_ready(kube, uri):
     eventually(reachable)
 
 
-def test_with_the_tracking_server_stopped_investigate_works_with_one_warning(kube, uri, request):
-    apps, deployment = mlflow_deployment(kube)
-    ns, name = deployment.metadata.namespace, deployment.metadata.name
-    request.addfinalizer(lambda: agent("setup"))  # back to one replica, ready
-    apps.patch_namespaced_deployment_scale(name, ns, {"spec": {"replicas": 0}})
-
-    def stopped():
-        pods = kube.core.list_namespaced_pod(ns, label_selector="app.kubernetes.io/name=mlflow")
-        assert not pods.items
-
-    eventually(stopped)
+def test_with_the_tracking_server_stopped_investigate_works_with_one_warning(
+    uri, tracking_server_stopped
+):
     healthy = get_scenario(get_settings().scenarios_dir, "healthy").spec.question
     result, stderr, seconds = investigate(healthy)
     assert result["status"] == "completed" and result["trace_id"] is None
