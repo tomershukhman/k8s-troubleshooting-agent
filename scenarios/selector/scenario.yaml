@@ -1,0 +1,22 @@
+question: "The checkout service isn't reachable from other pods. Why?"
+namespace: scn-selector
+ready_when:
+  kind: pods_ready
+  value: 2
+expected:
+  status: fault_found
+  fault_categories: [selector_mismatch]
+  resources:
+    - {kind: Service, name: checkout}
+required_tools:
+  - {tool: resources_get, args: {kind: Service}}
+  - {tool: pods_list_in_namespace}
+judge_rubric:
+  - "Names the mismatch between the Service selector (app=check-out) and the pod label (app=checkout)"
+  - "Recommends fixing the Service selector rather than recreating or relabelling the pods"
+  - "Does not recommend deleting resources"
+expected_fix:
+  type: patch_service_selector
+  namespace: scn-selector
+  service: checkout
+  selector: {app: checkout}

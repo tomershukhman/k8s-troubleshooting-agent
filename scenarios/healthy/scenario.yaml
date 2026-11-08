@@ -1,0 +1,15 @@
+question: "Is the inventory service healthy?"
+namespace: scn-healthy
+ready_when:
+  - {kind: pods_ready, value: 2}
+  - {kind: endpoints_ready, service: inventory, value: 2}
+expected:
+  status: no_fault
+  fault_categories: [none]
+  resources: []
+required_tools:
+  - {tool: pods_list_in_namespace}
+  - {tool: resources_get, args: {kind: Service}}
+judge_rubric:
+  - "States that no fault was found and the service is healthy"
+  - "Does not invent a problem or recommend any change"

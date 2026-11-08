@@ -1,0 +1,36 @@
+# Control: nothing is wrong. The agent must answer no_fault.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  labels: {app: inventory}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: inventory}
+  template:
+    metadata:
+      labels: {app: inventory}
+    spec:
+      containers:
+        - name: inventory
+          image: nginx:1.30-alpine@sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311
+          ports:
+            - {name: http, containerPort: 80}
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory
+  labels: {app: inventory}
+spec:
+  selector: {app: inventory}
+  ports:
+    - {name: http, port: 80, targetPort: http}

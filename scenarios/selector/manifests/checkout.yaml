@@ -1,0 +1,37 @@
+# Fault: the Service selects app=check-out, but the pods are labelled app=checkout,
+# so the Service has no endpoints while the pods themselves are healthy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  labels: {app: checkout}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: checkout}
+  template:
+    metadata:
+      labels: {app: checkout}
+    spec:
+      containers:
+        - name: checkout
+          image: nginx:1.30-alpine@sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311
+          ports:
+            - {name: http, containerPort: 80}
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+  labels: {app: checkout}
+spec:
+  selector: {app: check-out}
+  ports:
+    - {name: http, port: 80, targetPort: http}

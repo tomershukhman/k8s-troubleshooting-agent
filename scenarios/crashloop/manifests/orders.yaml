@@ -1,0 +1,42 @@
+# Fault: the ConfigMap key is misspelled (DATABSE_URL). envFrom therefore never sets
+# DATABASE_URL, the app exits 1 on start, and the pod goes into CrashLoopBackOff.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-config
+data:
+  DATABSE_URL: "postgres://orders@orders-db:5432/orders"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  labels: {app: orders}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: orders}
+  template:
+    metadata:
+      labels: {app: orders}
+    spec:
+      containers:
+        - name: orders
+          image: busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "orders-service v1.4.2 starting"
+              echo "loading configuration from environment"
+              if [ -z "$DATABASE_URL" ]; then
+                echo "FATAL: DATABASE_URL not set"
+                exit 1
+              fi
+              echo "connected to $DATABASE_URL"
+              exec sleep 3600
+          envFrom:
+            - configMapRef: {name: orders-config}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 32Mi}

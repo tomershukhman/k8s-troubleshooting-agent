@@ -1,0 +1,39 @@
+[project]
+name = "k8s-agent"
+version = "0.1.0"
+description = "Kubernetes troubleshooting agent: read-only investigation, evals, one approved fix"
+authors = [
+    { name = "Tomer Shukhman", email = "tomer.shukhman@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "kubernetes>=37.0.2,<38",
+    "pydantic>=2.14.3",
+    "pydantic-settings>=2.16.2",
+    "pyyaml>=6.0.3",
+    "typer>=0.28.0",
+]
+
+[project.scripts]
+agent = "k8s_agent.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.3,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+[tool.pytest.ini_options]
+# Bare `pytest` runs unit tests only; acceptance tests need a cluster (`make accept`).
+testpaths = ["tests/unit"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]

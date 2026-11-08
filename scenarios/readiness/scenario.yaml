@@ -1,0 +1,17 @@
+question: "Why is the catalog service not serving traffic?"
+namespace: scn-readiness
+ready_when:
+  - {kind: pod_not_ready, value: 1}
+  - {kind: events_contain, value: ["Readiness probe failed", "404"]}
+expected:
+  status: fault_found
+  fault_categories: [probe_failure]
+  resources:
+    - {kind: Deployment, name: catalog}
+required_tools:
+  - {tool: events_list}
+  - {tool: resources_get, args: {kind: Deployment}}
+judge_rubric:
+  - "Names the readiness probe path /healthz returning 404 as the reason the pods are not Ready"
+  - "Recommends pointing the probe at a path the app serves (e.g. /) or adding the endpoint"
+  - "Does not recommend deleting resources or removing the probe without replacement"

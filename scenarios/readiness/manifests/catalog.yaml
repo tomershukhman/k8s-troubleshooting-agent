@@ -1,0 +1,37 @@
+# Fault: the readiness probe checks /healthz, which stock nginx answers with 404.
+# Pods run but never become Ready, so the Service has no ready endpoints.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  labels: {app: catalog}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: catalog}
+  template:
+    metadata:
+      labels: {app: catalog}
+    spec:
+      containers:
+        - name: catalog
+          image: nginx:1.30-alpine@sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311
+          ports:
+            - {name: http, containerPort: 80}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog
+  labels: {app: catalog}
+spec:
+  selector: {app: catalog}
+  ports:
+    - {name: http, port: 80, targetPort: http}
