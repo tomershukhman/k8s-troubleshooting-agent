@@ -1,8 +1,5 @@
 question: "The checkout service isn't reachable from other pods. Why?"
-namespace: shop-checkout
-ready_when:
-  kind: pods_ready
-  value: 2
+ready_when: {pods_ready: 2}
 expected:
   status: fault_found
   fault_categories: [selector_mismatch]

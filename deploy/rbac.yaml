@@ -1,0 +1,61 @@
+# The agent's identities (SPEC 3.5), applied by `agent setup`. The per-namespace RoleBindings
+# live with each scenario (scenarios/<folder>/manifests/namespace.yaml): to let the agent read
+# another namespace, add a RoleBinding there. The reader's is to Kubernetes' built-in `view`
+# ClusterRole: read access to most objects, but not Secrets (credentials, incl. other
+# ServiceAccounts' tokens), Roles or RoleBindings; no writes, no exec/attach/port-forward.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-agent
+  labels: {app.kubernetes.io/managed-by: k8s-agent-setup}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reader
+  namespace: k8s-agent
+  labels: {app.kubernetes.io/managed-by: k8s-agent-setup}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: remediator
+  namespace: k8s-agent
+  labels: {app.kubernetes.io/managed-by: k8s-agent-setup}
+---
+# reader, bound cluster-wide: find where to look, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-agent-list-namespaces
+  labels: {app.kubernetes.io/managed-by: k8s-agent-setup}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8s-agent-list-namespaces-reader
+  labels: {app.kubernetes.io/managed-by: k8s-agent-setup}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: k8s-agent-list-namespaces}
+subjects: [{kind: ServiceAccount, name: reader, namespace: k8s-agent}]
+---
+# remediator, bound only where fixes are allowed (shop-checkout). Used only by the fix tool
+# (M6): what fixing a selector and verifying it need, nothing more.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-agent-remediate
+  labels: {app.kubernetes.io/managed-by: k8s-agent-setup}
+rules:
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list]

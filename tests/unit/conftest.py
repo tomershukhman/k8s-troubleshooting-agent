@@ -1,6 +1,7 @@
-"""Every unit test runs isolated from the developer's machine: no AGENT_* variables or
-KUBECONFIG from the shell, no `.env` (the working directory is an empty temp folder), and the
-scenarios folder by absolute path."""
+"""Every unit test runs isolated from the developer's machine: no AGENT_* variables,
+KUBECONFIG, model API key or tracing settings from the shell, no `.env` (the working directory
+is an empty temp folder), a kubeconfig that doesn't exist (so nothing can reach a cluster), and
+the scenarios folder and RBAC file by absolute path."""
 
 import os
 from pathlib import Path
@@ -15,10 +16,27 @@ REPO = Path(__file__).resolve().parents[2]
 @pytest.fixture(autouse=True)
 def isolated_settings(monkeypatch, tmp_path):
     for key in list(os.environ):
-        if key.startswith("AGENT_") or key == "KUBECONFIG":
+        if key.startswith(("AGENT_", "LANGSMITH_", "LANGCHAIN_", "LANGFUSE_")) or key in (
+            "KUBECONFIG",
+            "ANTHROPIC_API_KEY",
+        ):
             monkeypatch.delenv(key)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_KUBECONFIG", str(tmp_path / "no-kubeconfig"))  # never a cluster
     monkeypatch.setenv("AGENT_SCENARIOS_DIR", str(REPO / "scenarios"))
+    monkeypatch.setenv("AGENT_RBAC_FILE", str(REPO / "deploy" / "rbac.yaml"))
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def env(monkeypatch):
+    """Set AGENT_* settings for one test: env(max_tool_calls="2")."""
+
+    def set_env(**values: str) -> None:
+        for key, value in values.items():
+            monkeypatch.setenv(f"AGENT_{key.upper()}", value)
+        get_settings.cache_clear()
+
+    return set_env

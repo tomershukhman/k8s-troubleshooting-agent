@@ -2,6 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  namespace: shop-inventory
   name: inventory
   labels: {app: inventory}
 spec:
@@ -28,6 +29,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  namespace: shop-inventory
   name: inventory
   labels: {app: inventory}
 spec:

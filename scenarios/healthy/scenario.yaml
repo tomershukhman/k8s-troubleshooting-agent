@@ -1,8 +1,5 @@
 question: "Is the inventory service healthy?"
-namespace: shop-inventory
-ready_when:
-  - {kind: pods_ready, value: 2}
-  - {kind: endpoints_ready, service: inventory, value: 2}
+ready_when: {pods_ready: 2}
 expected:
   status: no_fault
   fault_categories: [none]

@@ -1,0 +1,12 @@
+# The namespace, labelled as ours (`scenario up|down` touch no other), and the agent's access.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop-inventory
+  labels: {app.kubernetes.io/part-of: k8s-agent-demo}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: k8s-agent-reader, namespace: shop-inventory}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{kind: ServiceAccount, name: reader, namespace: k8s-agent}]

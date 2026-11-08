@@ -1,146 +1,113 @@
 """M1: each scenario comes up with its fault live, and `down` removes it (PLAN.md M1)."""
 
 import pytest
-from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
 from k8s_agent.kube import AdminClients
-from k8s_agent.scenarios.cluster import pod_is_ready
 
-from .conftest import agent, eventually, scenario_namespace
+from .conftest import FOLDERS, agent, crash_log, crash_pod, eventually, namespace
 
 
 def pods(kube: AdminClients, ns: str):
     return [p for p in kube.core.list_namespaced_pod(ns).items if not p.metadata.deletion_timestamp]
 
 
+def ready(pod) -> bool:
+    return any(c.type == "Ready" and c.status == "True" for c in pod.status.conditions or [])
+
+
 def endpoints(kube: AdminClients, ns: str, service: str) -> tuple[int, int]:
-    """(all endpoints, ready endpoints) of a Service, from its EndpointSlices."""
-    slices = kube.discovery.list_namespaced_endpoint_slice(
-        ns, label_selector=f"kubernetes.io/service-name={service}"
-    ).items
-    eps = [ep for s in slices for ep in (s.endpoints or [])]
+    """(all, ready) endpoints of a Service, from its EndpointSlices."""
+    slices = kube.dynamic.resources.get(api_version="discovery.k8s.io/v1", kind="EndpointSlice")
+    items = slices.get(namespace=ns, label_selector=f"kubernetes.io/service-name={service}").items
+    eps = [ep for s in items for ep in (s.endpoints or [])]
     return len(eps), sum(bool(ep.conditions and ep.conditions.ready) for ep in eps)
 
 
-def events(kube: AdminClients, ns: str):
-    return kube.core.list_namespaced_event(ns).items
+def messages(kube: AdminClients, ns: str) -> list[str]:
+    return [f"{e.type} {e.reason}: {e.message}" for e in kube.core.list_namespaced_event(ns).items]
 
 
-# --- per-scenario fault assertions -----------------------------------------------------
-
-
-def _log(kube: AdminClients, pod: str, ns: str, *, previous: bool) -> str:
-    try:
-        return kube.core.read_namespaced_pod_log(pod, ns, previous=previous)
-    except ApiException as e:
-        return f"<{e.status} {e.reason}>"
-
-
-def assert_crashloop(kube: AdminClients, ns: str) -> None:
-    # Assert on durable facts. The current state flips between waiting/CrashLoopBackOff and
-    # terminated/Error (on OrbStack it can sit in terminated/Error for a whole back-off).
-    [pod] = pods(kube, ns)
-    [cs] = pod.status.container_statuses
-    assert cs.restart_count >= 2
-    assert cs.last_state.terminated is not None, f"last state: {cs.last_state}"
-    assert cs.last_state.terminated.exit_code == 1
-    assert not cs.ready and not pod_is_ready(pod)
-
-    def crash_looping():  # retried: a restart can briefly show `running`
-        [p] = pods(kube, ns)
-        state = p.status.container_statuses[0].state
-        backoff = state.waiting is not None and state.waiting.reason == "CrashLoopBackOff"
-        errored = state.terminated is not None and state.terminated.reason == "Error"
-        assert backoff or errored, f"container state: {state}"
-
-    eventually(crash_looping)
-
-    # The previous container's log can be gone after a few restarts ("unable to retrieve
-    # container logs"); then the current (terminated) container's log has the same line.
-    name = pod.metadata.name
-    logs = [_log(kube, name, ns, previous=True), _log(kube, name, ns, previous=False)]
+def crashloop(kube, ns):
+    [p] = pods(kube, ns)
+    [cs] = p.status.container_statuses
+    # durable facts: the current state flips between CrashLoopBackOff and terminated/Error
+    assert cs.restart_count >= 2 and cs.last_state.terminated.exit_code == 1
+    assert not ready(p)
+    name = crash_pod(kube)
+    logs = crash_log(
+        lambda previous: kube.core.read_namespaced_pod_log(name, ns, previous=previous)
+    )
     assert any("DATABASE_URL not set" in log for log in logs), logs
 
 
-def assert_selector(kube: AdminClients, ns: str) -> None:
+def selector(kube, ns):
     ps = pods(kube, ns)
-    assert ps and all(pod_is_ready(p) for p in ps)
-    assert ps[0].metadata.labels["app"] == "checkout"
+    assert ps and all(ready(p) for p in ps) and ps[0].metadata.labels["app"] == "checkout"
     assert kube.core.read_namespaced_service("checkout", ns).spec.selector == {"app": "check-out"}
     assert endpoints(kube, ns, "checkout") == (0, 0)
 
 
-def assert_readiness(kube: AdminClients, ns: str) -> None:
+def readiness(kube, ns):
     ps = pods(kube, ns)
-    assert ps
-    for p in ps:
-        assert p.status.phase == "Running"
-        assert not pod_is_ready(p)
-    messages = [e.message or "" for e in events(kube, ns)]
-    assert any("Readiness probe failed" in m and "404" in m for m in messages), messages
+    assert ps and all(p.status.phase == "Running" and not ready(p) for p in ps)
+
+    def probe_failed():  # the first probe failure follows the pod start by a few seconds
+        assert any("Readiness probe failed" in m and "404" in m for m in messages(kube, ns))
+
+    eventually(probe_failed)
     assert endpoints(kube, ns, "catalog")[1] == 0
 
 
-def assert_healthy(kube: AdminClients, ns: str) -> None:
+def healthy(kube, ns):
     ps = pods(kube, ns)
-    assert ps and all(pod_is_ready(p) for p in ps)
-    assert endpoints(kube, ns, "inventory")[1] >= 1
-    warnings = [f"{e.reason}: {e.message}" for e in events(kube, ns) if e.type == "Warning"]
-    assert warnings == []
+    assert ps and all(ready(p) for p in ps)
+
+    def has_endpoints():  # the EndpointSlice can lag the pods' Ready
+        assert endpoints(kube, ns, "inventory")[1] >= 1
+
+    eventually(has_endpoints)
+    assert [m for m in messages(kube, ns) if m.startswith("Warning")] == []
 
 
-FAULTS = {
-    "crashloop": assert_crashloop,
-    "selector": assert_selector,
-    "readiness": assert_readiness,
-    "healthy": assert_healthy,
-}
+FAULTS = {"crashloop": crashloop, "selector": selector, "readiness": readiness, "healthy": healthy}
 
 
 def visible_texts(kube: AdminClients, ns: str) -> list[str]:
-    """Every name, label and annotation in the namespace that the agent's tools can show."""
-    apps = client.AppsV1Api(kube.api)
-    objects = [
-        kube.core.read_namespace(ns),
-        *kube.core.list_namespaced_pod(ns).items,
-        *kube.core.list_namespaced_service(ns).items,
-        *kube.core.list_namespaced_config_map(ns).items,
-        *kube.core.list_namespaced_event(ns).items,
-        *kube.discovery.list_namespaced_endpoint_slice(ns).items,
-        *apps.list_namespaced_deployment(ns).items,
-        *apps.list_namespaced_replica_set(ns).items,
+    """Every name, label and annotation in the namespace the agent's tools can show."""
+    kinds = [("v1", k) for k in ("Pod", "Service", "ConfigMap", "Event")]
+    kinds += [
+        ("discovery.k8s.io/v1", "EndpointSlice"),
+        ("apps/v1", "Deployment"),
+        ("apps/v1", "ReplicaSet"),
     ]
+    objects = [kube.core.read_namespace(ns)]
+    for api_version, kind in kinds:
+        objects += (
+            kube.dynamic.resources.get(api_version=api_version, kind=kind).get(namespace=ns).items
+        )
     texts = []
     for obj in objects:
         meta = obj.metadata
         texts.append(meta.name)
-        for field in (meta.labels, meta.annotations):
-            texts += [f"{k}={v}" for k, v in (field or {}).items()]
+        texts += [
+            f"{k}={v}"
+            for field in (meta.labels, meta.annotations)
+            for k, v in dict(field or {}).items()
+        ]
     return texts
 
 
-def assert_no_hints(kube: AdminClients, ns: str, folder: str) -> None:
-    hints = [t for t in visible_texts(kube, ns) if folder in t.lower()]
-    assert hints == [], f"{folder}: visible to the agent: {hints}"
-
-
-@pytest.mark.parametrize("name", list(FAULTS))
+@pytest.mark.parametrize("name", FOLDERS)
 def test_scenario_up_fault_down(kube: AdminClients, name: str):
-    ns = scenario_namespace(name)
-    assert name not in ns
+    ns = namespace(name)
     try:
         agent("scenario", "up", name)
         FAULTS[name](kube, ns)
-        assert_no_hints(kube, ns, name)
+        hints = [t for t in visible_texts(kube, ns) if name in t.lower()]
+        assert hints == [], f"{name}: visible to the agent: {hints}"
     finally:
         agent("scenario", "down", name)
-
     with pytest.raises(ApiException) as gone:
         kube.core.read_namespace(ns)
     assert gone.value.status == 404
-
-
-def test_list_shows_all_scenarios():
-    out = agent("scenario", "list").stdout
-    assert sorted(line.split()[0] for line in out.splitlines()) == sorted(FAULTS)

@@ -1,8 +1,5 @@
 question: "The orders service keeps restarting. What's wrong?"
-namespace: shop-orders
-ready_when:
-  kind: pod_restarts_at_least
-  value: 2
+ready_when: {restarts: 2}  # the pod has crashed and restarted twice
 expected:
   status: fault_found
   fault_categories: [bad_config]

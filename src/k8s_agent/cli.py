@@ -1,65 +1,134 @@
 """`agent` command line. Interface only: core modules never import this."""
 
+import asyncio
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from typing import Annotated, NoReturn
 
 import typer
 from kubernetes.client.exceptions import ApiException
 from pydantic import ValidationError
+from rich.console import Console
+from rich.text import Text
 from urllib3.exceptions import HTTPError
 
-from k8s_agent import access
+from k8s_agent import access, scenarios, ui
+from k8s_agent.agent import McpUnavailable, NotStarted, RunStatus
+from k8s_agent.agent import investigate as run_investigation
 from k8s_agent.config import Settings, get_settings
 from k8s_agent.kube import KubeError, admin_clients
-from k8s_agent.scenarios import cluster
-from k8s_agent.scenarios.spec import ScenarioError, get_scenario, load_all
+from k8s_agent.logs import setup_logging
 
 app = typer.Typer(no_args_is_help=True, help="Kubernetes troubleshooting agent.")
 scenario_app = typer.Typer(no_args_is_help=True, help="Create or remove the broken scenarios.")
 app.add_typer(scenario_app, name="scenario")
 
 NameArg = Annotated[str, typer.Argument(help="Scenario name, e.g. selector")]
+EXIT_FAILED, EXIT_NOT_STARTED = 1, 2
+CLUSTER_ERRORS = (scenarios.ScenarioError, KubeError, TimeoutError, ApiException, HTTPError)
 
 
 def _say(msg: str) -> None:
     typer.echo(msg, err=True)
 
 
-def _fail(msg: str) -> NoReturn:
+def _fail(msg: str, code: int = 1) -> NoReturn:
     typer.echo(f"error: {msg}", err=True)
-    raise typer.Exit(1)
+    raise typer.Exit(code)
 
 
-def _settings() -> Settings:
+def _settings(error_code: int = 1) -> Settings:
     try:
         return get_settings()
     except ValidationError as e:
-        _fail(f"invalid settings:\n{e}")
+        _fail(f"invalid settings:\n{e}", error_code)
+
+
+@contextmanager
+def _clean_errors() -> Iterator[None]:
+    """A cluster or scenario problem is one error line and exit 1, not a traceback."""
+    try:
+        yield
+    except CLUSTER_ERRORS as e:
+        _fail(str(e))
+
+
+@app.command()
+def investigate(
+    question: Annotated[str, typer.Argument(help="What's wrong, in plain words")],
+    namespace: Annotated[
+        str | None,
+        typer.Option("-n", "--namespace", help="Where to look (default: the agent finds it)"),
+    ] = None,
+    user: Annotated[
+        str | None, typer.Option("--user", help="Who is asking (default: AGENT_USER_ID or OS user)")
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print the result as JSON (always, when piped)")
+    ] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", help="No progress on stderr")] = False,
+) -> None:
+    """Investigate a problem with read-only tools and report the diagnosis.
+
+    In a terminal: live progress, then a summary. Piped or with --json: the result JSON on
+    stdout. Exit codes:
+
+    0: a diagnosis, "inconclusive" included.
+    1: the run failed; the result says why.
+    2: nothing ran (invalid settings, or the MCP server can't be reached)."""
+    s = _settings(EXIT_NOT_STARTED)
+    err = Console(stderr=True)
+    # JSON logs are for machines: kept off an interactive terminal unless AGENT_LOG_FILE is set.
+    setup_logging(s.log_level, s.log_file, enabled=bool(s.log_file) or not err.is_terminal)
+    user_id = user or s.effective_user_id
+    if not quiet:
+        err.print(
+            Text.assemble(("Investigating: ", "bold"), question, (f"  (as {user_id})", "dim"))
+        )
+    models = {"investigator": s.model, "critic": s.effective_critic_model}
+    progress = (
+        nullcontext(lambda _: None) if quiet else ui.Progress(err, models, s.progress_summary_chars)
+    )
+    try:
+        with progress as on_event:
+            record = asyncio.run(
+                run_investigation(
+                    question, settings=s, namespace=namespace, user_id=user_id, on_event=on_event
+                )
+            )
+    except McpUnavailable as e:
+        _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", EXIT_NOT_STARTED)
+    except NotStarted as e:
+        _fail(str(e), EXIT_NOT_STARTED)
+    result = record.result
+    if as_json or not sys.stdout.isatty():
+        typer.echo(result.model_dump_json(indent=2 if sys.stdout.isatty() else None))
+    else:
+        Console().print(ui.summary(result))
+    if result.status is RunStatus.failed:
+        raise typer.Exit(EXIT_FAILED)
 
 
 @app.command()
 def setup() -> None:
     """Create the agent's identities and kubeconfigs. Safe to re-run.
 
-    Creates the read-only `reader` and the fix-only `remediator` in namespace k8s-agent,
-    grants every configured namespace that exists, and writes a short-lived kubeconfig for
-    each. Re-run to refresh expired tokens."""
+    Applies deploy/rbac.yaml (the read-only `reader` and the fix-only `remediator` in
+    namespace k8s-agent) and writes a short-lived kubeconfig for each. Re-run to refresh
+    expired tokens."""
     s = _settings()
-    try:
+    with _clean_errors():
         c = admin_clients(s)
         _say(f"context {c.context}: setting up the agent identities")
+        paths = {access.READER: s.reader_kubeconfig, access.REMEDIATOR: s.remediator_kubeconfig}
         creds = access.setup(
             c,
-            read_namespaces=s.namespaces,
-            remediation_namespaces=s.remediation_namespaces,
+            rbac_file=s.rbac_file,
             token_ttl_seconds=round(s.token_ttl_hours * 3600),
-            reader_kubeconfig=s.reader_kubeconfig,
-            remediator_kubeconfig=s.remediator_kubeconfig,
+            kubeconfigs=paths,
             progress=_say,
         )
-    except KubeError as e:
-        _fail(str(e))
-    except (ApiException, HTTPError) as e:
-        _fail(f"Kubernetes API error: {e}")
     expires = min(cred.expires for cred in creds)
     _say(f"setup done; tokens expire {expires.isoformat()} (re-run `agent setup` to refresh)")
 
@@ -67,62 +136,43 @@ def setup() -> None:
 @scenario_app.command("list")
 def scenario_list() -> None:
     """List scenarios (read from disk; no cluster access)."""
-    try:
-        scenarios = load_all(_settings().scenarios_dir)
-    except ScenarioError as e:
-        _fail(str(e))
-    for scn in scenarios.values():
-        typer.echo(f"{scn.name:<12} {scn.spec.namespace:<16} {scn.spec.question}")
+    with _clean_errors():
+        found = scenarios.load_all(_settings().scenarios_dir)
+    for scn in found.values():
+        typer.echo(f"{scn.name:<12} {scn.namespace:<16} {scn.spec.question}")
 
 
 @scenario_app.command("up")
 def scenario_up(name: NameArg) -> None:
-    """Create the scenario namespace, grant the agent access to it, apply its manifests, and
-    wait until the fault is live."""
+    """Recreate the scenario's namespace, the agent's access and the app, and wait until the
+    fault is live."""
     s = _settings()
-    try:
-        scn = get_scenario(s.scenarios_dir, name)
-        ns = scn.spec.namespace
-        grants = access.namespace_grants(
-            ns, read_namespaces=s.namespaces, remediation_namespaces=s.remediation_namespaces
-        )
+    with _clean_errors():
+        scn = scenarios.get_scenario(s.scenarios_dir, name)
         c = admin_clients(s)
         _say(f"context {c.context}: bringing up {scn.name}")
-        if not grants:
-            _say(f"note: {ns} is not in AGENT_NAMESPACES; the agent won't be able to read it")
-        cluster.up(
+        scenarios.up(
             scn,
             c,
             ready_timeout=s.scenario_ready_timeout_seconds,
             delete_timeout=s.scenario_delete_timeout_seconds,
             poll=s.scenario_poll_seconds,
-            grants=grants,
             progress=_say,
         )
-    except (ScenarioError, KubeError, TimeoutError) as e:
-        _fail(str(e))
-    except (ApiException, HTTPError) as e:
-        _fail(f"Kubernetes API error: {e}")
-    _say(f"{scn.name} is up in namespace {scn.spec.namespace}")
+    _say(f"{scn.name} is up in namespace {scn.namespace}")
 
 
 @scenario_app.command("down")
 def scenario_down(name: NameArg) -> None:
-    """Delete the scenario namespace (and with it the agent's grants) and wait until it's gone."""
+    """Delete the scenario namespace (and with it the agent's access) and wait until it's gone."""
     s = _settings()
-    try:
-        scn = get_scenario(s.scenarios_dir, name)
-        c = admin_clients(s)
-        existed = cluster.down(
+    with _clean_errors():
+        scn = scenarios.get_scenario(s.scenarios_dir, name)
+        existed = scenarios.down(
             scn,
-            c,
+            admin_clients(s),
             timeout=s.scenario_delete_timeout_seconds,
             poll=s.scenario_poll_seconds,
             progress=_say,
         )
-    except (ScenarioError, KubeError, TimeoutError) as e:
-        _fail(str(e))
-    except (ApiException, HTTPError) as e:
-        _fail(f"Kubernetes API error: {e}")
-    if not existed:
-        _say(f"namespace {scn.spec.namespace} already absent")
+    _say(f"namespace {scn.namespace} {'deleted' if existed else 'already absent'}")

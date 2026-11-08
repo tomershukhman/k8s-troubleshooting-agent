@@ -1,8 +1,5 @@
 question: "Why is the catalog service not serving traffic?"
-namespace: shop-catalog
-ready_when:
-  - {kind: pod_not_ready, value: 1}
-  - {kind: events_contain, value: ["Readiness probe failed", "404"]}
+ready_when: {pods_not_ready: 1}  # Running, never Ready
 expected:
   status: fault_found
   fault_categories: [probe_failure]
