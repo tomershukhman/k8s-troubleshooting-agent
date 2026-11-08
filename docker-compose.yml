@@ -1,0 +1,42 @@
+# Containers that talk to the Kubernetes API use host networking (SPEC §3.10), so the
+# kubeconfig's 127.0.0.1 address works unchanged. Settings come from .env (see .env.example).
+
+name: k8s-agent
+
+services:
+  # The only way the agent sees the cluster: read-only tools, as the `reader` identity.
+  # Needs `uv run agent setup` first (it writes the reader kubeconfig).
+  k8s-mcp:
+    image: quay.io/containers/kubernetes_mcp_server:v0.1.2@sha256:c289505b06079d7f265a6fef977ce1abbfbbb4271772db17db5b58edbf44c255
+    network_mode: host
+    # Must be able to read the 0600 reader kubeconfig. OrbStack and Docker Desktop map file
+    # ownership to the container user; on native Linux set AGENT_CONTAINER_USER to your
+    # `id -u`:`id -g`.
+    user: "${AGENT_CONTAINER_USER:-65532:65532}"
+    command: ["--config", "/etc/k8s-mcp/config.toml", "--config-dir", "/etc/k8s-mcp/conf.d"]
+    volumes:
+      - {type: bind, source: ./mcp/config.toml, target: /etc/k8s-mcp/config.toml, read_only: true}
+      # Only the reader's credentials; the remediator's never enter this container. Fails
+      # (instead of Docker creating an empty directory) when `agent setup` hasn't run.
+      - type: bind
+        source: ${AGENT_READER_KUBECONFIG:-./.kube-agent/reader.kubeconfig}
+        target: /kube/reader.kubeconfig
+        read_only: true
+        bind: {create_host_path: false}
+    configs:
+      - source: k8s-mcp-port
+        target: /etc/k8s-mcp/conf.d/10-port.toml
+    # Not read_only: compose writes the port config above into the container at start.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${AGENT_MCP_PORT:-8080}/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+configs:
+  k8s-mcp-port:
+    content: |
+      port = "${AGENT_MCP_PORT:-8080}"

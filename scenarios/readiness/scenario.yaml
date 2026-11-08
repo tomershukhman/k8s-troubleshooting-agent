@@ -1,5 +1,5 @@
 question: "Why is the catalog service not serving traffic?"
-namespace: scn-readiness
+namespace: shop-catalog
 ready_when:
   - {kind: pod_not_ready, value: 1}
   - {kind: events_contain, value: ["Readiness probe failed", "404"]}

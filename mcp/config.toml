@@ -1,0 +1,32 @@
+# kubernetes-mcp-server configuration (SPEC §3.3). Mounted read-only into the k8s-mcp
+# container by docker-compose.yml, which also sets `port` from AGENT_MCP_PORT.
+# Option reference: https://github.com/containers/kubernetes-mcp-server/blob/v0.1.2/docs/configuration.md
+
+# Host networking shares the machine's network, so listen on loopback only: the server has
+# no authentication of its own.
+bind_address = "127.0.0.1"
+
+# Only tools annotated read-only are exposed.
+read_only = true
+
+# The tool allowlist. Must equal READ_ONLY_TOOLS in src/k8s_agent/policy.py, which the agent
+# enforces again when it loads the tools (a unit test checks they match).
+toolsets = ["core"]
+enabled_tools = [
+  "namespaces_list",
+  "pods_list_in_namespace",
+  "pods_get",
+  "pods_log",
+  "events_list",
+  "resources_get",
+  "resources_list",
+]
+
+# The read-only `reader` identity written by `agent setup`.
+kubeconfig = "/kube/reader.kubeconfig"
+
+# read_only doesn't stop reading Secrets; this does (the reader's RBAC also refuses them).
+[[denied_resources]]
+group = ""
+version = "v1"
+kind = "Secret"

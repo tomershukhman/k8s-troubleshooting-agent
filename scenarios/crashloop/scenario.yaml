@@ -1,5 +1,5 @@
 question: "The orders service keeps restarting. What's wrong?"
-namespace: scn-crashloop
+namespace: shop-orders
 ready_when:
   kind: pod_restarts_at_least
   value: 2

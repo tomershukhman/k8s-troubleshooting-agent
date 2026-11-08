@@ -14,12 +14,13 @@ from pydantic import (
     model_validator,
 )
 
-from k8s_agent.policy import READ_ONLY_TOOLS
+from k8s_agent.policy import FORBIDDEN_NAMESPACES, READ_ONLY_TOOLS
 from k8s_agent.schemas import DiagnosisStatus, FaultCategory, ProposedFix
 
-NAMESPACE_PREFIX = "scn-"
 SCENARIO_FILE = "scenario.yaml"
 MANIFESTS_DIR = "manifests"
+# A Kubernetes namespace name (RFC 1123 label).
+NAMESPACE_PATTERN = r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
 
 
 class ScenarioError(Exception):
@@ -28,6 +29,12 @@ class ScenarioError(Exception):
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+def hints(folder: str, text: str) -> bool:
+    """Whether `text` (a name, label or annotation the agent can see) contains the scenario's
+    folder name, which describes the fault (SPEC 2.2)."""
+    return folder.lower() in text.lower()
 
 
 # --- ready_when conditions: proof that the fault is live -------------------------------
@@ -118,9 +125,9 @@ class RequiredTool(_Strict):
 
 
 class ScenarioSpec(_Strict):
-    name: str
+    name: str  # the folder name: describes the fault, so it's never shown to the agent
     question: str = Field(min_length=1)
-    namespace: str
+    namespace: str = Field(pattern=NAMESPACE_PATTERN)  # neutral, e.g. shop-checkout
     ready_when: list[Condition] = Field(min_length=1)
     expected: Expected
     required_tools: list[RequiredTool] = Field(min_length=1)
@@ -134,8 +141,10 @@ class ScenarioSpec(_Strict):
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        if self.namespace != NAMESPACE_PREFIX + self.name:
-            raise ValueError(f"namespace must be {NAMESPACE_PREFIX + self.name!r}")
+        if self.namespace in FORBIDDEN_NAMESPACES:
+            raise ValueError(f"namespace {self.namespace!r} is reserved")
+        if hints(self.name, self.namespace):
+            raise ValueError(f"namespace {self.namespace!r} gives away the folder name")
         if self.expected_fix is not None:
             if self.expected.status != DiagnosisStatus.fault_found:
                 raise ValueError("expected_fix only makes sense with status fault_found")
@@ -179,6 +188,7 @@ def load_scenario(path: Path) -> Scenario:
 
     manifests = _load_manifests(path / MANIFESTS_DIR, spec.namespace, name)
     _check_references(spec, manifests)
+    _check_no_hints(name, manifests)
     return Scenario(spec=spec, manifests=tuple(manifests), path=path)
 
 
@@ -188,7 +198,12 @@ def load_all(scenarios_dir: Path) -> dict[str, Scenario]:
     folders = sorted(p for p in scenarios_dir.iterdir() if (p / SCENARIO_FILE).exists())
     if not folders:
         raise ScenarioError(f"no scenarios in {scenarios_dir.resolve()}")
-    return {p.name: load_scenario(p) for p in folders}
+    scenarios = {p.name: load_scenario(p) for p in folders}
+    owners: dict[str, str] = {}
+    for scn in scenarios.values():
+        if (other := owners.setdefault(scn.spec.namespace, scn.name)) != scn.name:
+            raise ScenarioError(f"{other} and {scn.name} both use namespace {scn.spec.namespace}")
+    return scenarios
 
 
 def get_scenario(scenarios_dir: Path, name: str) -> Scenario:
@@ -261,3 +276,19 @@ def _check_references(spec: ScenarioSpec, manifests: list[dict[str, Any]]) -> No
             need("Service", c.service, "ready_when")
     if spec.expected_fix is not None:
         need("Service", spec.expected_fix.service, "expected_fix")
+
+
+def _check_no_hints(folder: str, manifests: list[dict[str, Any]]) -> None:
+    """No name, label or annotation the agent can see may contain the folder name."""
+    for doc in manifests:
+        metas = [doc["metadata"], ((doc.get("spec") or {}).get("template") or {}).get("metadata")]
+        for meta in filter(None, metas):
+            visible = [meta.get("name") or ""]
+            for field in ("labels", "annotations"):
+                visible += [f"{k}={v}" for k, v in (meta.get(field) or {}).items()]
+            for text in visible:
+                if hints(folder, text):
+                    raise ScenarioError(
+                        f"{folder}: {doc['kind']}/{doc['metadata']['name']} shows {text!r}, "
+                        "which gives away the folder name"
+                    )

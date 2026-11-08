@@ -13,3 +13,12 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "resources_list",
     }
 )
+
+# Namespace holding the agent's ServiceAccounts (`agent setup`). Never deleted by scenarios.
+AGENT_NAMESPACE = "k8s-agent"
+
+# Namespaces the agent must never be granted, whatever the config says: cluster system
+# namespaces can hold sensitive ConfigMaps, and k8s-agent holds the agent's own identities.
+FORBIDDEN_NAMESPACES: frozenset[str] = frozenset(
+    {"kube-system", "kube-public", "kube-node-lease", AGENT_NAMESPACE}
+)

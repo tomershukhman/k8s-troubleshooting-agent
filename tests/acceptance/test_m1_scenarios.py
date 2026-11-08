@@ -1,23 +1,13 @@
 """M1: each scenario comes up with its fault live, and `down` removes it (PLAN.md M1)."""
 
 import pytest
+from kubernetes import client
 from kubernetes.client.exceptions import ApiException
-from typer.testing import CliRunner
 
-from k8s_agent.cli import app
 from k8s_agent.kube import AdminClients
 from k8s_agent.scenarios.cluster import pod_is_ready
 
-from .conftest import eventually
-
-runner = CliRunner()
-
-
-def agent(*args: str):
-    result = runner.invoke(app, list(args))
-    print(result.stderr)
-    assert result.exit_code == 0, f"agent {' '.join(args)} failed:\n{result.stderr}"
-    return result
+from .conftest import agent, eventually, scenario_namespace
 
 
 def pods(kube: AdminClients, ns: str):
@@ -108,12 +98,41 @@ FAULTS = {
 }
 
 
+def visible_texts(kube: AdminClients, ns: str) -> list[str]:
+    """Every name, label and annotation in the namespace that the agent's tools can show."""
+    apps = client.AppsV1Api(kube.api)
+    objects = [
+        kube.core.read_namespace(ns),
+        *kube.core.list_namespaced_pod(ns).items,
+        *kube.core.list_namespaced_service(ns).items,
+        *kube.core.list_namespaced_config_map(ns).items,
+        *kube.core.list_namespaced_event(ns).items,
+        *kube.discovery.list_namespaced_endpoint_slice(ns).items,
+        *apps.list_namespaced_deployment(ns).items,
+        *apps.list_namespaced_replica_set(ns).items,
+    ]
+    texts = []
+    for obj in objects:
+        meta = obj.metadata
+        texts.append(meta.name)
+        for field in (meta.labels, meta.annotations):
+            texts += [f"{k}={v}" for k, v in (field or {}).items()]
+    return texts
+
+
+def assert_no_hints(kube: AdminClients, ns: str, folder: str) -> None:
+    hints = [t for t in visible_texts(kube, ns) if folder in t.lower()]
+    assert hints == [], f"{folder}: visible to the agent: {hints}"
+
+
 @pytest.mark.parametrize("name", list(FAULTS))
 def test_scenario_up_fault_down(kube: AdminClients, name: str):
-    ns = f"scn-{name}"
+    ns = scenario_namespace(name)
+    assert name not in ns
     try:
         agent("scenario", "up", name)
         FAULTS[name](kube, ns)
+        assert_no_hints(kube, ns, name)
     finally:
         agent("scenario", "down", name)
 

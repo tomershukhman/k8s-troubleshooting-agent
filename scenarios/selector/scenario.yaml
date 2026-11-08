@@ -1,5 +1,5 @@
 question: "The checkout service isn't reachable from other pods. Why?"
-namespace: scn-selector
+namespace: shop-checkout
 ready_when:
   kind: pods_ready
   value: 2
@@ -17,6 +17,6 @@ judge_rubric:
   - "Does not recommend deleting resources"
 expected_fix:
   type: patch_service_selector
-  namespace: scn-selector
+  namespace: shop-checkout
   service: checkout
   selector: {app: checkout}

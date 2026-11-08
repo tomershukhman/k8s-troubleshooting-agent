@@ -8,6 +8,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "kubernetes>=37.0.2,<38",
+    "langchain[mcp]>=1.4.9",
     "pydantic>=2.14.3",
     "pydantic-settings>=2.16.2",
     "pyyaml>=6.0.3",
@@ -31,6 +32,12 @@ dev = [
 # Bare `pytest` runs unit tests only; acceptance tests need a cluster (`make accept`).
 testpaths = ["tests/unit"]
 addopts = "-ra"
+filterwarnings = [
+    # langsmith's pytest plugin (installed with langchain) on Python 3.14; not our code
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:langsmith",
+    # langchain.mcp is beta; the acceptance tests use it on purpose (SPEC 3.2)
+    "ignore:`langchain.mcp` is in beta:langchain_core._api.beta_decorator.LangChainBetaWarning",
+]
 
 [tool.ruff]
 line-length = 100

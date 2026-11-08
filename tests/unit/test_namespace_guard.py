@@ -37,11 +37,11 @@ def fake_clients(core: FakeCore):
     return SimpleNamespace(core=core, dynamic=dynamic)
 
 
-OWNED = {cluster.MANAGED_BY_LABEL: cluster.FIELD_MANAGER, cluster.SCENARIO_LABEL: "selector"}
+OWNED = {cluster.OWNER_LABEL: cluster.OWNER_VALUE}
 FOREIGN = [
-    {},  # a user's own scn-selector
-    {cluster.MANAGED_BY_LABEL: "helm"},
-    {cluster.MANAGED_BY_LABEL: cluster.FIELD_MANAGER, cluster.SCENARIO_LABEL: "healthy"},
+    {},  # a user's own shop-checkout
+    {cluster.OWNER_LABEL: "shop"},
+    {"app.kubernetes.io/managed-by": "k8s-agent-scenarios"},  # the old label isn't enough
 ]
 
 
@@ -64,7 +64,7 @@ def test_up_refuses_foreign_namespace(labels):
 def test_down_deletes_owned_namespace():
     core = FakeCore(OWNED)
     assert cluster.down(SCN, fake_clients(core), timeout=1, poll=0.01) is True
-    assert core.deleted == ["scn-selector"]
+    assert core.deleted == ["shop-checkout"]
 
 
 def test_down_on_absent_namespace_is_a_no_op():

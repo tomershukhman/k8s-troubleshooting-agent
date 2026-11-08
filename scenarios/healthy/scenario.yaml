@@ -1,5 +1,5 @@
 question: "Is the inventory service healthy?"
-namespace: scn-healthy
+namespace: shop-inventory
 ready_when:
   - {kind: pods_ready, value: 2}
   - {kind: endpoints_ready, service: inventory, value: 2}

@@ -1,12 +1,13 @@
 """`scenario up` / `scenario down` against the cluster, with the user's admin kubeconfig."""
 
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
+from k8s_agent import access
 from k8s_agent.kube import AdminClients
 from k8s_agent.scenarios.spec import (
     Condition,
@@ -20,8 +21,10 @@ from k8s_agent.scenarios.spec import (
 )
 
 FIELD_MANAGER = "k8s-agent-scenarios"
-MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
-SCENARIO_LABEL = "k8s-agent/scenario"
+# Ownership label on every scenario namespace. Neutral on purpose: the agent can see namespace
+# labels, and nothing it sees may hint at the fault (SPEC 2.2).
+OWNER_LABEL = "app.kubernetes.io/part-of"
+OWNER_VALUE = "k8s-agent-demo"
 
 Progress = Callable[[str], None]
 
@@ -112,9 +115,12 @@ def up(
     ready_timeout: float,
     delete_timeout: float,
     poll: float,
+    grants: Sequence[dict[str, Any]] = (),
     progress: Progress = _quiet,
 ) -> None:
-    """Recreate the scenario from scratch and wait until its fault is live (ready_when)."""
+    """Recreate the scenario from scratch and wait until its fault is live (ready_when).
+    `grants` (the agent's RoleBindings, see access.namespace_grants) are applied right after
+    the namespace is created: deleting the namespace deleted the previous ones."""
     ns = scn.spec.namespace
     resources = [_resolve(c, doc) for doc in scn.manifests]  # fail before changing anything
 
@@ -126,6 +132,7 @@ def up(
         poll=poll,
         progress=progress,
     )
+    access.apply(c, grants, progress)
     for res, doc in zip(resources, scn.manifests, strict=True):
         body = {**doc, "metadata": {**doc["metadata"], "namespace": ns}}
         c.dynamic.server_side_apply(
@@ -154,7 +161,7 @@ def down(
     ns = _read_namespace(c, scn.spec.namespace)
     if ns is None:
         return False
-    _require_managed(ns, scn)
+    _require_managed(ns)
     if ns.metadata.deletion_timestamp is None:
         c.core.delete_namespace(scn.spec.namespace)
         progress(f"deleting namespace {scn.spec.namespace}")
@@ -187,13 +194,13 @@ def _read_namespace(c: AdminClients, name: str) -> client.V1Namespace | None:
         raise
 
 
-def _require_managed(ns: client.V1Namespace, scn: Scenario) -> None:
-    """Never touch a namespace these commands didn't create (e.g. a user's own scn-* one)."""
-    labels = ns.metadata.labels or {}
-    if labels.get(MANAGED_BY_LABEL) != FIELD_MANAGER or labels.get(SCENARIO_LABEL) != scn.name:
+def _require_managed(ns: client.V1Namespace) -> None:
+    """Never touch a namespace these commands didn't create (e.g. a user's own shop-orders).
+    Scenario namespaces are unique (checked when loading), so the label alone is enough."""
+    if (ns.metadata.labels or {}).get(OWNER_LABEL) != OWNER_VALUE:
         raise ScenarioError(
-            f"namespace {ns.metadata.name} exists but wasn't created by `agent scenario`; "
-            "refusing to touch it"
+            f"namespace {ns.metadata.name} exists but wasn't created by `agent scenario` "
+            f"(no {OWNER_LABEL}={OWNER_VALUE} label); refusing to touch it"
         )
 
 
@@ -211,7 +218,7 @@ def _create_fresh_namespace(
     before it exists are rejected, which leaves FailedCreate warnings the agent would see."""
     down(scn, c, timeout=delete_timeout, poll=poll, progress=progress)
     name = scn.spec.namespace
-    labels = {MANAGED_BY_LABEL: FIELD_MANAGER, SCENARIO_LABEL: scn.name}
+    labels = {OWNER_LABEL: OWNER_VALUE}
     c.core.create_namespace(
         client.V1Namespace(metadata=client.V1ObjectMeta(name=name, labels=labels))
     )
