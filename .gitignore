@@ -1,0 +1,22 @@
+# Secrets and local credentials
+.env
+.kube-agent/
+
+# Assignment brief (employer's document; kept out of the repo)
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
