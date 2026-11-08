@@ -5,10 +5,14 @@ Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
 ## Checks
 - `make check`: ruff lint + format check + unit tests (no cluster, no LLM). Keep green.
 - `make accept M=<n>`: milestone n's acceptance tests only, against the real cluster; `make accept`
-  runs every milestone's (do that before committing a milestone).
-- M2/M3 acceptance keeps running scenarios (recreated only if missing, a roleRef changed, or the
-  fault isn't live) and leaves them up. `AGENT_ACCEPT_REUSE_SCENARIOS=false` = fresh and removed
-  (needed after deleting an object from a manifest). M1 always deploys and deletes: that's its test.
+  runs every milestone's.
+- **Run only the relevant tests.** While building a milestone, and before committing it: `make check`
+  plus that milestone's `make accept M=<n>`. Re-run an earlier milestone's tests only when the change
+  touches what they cover. Skip M1's unless a scenario manifest changed (it takes ~2 min).
+- M2+ acceptance keeps running scenarios, re-applying their manifests so the cluster matches them
+  (recreated only if missing, a roleRef changed, or the fault isn't live), and leaves them up.
+  `AGENT_ACCEPT_REUSE_SCENARIOS=false` = fresh and removed (needed after deleting an object from a
+  manifest). M1 always deploys and deletes: that's its test.
 - One test: `uv run pytest tests/unit/test_agent.py::test_founded_evidence_passes_straight_through -q`
 - Run from the repo root (`AGENT_SCENARIOS_DIR` defaults to `./scenarios`). Unit tests run in an empty
   temp dir with AGENT_* cleared and a kubeconfig that doesn't exist (`tests/unit/conftest.py`), so
@@ -33,8 +37,10 @@ Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
   ToolMessage whose `status == "error"` marks a tool error. With fastmcp 4.1.6, exceptions cross
   `async with MCPAdapter(...)` unwrapped (a failed connect is a `RuntimeError`; checked 2026-11-08).
 - A tool error carries no code, only the API server's text: refused / not found are recognised by
-  `tool_output.REFUSED` / `PERMANENT` (not retried); `ToolRetryMiddleware` only retries exceptions,
-  so `RetryToolErrors` raises for the rest. The M3 acceptance test checks the real server's wording.
+  `tool_output.REFUSED` / `PERMANENT`. The loaded MCP tools have `handle_tool_error=False`, so an
+  error raises (the trace marks the span ERROR); `ToolRetryMiddleware(retry_on=worth_retrying)`
+  retries all but PERMANENT, and `ToolErrorAsResult` gives the model the text. The M3 acceptance
+  test checks the real server's wording.
 - On OrbStack, `pods_log` with `previous: true` on a crash-looping pod usually returns "unable to
   retrieve container logs for docker://…" as a *successful* result (the old container's log isn't
   kept); `previous: false` returns the last crash's log. Checked 2026-11-08.
@@ -43,3 +49,12 @@ Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
   `asyncio.run()` in one process (tests, evals) can fail with "Event loop is closed": use one
   loop (`asyncio.Runner`), as tests/acceptance/test_m3_agent.py does.
 - Compose `configs: content:` can't be used on a `read_only: true` service (why k8s-mcp isn't read_only).
+- MLflow (M4, slim `mlflow-tracing` 3.18): MLflow's HTTP defaults (7 retries, 120 s) hang a call to a
+  stopped server for ~4 min; `tracing.enable()` sets `MLFLOW_HTTP_REQUEST_MAX_RETRIES=0` and
+  `MLFLOW_HTTP_REQUEST_TIMEOUT` from settings (`MLFLOW_ASYNC_TRACE_LOGGING_RETRY_TIMEOUT` only affects
+  Databricks). Without an active experiment the slim package silently gives a `NoOpSpan`
+  (`default_experiment_registry` NameError, logged at debug), so `set_experiment` must run first.
+- The tracking server is at `http://localhost:5050` on OrbStack (port 5050: AirPlay often holds 5000).
+  After the pod restarts, OrbStack's localhost route answers ~1 s after the Deployment is ready.
+- `make accept M=4` needs `MLFLOW_TRACKING_URI`; it restarts and stops the MLflow pod (restored by
+  `agent setup`). Acceptance runs trace to `k8s-agent-tests` (tests/acceptance/conftest.py), not `k8s-agent`. Read traces with `mlflow.get_trace` + `Trace.search_spans`; spans arrive one by one.

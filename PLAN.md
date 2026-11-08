@@ -240,14 +240,14 @@ The CLI prints the trace's MLflow UI link, and the result JSON includes its `tra
    - the Helm chart's minimal values, and its memory use on OrbStack
 2. **The tracking server:** `agent setup` installs it with MLflow's official Helm chart via `helm upgrade --install --wait` (returns only when the readiness check passes), in its own namespace (e.g. `mlflow`). A committed values file keeps it minimal: one replica, small CPU and memory requests, SQLite on a small persistent volume so traces survive a pod restart, and `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false` (the chart's defaults get OOMKilled; with it, ~400 MiB per the M4 spike). Set `MLFLOW_HTTP_REQUEST_MAX_RETRIES=0` plus timeouts in the agent, so a down server doesn't hang exit. Reached through OrbStack's LoadBalancer or a port-forward.
 3. **One-line tracing:** `mlflow.langchain.autolog()`.
-4. **One trace per run, approval included:** in the CLI, one root span wraps the whole command, so the pause and resume land in one trace (they run in the same process). The `traceparent` save and restore is for M8, where approval arrives in a separate request.
+4. **One trace per run:** the root span is opened in the core function every caller uses (CLI, evals, M8 API). The `traceparent` save and restore is for M8, where approval arrives in a separate request.
 5. **Native fields:** `mlflow.tracing.context(session_id=thread_id, user=user_id)`; `run_id`, the git commit and the model settings → trace metadata. The same IDs as the logs from M3.
-6. **Checked once at start:** if the tracking server is unreachable, `investigate` logs one warning and runs without tracing; `eval` fails with a clear message.
+6. **Checked once at start:** if the tracking server is unreachable, `investigate` logs one warning and runs without tracing (`agent eval`, built in M5, fails with a clear message instead).
 7. **Flush on exit:** `mlflow.flush_trace_async_logging()` with a short time limit, so a down server can't hang the CLI.
-8. **Link from answer to trace:** `mlflow.get_last_active_trace_id()`; the CLI prints the trace's MLflow UI link on stderr, next to the progress lines, and the result JSON includes `trace_id`.
+8. **Link from answer to trace:** the trace ID from the run's own root span (`get_last_active_trace_id()` is process-wide, wrong when runs overlap); the CLI prints the trace's MLflow UI link on stderr, next to the progress lines, and the result JSON includes `trace_id`.
 9. **Readable trace:** the agents and stages are named (graph node names; `name` on the agents, `run_name` on the critic call), so the top level reads intake → investigator → critic → result.
 10. **Errors visible:** a refused tool call shows up as an error span.
-11. **Cost:** tokens are captured. If cost isn't shown, the README says so. No custom pricing.
+11. **Cost:** MLflow shows tokens and cost per model call and per run. No custom pricing.
 12. **Packaging:** the agent container uses the slim `mlflow-tracing` package if it covers the autolog; the full `mlflow` package only where the evals run.
 13. **Log levels:** INFO (the default) is run started and finished (duration, answer status) plus every failure with its reason; DEBUG adds the per-tool-call lines; `AGENT_LOG_LEVEL` switches. The trace is the observability; logs are the short fallback.
 
@@ -257,7 +257,7 @@ The CLI prints the trace's MLflow UI link, and the result JSON includes its `tra
   - the trace's top-level span names match the graph stages
   - ask about a namespace the agent can't access, fetch the trace, and confirm the refused tool call appears as an error span with the refusal message
   - `agent setup`'s `helm upgrade --install --wait` returns with the server ready
-  - stop the tracking server: `investigate` still works and finishes within a few seconds, with a warning; `eval` fails with a clear message
+  - stop the tracking server: `investigate` still works and finishes within a few seconds, with a warning
   - **the brief's observability list, line by line,** on a real stored trace ([SPEC 3.7](SPEC.md#37-observability)). M4 isn't done unless every line passes:
     - the question, the stage spans, the model calls, the tool calls and the final answer (request → agent → model → tool calls → response)
     - every tool call, named, with its evidence ID
@@ -273,7 +273,7 @@ The CLI prints the trace's MLflow UI link, and the result JSON includes its `tra
 ## M5: Evals
 
 **What we build**
-`agent eval`: `mlflow.genai.evaluate` runs every scenario 3 times, scores each answer with our scorers and an MLflow judge, applies the per-scenario thresholds, prints a results table and saves it to a file.
+`agent eval`: for each scenario, bring it up once and run `mlflow.genai.evaluate` over its 3 runs, scored by our four exact checks and two built-in MLflow judges, with the scenario's thresholds. It prints a results table and saves it to a file; every score sits on its run's trace in MLflow.
 
 **Why**
 - It proves the agent works across repeated runs.
@@ -281,30 +281,28 @@ The CLI prints the trace's MLflow UI link, and the result JSON includes its `tra
 - Every failing run has a trace from M4, with its scores on it.
 
 **How** ([SPEC 2.3, Definition of done](SPEC.md#23-definition-of-done-evals); [SPEC 3.6, Scenarios and evals](SPEC.md#36-scenarios-and-evals))
-1. **Confirm first** ([SPEC 6, To verify at build time](SPEC.md#6-to-verify-at-build-time), item 10): the per-scenario "2 of 3" thresholds with quality criteria (or one `evaluate` per scenario); saving one eval run's traces as fixtures and re-scoring them with no server and no model.
-2. **The evaluation:** `mlflow.genai.evaluate(data, scorers, predict_fn)`.
-   - **data:** the scenarios × 3 runs
-   - **predict_fn:** reset the scenario, ask the agent graph (no namespace), return the result; the trace is captured
-   - **concurrency:** `EVAL_MAX_CONCURRENCY` (1)
-3. **Code scorers** (custom `@scorer` functions, which can read the whole trace):
+1. **Confirm first** ([SPEC 6, To verify at build time](SPEC.md#6-to-verify-at-build-time), item 10): how `quality_criteria`'s pass/fail is exposed; that it works on our self-hosted server (fallback: compute the means and minimums from `result.metrics`); `ExpectationsGuidelines` with per-row guidelines.
+2. **One evaluation per scenario:** `scenario up` once; `mlflow.genai.evaluate(data, scorers, predict_fn, quality_criteria)` over its 3 runs, in its own MLflow run. `predict_fn` only asks the agent graph (no namespace), with no cluster setup. Diagnosis runs don't change the cluster, so no rebuild between runs; the selector scenario is rebuilt after its fix run (M6).
+3. **Our four exact checks** (custom `@scorer` functions, which can read the whole trace):
    - the diagnosis against the accepted answers
    - cited evidence exists
    - the agent looked at the right things (alternatives allowed)
    - the agent's actions were safe (only allowed tools; no fix proposed outside the selector scenario)
-4. **LLM judge:** one MLflow judge (`make_judge` or `Guidelines`) holding our rubric, on Claude Opus 5.5. It stays separate from the critic: offline, its own rubric, an independent check on the whole system.
-   - does the cited evidence actually support the conclusion? (It sees the cited tool outputs.)
-   - is the recommended action appropriate and safe as advice to a human operator?
-5. **Thresholds:** "≥2 of 3 runs", per scenario, via quality criteria; run `evaluate` per scenario if that's needed for "2 of 3".
-6. **Fixtures for CI:** save the traces of one real eval run. `evaluate` accepts saved traces, so CI re-scores them with no server and no model.
+4. **Two built-in MLflow judges** on Claude Opus 5.5, separate from the critic:
+   - **advice appropriate and safe:** `ExpectationsGuidelines`, reading each scenario's rubric from its expectations
+   - **evidence supports the conclusion:** `make_judge` with `{{ trace }}`, so it reads the tool outputs the agent cited
+5. **Thresholds:** one `quality_criteria` line per scenario: `mean >= 0.66` for "≥2 of 3", `` `name/min` >= 1 `` for "every run".
+6. **Speed and cost:** from MLflow, put one real eval run's average duration, tokens and cost per investigation, and the total, in the README.
 7. **Reproducibility:** each eval run records the git commit and the model settings.
 
 **What we test**
-- **`make check`:** each scorer with hand-made good and bad answers; the saved real traces re-scored with the same results.
-- **The eval can fail:**
+- **`make check`:** each code scorer with hand-made good and bad answers.
+- **The eval can fail** (real model, in `make accept M=5`):
   - a fake agent that always answers "no fault" must fail
-  - the judge must fail a correct conclusion backed by irrelevant citations
-  - the judge must fail a destructive recommendation ("delete the namespace and redeploy")
-- **`make accept M=5`:** one full eval run (4 scenarios × 3) passes; its MLflow link plus the summary go in the README.
+  - the evidence judge must fail a correct conclusion backed by irrelevant citations
+  - the advice judge must fail a destructive recommendation ("delete the namespace and redeploy")
+- **The tracking server stopped:** `agent eval` fails at once with a clear message.
+- **`make accept M=5`:** one full eval run (4 scenarios × 3) passes; its MLflow link, the summary, and the speed and cost numbers go in the README.
 
 ---
 
@@ -330,7 +328,7 @@ The assignment requires one approved fix through a narrowly scoped tool, verifie
 3. **The remediator agent:** `create_agent` with its own prompt and model setting, and the `remediator` identity.
    - Its tools: small read functions (get the Service; list pods and EndpointSlices in the fix namespace) and `patch_service_selector`, all using only the `remediator` kubeconfig. Not the MCP server. They fail rather than falling back to any other kubeconfig.
    - It checks the exact new selector matches ready pods, writes the explanation and expected effect, then calls the tool. If its check fails, it declines with a reason.
-4. **The gate:** LangChain's `HumanInTheLoopMiddleware` pauses the run before the tool executes. Only approve or reject; no edit, so what you approve is exactly what executes.
+4. **The gate:** LangChain's `HumanInTheLoopMiddleware` pauses the run before the tool executes. Only approve or reject; no edit, so what you approve is exactly what executes. The pause and the resume happen inside the one core call (e.g. an approval callback the CLI passes in), so the whole run, fix included, stays one trace ([SPEC 3.7](SPEC.md#37-observability)).
 5. **At the pause, the CLI shows** the change, the remediator's explanation, and facts checked by code: "selector app=check-out → app=checkout; 2 ready pods will match".
 6. **Two clocks:** the approval wait has its own limit, `AGENT_APPROVAL_TIMEOUT_SECONDS` (600). Expired → reject; the result says the approval timed out.
 7. **No unattended approval:** without an interactive terminal (piped, scripted, CI), the fix is rejected with "no interactive approval available". No `--yes` flag.
@@ -367,7 +365,7 @@ The assignment requires one approved fix through a narrowly scoped tool, verifie
 
 **What we build**
 - Everything runs with Docker.
-- CI checks every change.
+- CI checks every change, and runs the full evals on every pull request to `main`.
 - A complete README a reviewer can follow from scratch.
 - Tagged `assignment-complete`.
 
@@ -375,7 +373,7 @@ The assignment requires one approved fix through a narrowly scoped tool, verifie
 After this, every requirement in the brief is met.
 
 **How**
-- **One app image:** small, non-root, no secrets.
+- **One app image:** small, non-root, no secrets. It includes Helm 4 (pinned), since `agent setup` needs it and the brief allows only Docker on the reviewer's machine. The image has no `.git`, so the git commit is baked in at build time and passed as trace metadata.
 - **Compose services,** each with only the credentials it needs ([SPEC 3.5, Safety boundary](SPEC.md#35-safety-boundary-cluster-enforced)):
 
   | Service | Runs | Holds |
@@ -390,9 +388,10 @@ After this, every requirement in the brief is met.
   - Every README command is a `docker compose run …`.
   - The README's main path is OrbStack, the supported and tested setup. It notes the one Docker Desktop setting for other setups.
 - **Clear errors:** a missing API key, an unreachable cluster or a stopped MCP server each give one clear message.
-- **CI (GitHub Actions):**
-  - **One workflow, `ci.yml`, on every push and PR,** with no tracking server, no cluster and no API key: `make check` (including the scorers re-scoring saved traces), the image build, and scenario-file validation.
-  - No manual live-eval button: the brief only requires "execution or validation", and CI already re-scores saved traces ([SPEC 1, Key decisions](SPEC.md#1-key-decisions)).
+- **CI (GitHub Actions)** ([SPEC 1, Key decisions](SPEC.md#1-key-decisions)):
+  - **`ci.yml`, on every push and PR,** with no tracking server, no cluster and no API key: `make check`, the image build, and scenario-file validation.
+  - **`eval.yml`, on every pull request to `main` and from a manual button:** a throwaway kind cluster (`helm/kind-action`), Helm 4, then the README's own `agent setup` and `agent eval` with the real model. MLflow is reached through `kubectl port-forward`. It fails if any scenario misses its thresholds, and keeps the results file as a workflow artifact. The API key is the `ANTHROPIC_API_KEY` repository secret; without it the job stops with a notice. A newer push to the pull request cancels the run in progress.
+- **Branches:** once these workflows exist, work goes to `dev` and reaches `main` only through a pull request. A branch rule on `main` (a repository setting, set with your OK) requires both workflows to pass before the merge.
 - **README:** setup, running the agent, the scenarios, the evals with results, and the design rationale: the guiding principle, framework, tool boundaries, eval approach, safety boundary and its known limit, and sub-agents as the path to scale.
 
 **What we test**
@@ -401,7 +400,10 @@ After this, every requirement in the brief is met.
   - containers start in order
   - each failure case gives a clear message
   - the `agent` container has no admin kubeconfig mounted
-- **CI:** the push workflow passes on GitHub; a deliberately broken unit test makes it fail.
+- **CI:**
+  - `ci.yml` passes on GitHub; a deliberately broken unit test makes it fail.
+  - `eval.yml` passes on the first `dev` → `main` pull request: kind cluster up, `agent setup` done, every scenario meets its thresholds. Its run link goes in the README.
+  - The branch rule blocks merging while a check is failing.
 - **Fresh-clone test:** a helper that only reads the README sets everything up from scratch on a fresh OrbStack cluster (or a fresh namespace setup on it). Any step it has to guess is a README bug.
 - **Final check:** every requirement in the brief maps to working code or a README section.
 

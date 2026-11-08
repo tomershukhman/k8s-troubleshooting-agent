@@ -1,13 +1,15 @@
 """Every unit test runs isolated from the developer's machine: no AGENT_* variables,
-KUBECONFIG, model API key or tracing settings from the shell, no `.env` (the working directory
-is an empty temp folder), a kubeconfig that doesn't exist (so nothing can reach a cluster), and
-the scenarios folder and RBAC file by absolute path."""
+KUBECONFIG, model API key or tracing settings (MLFLOW_*) from the shell, no `.env` (the working
+directory is an empty temp folder), a kubeconfig that doesn't exist (so nothing can reach a
+cluster), and the scenarios folder and RBAC file by absolute path. Tracing state a test turns
+on is undone after it."""
 
 import os
 from pathlib import Path
 
 import pytest
 
+from k8s_agent import tracing
 from k8s_agent.config import get_settings
 
 REPO = Path(__file__).resolve().parents[2]
@@ -16,7 +18,9 @@ REPO = Path(__file__).resolve().parents[2]
 @pytest.fixture(autouse=True)
 def isolated_settings(monkeypatch, tmp_path):
     for key in list(os.environ):
-        if key.startswith(("AGENT_", "LANGSMITH_", "LANGCHAIN_", "LANGFUSE_")) or key in (
+        if key.startswith(
+            ("AGENT_", "MLFLOW_", "LANGSMITH_", "LANGCHAIN_", "LANGFUSE_")
+        ) or key in (
             "KUBECONFIG",
             "ANTHROPIC_API_KEY",
         ):
@@ -28,6 +32,9 @@ def isolated_settings(monkeypatch, tmp_path):
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+    tracing._on = None  # tracing.enable() sets process-wide state: MLflow's, and these
+    for key in [k for k in os.environ if k.startswith("MLFLOW_")]:
+        del os.environ[key]  # then monkeypatch restores the shell's own
 
 
 @pytest.fixture

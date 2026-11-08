@@ -598,19 +598,23 @@ def test_an_invalid_model_setting_stops_the_run_before_anything_else(env):
         asyncio.run(investigate("q", settings=get_settings(), mcp_target=FakeCluster().server))
 
 
-def test_every_log_line_carries_the_run_ids(caplog):
-    caplog.set_level(logging.INFO, logger="k8s_agent")
+@pytest.mark.parametrize(
+    ("level", "events"),
+    [  # INFO: the run starting and finishing, and problems; DEBUG adds each step
+        (logging.INFO, ["run_started", "mcp_tools_ignored", "run_finished"]),
+        (
+            logging.DEBUG,
+            ["run_started", "mcp_tools_ignored", "tool_call", "verify_round", "run_finished"],
+        ),
+    ],
+)
+def test_every_log_line_carries_the_run_ids(level, events, caplog):
+    caplog.set_level(level, logger="k8s_agent")
     record = run(
         ScriptedModel(script=[call(LIST), answer(healthy("E1"))]), user_id="bob", thread_id="t-1"
     )
     ours = [r for r in caplog.records if r.name.startswith("k8s_agent")]
-    assert [r.getMessage() for r in ours] == [
-        "run_started",
-        "mcp_tools_ignored",
-        "tool_call",
-        "verify_round",
-        "run_finished",
-    ]
+    assert [r.getMessage() for r in ours] == events
     assert {(r.run_id, r.thread_id, r.user_id) for r in ours} == {
         (record.result.run_id, "t-1", "bob")
     }

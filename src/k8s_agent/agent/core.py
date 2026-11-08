@@ -32,6 +32,7 @@ from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 from langgraph.graph.message import add_messages
 
+from k8s_agent import tracing
 from k8s_agent.agent.critic import with_verdict
 from k8s_agent.agent.graph import build_graph, forced
 from k8s_agent.agent.middleware import RunContext
@@ -116,6 +117,11 @@ async def _load_tools(
     tools = sorted((t for t in offered if t.name in READ_ONLY_TOOLS), key=lambda t: t.name)
     if not tools:
         raise McpUnavailable(f"{where}: it offers none of the allowed tools")
+    for tool in tools:
+        # A failed call raises (by default the adapter turns it into a result), so the trace
+        # marks its span as an error and ToolRetryMiddleware sees it; ToolErrorAsResult then
+        # hands the model the server's own text, as before.
+        tool.handle_tool_error = False
     return tools
 
 
@@ -224,51 +230,64 @@ async def investigate(
     log = run_log(run_id=run_id, thread_id=thread_id, user_id=user_id)
     started_at, t0 = datetime.now(UTC), time.monotonic()
     log.info("run_started", extra={"question": question, "namespace": namespace})
-    try:
-        model = model or make_model(settings, settings.model)
-        critic = with_verdict(critic_model or make_model(settings, settings.effective_critic_model))
-    except Exception as e:
-        log.error("model_unavailable", extra={"error": f"{type(e).__name__}: {e}"})
-        raise NotStarted(f"cannot create the models: {type(e).__name__}: {e}") from e
-    context = RunContext(settings=settings, log=log, critic=critic)
-    config = {
-        "configurable": {"thread_id": thread_id},
-        "metadata": {"run_id": run_id, "user_id": user_id},
-        "recursion_limit": settings.recursion_limit,
-    }
-    async with AsyncExitStack() as stack:
-        tools = await _load_tools(stack, mcp_target or mcp_client(settings), settings, log)
-        inputs = {"question": question, "namespace": namespace}
-        outcome, values = await _run(model, tools, inputs, config, context, on_event)
+    inputs = {"question": question, "namespace": namespace}
+    # The whole run is one trace: its duration is the run's, and a run that can't start (no
+    # models, no MCP server) is an error trace saying why.
+    with tracing.run(
+        "investigation",
+        {**inputs, "user_id": user_id, "thread_id": thread_id},
+        user=user_id,
+        session=thread_id,
+        metadata={"run_id": run_id, **settings.model_settings},
+    ) as span:
+        try:
+            model = model or make_model(settings, settings.model)
+            critic_llm = critic_model or make_model(settings, settings.effective_critic_model)
+            critic = with_verdict(critic_llm)
+        except Exception as e:
+            log.error("model_unavailable", extra={"error": f"{type(e).__name__}: {e}"})
+            raise NotStarted(f"cannot create the models: {type(e).__name__}: {e}") from e
+        context = RunContext(settings=settings, log=log, critic=critic)
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "metadata": {"run_id": run_id, "user_id": user_id},
+            "recursion_limit": settings.recursion_limit,
+            "run_name": "graph",  # its trace span (default: "LangGraph")
+        }
+        async with AsyncExitStack() as stack:
+            tools = await _load_tools(stack, mcp_target or mcp_client(settings), settings, log)
+            outcome, values = await _run(model, tools, inputs, config, context, on_event)
 
-    steps = steps_from_messages(values.get("messages", []))
-    by_ref = {s.ref: s for s in steps}
-    cited = dict.fromkeys(outcome.diagnosis.refs if outcome.diagnosis else [])
-    result = RunResult(
-        run_id=run_id,
-        thread_id=thread_id,
-        user_id=user_id,
-        question=question,
-        namespace=namespace,
-        status=outcome.status,
-        started_at=started_at,
-        completed_at=datetime.now(UTC),
-        duration_ms=round((time.monotonic() - t0) * 1000),
-        diagnosis=outcome.diagnosis,
-        error=outcome.error,
-        evidence_steps=[
-            EvidenceStep(
-                ref=s.ref,
-                tool=s.tool,
-                args=s.args,
-                error=s.error,
-                output_excerpt=cap(s.output, settings.evidence_excerpt_chars),
-            )
-            for ref in cited
-            if (s := by_ref.get(ref))
-        ],  # fmt: skip
-        verification=values.get("rounds", []),
-    )
+        steps = steps_from_messages(values.get("messages", []))
+        by_ref = {s.ref: s for s in steps}
+        cited = dict.fromkeys(outcome.diagnosis.refs if outcome.diagnosis else [])
+        result = RunResult(
+            run_id=run_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            trace_id=span.trace_id if span else None,
+            question=question,
+            namespace=namespace,
+            status=outcome.status,
+            started_at=started_at,
+            completed_at=datetime.now(UTC),
+            duration_ms=round((time.monotonic() - t0) * 1000),
+            diagnosis=outcome.diagnosis,
+            error=outcome.error,
+            evidence_steps=[
+                EvidenceStep(
+                    ref=s.ref,
+                    tool=s.tool,
+                    args=s.args,
+                    error=s.error,
+                    output_excerpt=cap(s.output, settings.evidence_excerpt_chars),
+                )
+                for ref in cited
+                if (s := by_ref.get(ref))
+            ],  # fmt: skip
+            verification=values.get("rounds", []),
+        )
+        tracing.finish(span, result.model_dump(mode="json"), result.error)
     level = "error" if outcome.status is RunStatus.failed else "info"
     getattr(log, level)(
         "run_finished",

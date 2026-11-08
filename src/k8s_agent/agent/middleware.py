@@ -10,12 +10,15 @@ from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.tools import ToolException
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from k8s_agent.agent import tool_output
 from k8s_agent.agent.records import EVIDENCE, evidence_of
 from k8s_agent.config import Settings
+
+EVIDENCE_REF = "evidence_ref"  # the key in a tool call's trace span metadata
 
 
 @dataclass(frozen=True)
@@ -54,34 +57,12 @@ def bounded_args(settings: Settings, tool: str, args: dict[str, Any]) -> dict[st
     return {**args, "tail": min(max(tail, 1), settings.log_tail_lines)}
 
 
-class RetryableToolError(Exception):
-    """A tool error result a retry may fix, raised so that ToolRetryMiddleware retries it."""
-
-    def __init__(self, result: ToolMessage) -> None:
-        super().__init__(result.text)
-        self.result = result
-
-
-class RetryToolErrors(AgentMiddleware):
-    """The MCP server reports a failed Kubernetes call as an error result, not an exception,
-    so ToolRetryMiddleware (outside this one) would never retry it. Raise for every error
-    except those a retry can't fix (tool_output.PERMANENT): a container restarting, an API
-    server timeout and errors not seen before are retried; a refusal goes straight back."""
-
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
-    ) -> ToolMessage | Command:
-        result = await handler(request)
-        if (
-            request.tool is not None  # None: a tool the model made up; nothing ran
-            and isinstance(result, ToolMessage)
-            and result.status == "error"
-            and not tool_output.PERMANENT.search(result.text)
-        ):
-            raise RetryableToolError(result)
-        return result
+def worth_retrying(exc: Exception) -> bool:
+    """ToolRetryMiddleware's `retry_on`: every failure except those a retry can't fix
+    (tool_output.PERMANENT, a refusal included: the MCP server reports those as a ToolException
+    with the API server's text). A container restarting, an API server timeout, a transport
+    error and errors not seen before are retried."""
+    return not (isinstance(exc, ToolException) and tool_output.PERMANENT.search(str(exc)))
 
 
 def retries_exhausted(attempts: int) -> Callable[[Exception], str]:
@@ -89,11 +70,28 @@ def retries_exhausted(attempts: int) -> Callable[[Exception], str]:
     exception for a call that failed below the tool (timeout, transport)."""
 
     def message(exc: Exception) -> str:
-        if isinstance(exc, RetryableToolError):
-            return exc.result.text
+        if isinstance(exc, ToolException):
+            return str(exc)
         return f"The call failed after {attempts} attempts: {type(exc).__name__}: {exc}"
 
     return message
+
+
+class ToolErrorAsResult(AgentMiddleware):
+    """A failed tool call raises (core.py turns off the adapter's own handling), so the trace
+    marks its span as an error. The model still gets the server's text as an error result:
+    ToolRetryMiddleware (inside this one) does that for retried errors, this for the rest."""
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+    ) -> ToolMessage | Command:
+        try:
+            return await handler(request)
+        except ToolException as e:
+            call = request.tool_call
+            return ToolMessage(str(e), name=call["name"], tool_call_id=call["id"], status="error")
 
 
 class EvidenceMiddleware(AgentMiddleware):
@@ -108,8 +106,12 @@ class EvidenceMiddleware(AgentMiddleware):
         args = bounded_args(ctx.settings, call["name"], call["args"])
         if args != call["args"]:
             request = request.override(tool_call={**call, "args": args})
+        if (tool := request.tool) is not None:  # None: a tool the model made up; nothing runs
+            # Tool metadata reaches the callbacks, so the call's trace span carries its ID too.
+            metadata = {**(tool.metadata or {}), EVIDENCE_REF: ref}
+            request = request.override(tool=tool.model_copy(update={"metadata": metadata}))
         t0 = time.monotonic()
-        result = await handler(request)  # a failed call comes back as a tool error (ToolRetry)
+        result = await handler(request)  # a failed call comes back as a tool error
         if not isinstance(result, ToolMessage):
             return result
         latency_ms = round((time.monotonic() - t0) * 1000)
@@ -118,7 +120,7 @@ class EvidenceMiddleware(AgentMiddleware):
         capped = tool_output.cap(text, settings.tool_output_max_chars)
         error = result.status == "error"
         ctx.log.log(
-            logging.WARNING if error else logging.INFO,
+            logging.WARNING if error else logging.DEBUG,
             "tool_call",
             extra={"ref": ref, "tool": call["name"], "tool_args": args, "latency_ms": latency_ms,
                    "error": capped if error else None},

@@ -1,6 +1,7 @@
 """`agent` command line. Interface only: core modules never import this."""
 
 import asyncio
+import logging
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
@@ -13,12 +14,12 @@ from rich.console import Console
 from rich.text import Text
 from urllib3.exceptions import HTTPError
 
-from k8s_agent import access, scenarios, ui
+from k8s_agent import access, scenarios, tracing, tracking_server, ui
 from k8s_agent.agent import McpUnavailable, NotStarted, RunStatus
 from k8s_agent.agent import investigate as run_investigation
 from k8s_agent.config import Settings, get_settings
 from k8s_agent.kube import KubeError, admin_clients
-from k8s_agent.logs import setup_logging
+from k8s_agent.logs import LOGGER, setup_logging
 
 app = typer.Typer(no_args_is_help=True, help="Kubernetes troubleshooting agent.")
 scenario_app = typer.Typer(no_args_is_help=True, help="Create or remove the broken scenarios.")
@@ -26,7 +27,14 @@ app.add_typer(scenario_app, name="scenario")
 
 NameArg = Annotated[str, typer.Argument(help="Scenario name, e.g. selector")]
 EXIT_FAILED, EXIT_NOT_STARTED = 1, 2
-CLUSTER_ERRORS = (scenarios.ScenarioError, KubeError, TimeoutError, ApiException, HTTPError)
+CLUSTER_ERRORS = (
+    scenarios.ScenarioError,
+    tracking_server.InstallError,
+    KubeError,
+    TimeoutError,
+    ApiException,
+    HTTPError,
+)
 
 
 def _say(msg: str) -> None:
@@ -43,6 +51,17 @@ def _settings(error_code: int = 1) -> Settings:
         return get_settings()
     except ValidationError as e:
         _fail(f"invalid settings:\n{e}", error_code)
+
+
+def _tracing(s: Settings) -> tracing.Tracing | None:
+    """Tracing, if configured. Best-effort for `investigate`: a tracking server that doesn't
+    answer at start is one warning, and the run goes on untraced."""
+    try:
+        return tracing.enable(s)
+    except tracing.TracingUnavailable as e:
+        logging.getLogger(LOGGER).warning("tracing_unavailable", extra={"error": str(e)})
+        _say(f"warning: {e}; investigating without tracing")
+        return None
 
 
 @contextmanager
@@ -81,6 +100,7 @@ def investigate(
     err = Console(stderr=True)
     # JSON logs are for machines: kept off an interactive terminal unless AGENT_LOG_FILE is set.
     setup_logging(s.log_level, s.log_file, enabled=bool(s.log_file) or not err.is_terminal)
+    trace = _tracing(s)
     user_id = user or s.effective_user_id
     if not quiet:
         err.print(
@@ -101,7 +121,12 @@ def investigate(
         _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", EXIT_NOT_STARTED)
     except NotStarted as e:
         _fail(str(e), EXIT_NOT_STARTED)
+    finally:
+        tracing.flush()  # before the link, so the trace it opens is complete
     result = record.result
+    if trace and result.trace_id:
+        url = trace.url(result.trace_id)
+        err.print(Text.assemble(("Trace: ", "bold"), (url, f"link {url}")), soft_wrap=True)
     if as_json or not sys.stdout.isatty():
         typer.echo(result.model_dump_json(indent=2 if sys.stdout.isatty() else None))
     else:
@@ -112,11 +137,13 @@ def investigate(
 
 @app.command()
 def setup() -> None:
-    """Create the agent's identities and kubeconfigs. Safe to re-run.
+    """Create the agent's identities and kubeconfigs, and install the tracking server. Safe to
+    re-run.
 
     Applies deploy/rbac.yaml (the read-only `reader` and the fix-only `remediator` in
-    namespace k8s-agent) and writes a short-lived kubeconfig for each. Re-run to refresh
-    expired tokens."""
+    namespace k8s-agent) and writes a short-lived kubeconfig for each; re-run to refresh
+    expired tokens. Then installs or upgrades the MLflow tracking server with Helm
+    (deploy/mlflow-values.yaml), returning once it's ready."""
     s = _settings()
     with _clean_errors():
         c = admin_clients(s)
@@ -129,8 +156,14 @@ def setup() -> None:
             kubeconfigs=paths,
             progress=_say,
         )
+        port = tracking_server.install(s, c, _say)
     expires = min(cred.expires for cred in creds)
     _say(f"setup done; tokens expire {expires.isoformat()} (re-run `agent setup` to refresh)")
+    if port:
+        _say(
+            f"traces: set MLFLOW_TRACKING_URI to the server's LoadBalancer address, port {port} "
+            f"(OrbStack: http://localhost:{port})"
+        )
 
 
 @scenario_app.command("list")

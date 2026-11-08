@@ -3,6 +3,7 @@
 failure anywhere still removes what it created."""
 
 import asyncio
+import os
 import subprocess
 import time
 from collections.abc import Callable
@@ -22,6 +23,10 @@ from k8s_agent.scenarios import OWNER_LABEL, OWNER_VALUE, fault_live, get_scenar
 
 with suppress_langchain_beta_warning():
     from langchain.mcp import MCPAdapter
+
+# Test runs trace to their own experiment, not the one users open.
+os.environ["MLFLOW_EXPERIMENT_NAME"] = get_settings().accept_mlflow_experiment_name
+get_settings.cache_clear()
 
 ROOT = Path(__file__).resolve().parents[2]
 FOLDERS = ["crashloop", "selector", "readiness", "healthy"]

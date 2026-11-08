@@ -76,12 +76,36 @@ class Settings(BaseSettings):
     # display shows the same events there).
     log_file: Path | None = None
 
+    # MLflow tracing (SPEC §3.7), under MLflow's own variable names. No tracking URI = no
+    # tracing. MLflow's own HTTP defaults retry for minutes, so a stopped server would hold up
+    # exit: these fail fast instead (tracing never decides how a run ends).
+    mlflow_tracking_uri: str | None = Field(None, validation_alias="MLFLOW_TRACKING_URI")
+    mlflow_experiment_name: str = Field("k8s-agent", validation_alias="MLFLOW_EXPERIMENT_NAME")
+    mlflow_http_request_timeout: PositiveInt = Field(
+        3, validation_alias="MLFLOW_HTTP_REQUEST_TIMEOUT"
+    )  # seconds per call to the tracking server (it runs on this machine's cluster)
+    mlflow_http_request_max_retries: int = Field(
+        0, ge=0, validation_alias="MLFLOW_HTTP_REQUEST_MAX_RETRIES"
+    )
+    # MLflow's usage telemetry to its own servers (on by default in MLflow); traces never go.
+    mlflow_disable_telemetry: bool = Field(True, validation_alias="MLFLOW_DISABLE_TELEMETRY")
+    # The tracking server `agent setup` installs in the cluster, with MLflow's Helm chart.
+    mlflow_chart: str = "oci://ghcr.io/mlflow/charts/mlflow"
+    mlflow_chart_version: str = "3.18.0"
+    mlflow_release: str = "mlflow"
+    mlflow_namespace: str = "mlflow"
+    mlflow_values_file: Path = Path("deploy/mlflow-values.yaml")
+    # The first install pulls a ~1.4 GB image (about 2.5 min on the M4 spike's machine).
+    mlflow_install_timeout_seconds: PositiveInt = 600
+
     # Acceptance tests: how long an assertion may keep retrying for state that flips between
     # polls (e.g. CrashLoopBackOff).
     accept_assert_timeout_seconds: PositiveFloat = 30
     # M2+ acceptance setup keeps scenarios already up (ours, manifests re-applied cleanly, fault
     # live) and leaves them up afterwards: no tests change them. False = fresh, removed after.
     accept_reuse_scenarios: bool = True
+    # Test runs trace here, so the experiment users open (MLFLOW_EXPERIMENT_NAME) shows real runs.
+    accept_mlflow_experiment_name: str = "k8s-agent-tests"
 
     @field_validator("remediation_namespaces", "tool_output_strip_fields", mode="before")
     @classmethod
@@ -112,6 +136,16 @@ class Settings(BaseSettings):
     @property
     def effective_user_id(self) -> str:
         return self.user_id or getpass.getuser()
+
+    @property
+    def model_settings(self) -> dict[str, str]:
+        """What a trace records about the models (with the git commit, it pins the prompts)."""
+        return {
+            "model": self.model,
+            "critic_model": self.effective_critic_model,
+            "effort": self.effort,
+            "max_output_tokens": str(self.max_output_tokens),
+        }
 
 
 @lru_cache

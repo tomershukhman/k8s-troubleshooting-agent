@@ -39,9 +39,10 @@ from k8s_agent.agent import tool_output
 from k8s_agent.agent.critic import judge
 from k8s_agent.agent.middleware import (
     EvidenceMiddleware,
-    RetryToolErrors,
     RunContext,
+    ToolErrorAsResult,
     retries_exhausted,
+    worth_retrying,
 )
 from k8s_agent.agent.records import Step, VerifyRound, steps_from_messages
 from k8s_agent.config import Settings
@@ -91,14 +92,15 @@ def build_investigator(model: BaseChatModel, tools: list[BaseTool], settings: Se
         response_format=ProviderStrategy(Diagnosis),
         middleware=[
             EvidenceMiddleware(),
-            # A failed call is retried with backoff (RetryToolErrors decides which), then
-            # comes back to the model as a tool error.
+            # A failed call raises: it is retried with backoff unless a retry can't fix it,
+            # then comes back to the model as a tool error with the server's text.
+            ToolErrorAsResult(),
             ToolRetryMiddleware(
                 max_retries=settings.tool_max_retries,
                 initial_delay=settings.tool_retry_delay_seconds,
+                retry_on=worth_retrying,
                 on_failure=retries_exhausted(settings.tool_max_retries + 1),
             ),
-            RetryToolErrors(),
             ModelRefusalMiddleware(),
             ModelCallLimitMiddleware(  # "error": the run stops, and the core says which limit
                 run_limit=settings.max_model_calls,
@@ -196,7 +198,7 @@ async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext
         proposed_fix_backed=fix_backed,
         feedback=feedback,
     )
-    ctx.log.info("verify_round", extra=round_.model_dump(exclude={"findings"}))
+    ctx.log.debug("verify_round", extra=round_.model_dump(exclude={"findings"}))
     if founded:
         return Command(goto="result", update={"rounds": [round_]})
     if number < ctx.settings.max_verify_rounds:

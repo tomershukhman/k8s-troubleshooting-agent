@@ -2,14 +2,15 @@
 
 An AI agent that investigates a Kubernetes cluster, finds the root cause of an issue, and recommends the next action.
 
-**Guiding principle: the cluster is the system under investigation; the agent and its tools run beside it.** Only the test scenarios and the agent's identities live in the cluster.
+**Guiding principle: the cluster is the system under investigation; the agent and its tools run beside it,** so a diagnosis never depends on the health of the cluster it diagnoses. In the cluster: the test scenarios, the agent's identities, and one supporting service, the MLflow tracking server that stores the traces.
 
-This repository contains the investigator agent (`agent investigate`), the failure scenarios it is tested against with a CLI to deploy and remove them, and the agent's safe access to the cluster: two narrowly scoped identities and a read-only MCP server running beside the cluster. The design is in [SPEC.md](SPEC.md).
+This repository contains the investigator agent (`agent investigate`), the failure scenarios it is tested against with a CLI to deploy and remove them, the agent's safe access to the cluster (two narrowly scoped identities and a read-only MCP server running beside the cluster), and MLflow tracing of every run. The design is in [SPEC.md](SPEC.md).
 
 ## Requirements
 
 - A local Kubernetes cluster your kubeconfig points at. The examples use [kind](https://kind.sigs.k8s.io/). So far it has been tested on OrbStack only; kind, minikube and Docker Desktop are untested.
 - [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 if needed).
+- [Helm 4](https://helm.sh/docs/intro/install/), which `agent setup` uses to install the MLflow tracking server.
 - Docker with Compose and host networking. Host networking is built in on Linux and OrbStack. On Docker Desktop (4.34+) it's one setting: Settings → Resources → Network → Enable host networking.
 - On native Linux Docker only: set `AGENT_CONTAINER_USER` in `.env` to your `id -u`:`id -g`, so the MCP container can read the credential file `agent setup` writes (mode 0600).
 - An [Anthropic API key](https://console.anthropic.com/) for the agent, as `ANTHROPIC_API_KEY` in `.env` or your environment.
@@ -20,7 +21,7 @@ This repository contains the investigator agent (`agent investigate`), the failu
 kind create cluster --name k8s-agent    # or use any local cluster you already have
 uv sync
 cp .env.example .env                    # then set ANTHROPIC_API_KEY; override any other setting
-uv run agent setup                      # the agent's identities (once; re-run to refresh tokens)
+uv run agent setup                      # the agent's identities and the tracking server (re-run to refresh tokens)
 docker compose up -d --wait k8s-mcp     # the read-only MCP server
 ```
 
@@ -91,7 +92,7 @@ Piped, or with `--json`, the result is JSON on stdout instead, for scripts (shor
 
 ```json
 {
-  "run_id": "…", "thread_id": "…", "user_id": "alice", "status": "completed",
+  "run_id": "…", "thread_id": "…", "user_id": "alice", "trace_id": "tr-…", "status": "completed",
   "diagnosis": {
     "status": "fault_found",
     "fault_category": "selector_mismatch",
@@ -137,7 +138,38 @@ When access to a namespace is refused, the progress line says so in yellow (`no 
 
 A failed tool call is retried with backoff (`AGENT_TOOL_MAX_RETRIES`, 2; first wait `AGENT_TOOL_RETRY_DELAY_SECONDS`, 1 s, doubling), then comes back to the model as a tool error with the server's own text. This covers timeouts and API errors that may pass on a second try. Errors a retry can't fix go back at once: access refused, an object or kind that doesn't exist, a missing argument. The MCP server gives no error code, so these are recognised by the Kubernetes API server's wording, which an M3 acceptance test checks against the real server; if a new server version rewords them, they are only retried, never misread. Retries don't count toward the tool-call budget.
 
-Logs are JSON lines, each tagged with `run_id`, `thread_id` and `user_id`: run started and finished, each tool call, each verify round, warnings and failures. They go to stderr when it isn't a terminal (containers, CI, a pipe), or to `AGENT_LOG_FILE` if set; an interactive terminal shows the progress view instead. `AGENT_LOG_LEVEL=WARNING` keeps only problems.
+Logs are JSON lines, each tagged with `run_id`, `thread_id` and `user_id`. At `INFO` (the default) they say when a run started and finished (duration, status) and every warning or failure with its reason; `AGENT_LOG_LEVEL=DEBUG` adds each tool call and verify round. They go to stderr when it isn't a terminal (containers, CI, a pipe), or to `AGENT_LOG_FILE` if set; an interactive terminal shows the progress view instead. The trace (next section) is the full record; the logs are the short fallback.
+
+## Observability: MLflow traces
+
+Every run is traced to an MLflow 3 tracking server that `agent setup` installs in the cluster with MLflow's official Helm chart and a minimal values file ([`deploy/mlflow-values.yaml`](deploy/mlflow-values.yaml)): one replica, SQLite on a 1 GiB volume so traces survive a restart, about 400 MiB of memory. The chart's built-in job runner is switched off: the evals score on the client, and with it the server needs 1.8 GiB. `agent setup` returns only once the server passes its readiness check. On OrbStack it's at http://localhost:5050 (not 5000, which macOS's AirPlay Receiver often holds). Clusters that give LoadBalancer Services no address (kind, minikube) need a port-forward for the same URL: `kubectl port-forward -n mlflow svc/mlflow-mlflow 5050`.
+
+Tracing is on when `MLFLOW_TRACKING_URI` is set, as in `.env.example`. After each run the CLI prints the trace's link on stderr, and the result JSON carries its `trace_id`:
+
+```
+Trace: http://localhost:5050/#/experiments/3/traces?selectedEvaluationId=tr-ccfdf6fca46ec9a45e9920ac689258a7
+```
+
+What a trace shows, against the brief's list:
+
+| The brief asks to see | Where it is in the trace |
+|---|---|
+| request → agent → model → tool calls → response | The root span `investigation` holds the question and the result JSON. Under it, each stage of the graph is a span (`intake`, `investigate`, `verify_evidence`, `result`), with the `investigator` agent and its model and tool calls inside `investigate`, and the `critic` inside `verify_evidence`. |
+| What the agent did; which tools | One span per tool call, named after the tool, with its evidence ID (`E3`) in the span's metadata. |
+| Tool inputs and outputs | Each tool span holds the arguments and the server's raw output; the `tools` step around it holds what the model saw (cleaned, capped and tagged). |
+| Failures or errors | A refused or failed tool call is an error span with the server's message. A failed run marks the whole trace as an error. |
+| Latency | Every span's duration; the trace's duration is the run's. |
+| How the conclusion was reached | The model's reasoning summaries, in its model-call spans, and the critic's verdict in each verify round: every finding judged, with its reason. |
+
+Each trace also records who asked and which conversation (MLflow's own user and session fields, which the UI filters by), the run ID, the model settings and the git commit, which pins the prompts too. MLflow adds the token counts and cost of each model call and of the run.
+
+The tracing is MLflow's own: `mlflow.langchain.autolog()` traces the LangGraph run. The agent only adds the root span, names the graph run, and puts each call's evidence ID in the tool's metadata, which MLflow records.
+
+Tracing never decides how a run ends:
+- **The tracking server can't be reached when the run starts:** one warning, and the run goes on without tracing, after at most one 3-second check.
+- **It stops during a run:** the spans that can't be sent are dropped, and the CLI still exits at once. Each call to the server is limited to 3 seconds (`MLFLOW_HTTP_REQUEST_TIMEOUT`) and not retried (`MLFLOW_HTTP_REQUEST_MAX_RETRIES=0`); MLflow's own defaults retry for about four minutes.
+
+MLflow's usage telemetry to its own servers (`MLFLOW_DISABLE_TELEMETRY`) is off in the agent and in the tracking server.
 
 ## How the agent reaches the cluster
 
@@ -194,18 +226,20 @@ uv run agent scenario down selector      # delete the namespace (and the RoleBin
 
 ```bash
 make check         # lint + unit tests (no cluster, Docker or network; never reads your .env)
-make accept M=3    # milestone 3's acceptance tests, against your cluster and the real model
+make accept M=4    # milestone 4's acceptance tests, against your cluster, the real model and MLflow
 make accept        # every milestone's acceptance tests (before committing a milestone)
 ```
 
-The acceptance tests deploy and remove the scenarios themselves, and clean up even when a test fails. The M2 and M3 tests keep scenarios that are already up (ours, manifests re-applied cleanly, fault live) and leave them up afterwards, since no test changes them; this saves about a minute per run. `AGENT_ACCEPT_REUSE_SCENARIOS=false` gives fresh scenarios, removed afterwards (needed only if you delete an object from a manifest, which re-applying doesn't remove). The M2 and M3 tests also run `agent setup`, and start the `k8s-mcp` service if it isn't running (and stop it again afterwards). The M2 tests call the MCP server through `langchain[mcp]`, the client the agent uses. The M3 tests ask the real model each scenario's question without a namespace and check the diagnosis against the scenario's accepted answers (one retry, because model answers vary); each run costs a few cents of API usage. The unit tests use a scripted model, an in-process fake MCP server and a fake Kubernetes API, and never reach a cluster.
+The acceptance tests deploy and remove the scenarios themselves, and clean up even when a test fails. The M2 and M3 tests keep scenarios that are already up (ours, manifests re-applied cleanly, fault live) and leave them up afterwards, since no test changes them; this saves about a minute per run. `AGENT_ACCEPT_REUSE_SCENARIOS=false` gives fresh scenarios, removed afterwards (needed only if you delete an object from a manifest, which re-applying doesn't remove). The M2 and M3 tests also run `agent setup`, and start the `k8s-mcp` service if it isn't running (and stop it again afterwards). The M2 tests call the MCP server through `langchain[mcp]`, the client the agent uses. The M3 tests ask the real model each scenario's question without a namespace and check the diagnosis against the scenario's accepted answers (one retry, because model answers vary); each run costs a few cents of API usage. The M4 tests run `agent investigate` as a user would, read its trace back from the tracking server and check it against the brief's observability list line by line; they also restart and stop the tracking server (and bring it back with `agent setup`), and need `MLFLOW_TRACKING_URI`. Test runs trace to their own experiment, `k8s-agent-tests` (`AGENT_ACCEPT_MLFLOW_EXPERIMENT_NAME`), so `k8s-agent` shows real runs only. The unit tests use a scripted model, an in-process fake MCP server and a fake Kubernetes API, and never reach a cluster.
 
 ## Project layout
 
 ```
 scenarios/<folder>/      manifests/*.yaml (namespace.yaml: the namespace and the agent's access) + scenario.yaml
 deploy/rbac.yaml         the agent's identities: ServiceAccounts, ClusterRoles (applied by `agent setup`)
-src/k8s_agent/           CLI, scenarios, agent identities (access.py), settings (config.py)
+deploy/mlflow-values.yaml  the MLflow tracking server's Helm values (installed by `agent setup`)
+src/k8s_agent/           CLI, scenarios, agent identities (access.py), settings (config.py),
+                         tracing (tracing.py), the tracking server install (tracking_server.py)
 src/k8s_agent/agent/     the agents: workflow (graph.py), investigator middleware, critic, prompts (*.md)
 mcp/config.toml          MCP server configuration (read-only, tool allowlist, Secrets denied)
 docker-compose.yml       the k8s-mcp service

@@ -8,9 +8,11 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "fastmcp>=4.1.6",
+    "gitpython>=3.1",
     "kubernetes>=37.0.2,<38",
     "langchain-anthropic>=1.7.10",
     "langchain[mcp]>=1.4.9",
+    "mlflow-tracing>=3.18.0",
     "pydantic>=2.14.3",
     "pydantic-settings>=2.16.2",
     "pyyaml>=6.0.3",

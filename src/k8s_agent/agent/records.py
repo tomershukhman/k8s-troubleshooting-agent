@@ -58,6 +58,7 @@ class RunResult(BaseModel):
     run_id: str
     thread_id: str
     user_id: str
+    trace_id: str | None = None  # the run's MLflow trace; None when tracing is off
     question: str
     namespace: str | None
     status: RunStatus

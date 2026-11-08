@@ -70,7 +70,8 @@ The M8 extra adds two more containers beside the cluster: `api` and `postgres` (
 
 **Cluster: any local Kubernetes cluster, chosen by kubeconfig context**
 - **Supported and tested: OrbStack (macOS).** The README's main path uses it.
-- Other local clusters (kind, minikube, Docker Desktop) should work but are untested. Docker Desktop needs host networking switched on ([2.4](#24-constraints)).
+- From M7, CI also runs the evals on a kind cluster (Linux), so kind gets tested there.
+- Other local clusters (minikube, Docker Desktop) should work but are untested. Docker Desktop needs host networking switched on ([2.4](#24-constraints)).
 - **Why:** the reviewer must reproduce it easily. The brief says "such as kind or minikube", which allows other local clusters.
 
 **LLM provider: Anthropic**
@@ -86,15 +87,26 @@ The M8 extra adds two more containers beside the cluster: `api` and `postgres` (
 **Language: Python 3.14**
 - **Why:** supported by langchain-core 1.7.x, kubernetes 37.x and FastAPI 0.162.x (checked on PyPI 2026-11-08).
 
-**CI: minimal GitHub Actions, built in M7**
-- **Why:** the brief requires it: tests, container build, and eval execution or validation.
-- **One workflow, `ci.yml`, on every push and PR:**
-  - `make check`: lint + unit tests, including the eval scorers re-scoring saved traces. No tracking server, no cluster, no API key.
+**CI: GitHub Actions, two workflows, built in M7**
+- **Why:** the brief requires it: tests, container build, and eval execution or validation. We run the evals for real, because only that tests the agent: re-scoring saved answers would test only the scoring code.
+- **`ci.yml`, on every push and PR** (fast, free; no cluster, no tracking server, no API key):
+  - `make check`: lint + unit tests
   - the image build
   - scenario-file validation
+- **Branches (from M7 on):** day-to-day work goes to `dev`, and reaches `main` only through a pull request. A branch rule on `main` requires both workflows to pass before the merge (a repository setting, set in M7).
+- **`eval.yml`, on every pull request to `main` and from a manual button** (evaluation execution):
+  - A newer push to the same pull request cancels the run in progress, so only the latest code gets paid for.
+  - A throwaway kind cluster on GitHub's runner, from the official `helm/kind-action` (pinned by commit SHA). Testing on a temporary kind cluster in CI is what kind is built for, and how Helm tests its own charts.
+  - The README's own commands: `agent setup` (permissions, MCP server, MLflow via Helm), then the full evals (`agent eval`) with the real model and judges.
+  - MLflow is reached through `kubectl port-forward` on the same local port as on OrbStack: kind gives LoadBalancer Services no address. CI installs Helm 4: its `--wait` doesn't wait for a LoadBalancer address, whereas Helm 3's waits forever on kind (both checked in the sources, 2026-11-08).
+  - The job fails if any scenario misses its thresholds. The eval results file is kept as a workflow artifact.
+  - The API key is the `ANTHROPIC_API_KEY` repository secret. GitHub doesn't give secrets to pull requests from forks, so there the job stops at its first step with a notice; a reviewer can run the same evals locally (`agent eval`).
+- **kind is CI-only.** Local development stays on OrbStack; both are plain Kubernetes reached through a kubeconfig context.
 - **Rejected:**
+  - Validation only (re-scoring saved eval traces in `make check`): it tests the scoring code, not the agent.
   - A self-hosted runner on the developer's Mac or cluster. CI would depend on that machine being on, it isn't clean per job, and it's unsafe if the repo is ever public.
-  - A manual button running live evals on a throwaway kind cluster on GitHub's runner. The brief only requires "execution or validation", and CI already re-scores saved traces with no server and no model ([3.6](#36-scenarios-and-evals)).
+  - Evals on every push to any branch: a full eval costs money each time, and model answers vary, so running it on every `dev` push would be slow and flaky. It runs on the pull request that brings work to `main`.
+  - Evals again on the push to `main` after the merge: the pull request already ran them on the merged code.
 
 ---
 
@@ -224,14 +236,17 @@ Every scenario runs **3 times** (configurable), because model output varies betw
 - **Code checks what can be checked exactly:** the diagnosis against accepted answers, that cited evidence exists, and what the agent actually did (its tool calls). Free, instant, and the same result every time.
 - **An LLM judge checks what needs judgment:** whether the cited evidence really supports the conclusion, and whether the recommended action is appropriate and safe as advice to a human operator.
   - Why judge the advice: the agent's own actions are safe by construction (read-only tools; one narrow fix tool, gated by human approval of its exact arguments). Its *advice* is not, because a human may run it with admin rights.
-- **The eval judge is separate from the critic:** it runs offline, on Opus 5.5 (`AGENT_JUDGE_MODEL`), with its own rubric, as an independent check on the whole system.
+- **Two built-in MLflow judges, separate from the critic:** both run offline on Opus 5.5 (`AGENT_JUDGE_MODEL`), as an independent check on the whole system.
+  - **Advice appropriate and safe:** `ExpectationsGuidelines`, which reads each scenario's rubric (from `scenario.yaml`) from that test case's expectations. No custom judge code.
+  - **Evidence supports the conclusion:** `make_judge` with `{{ trace }}`, so it reads the actual tool outputs the agent cited. We write only its instructions.
+  - MLflow's `ToolCallCorrectness` / `ToolCallEfficiency` are LLM judgments of whether calls were *reasonable*, not exact checks against what a scenario requires, so the four exact checks stay as our own `@scorer` functions.
 - **The evals are proven able to fail:** a fake agent that always answers "no fault" must fail; the judge must fail a correct conclusion backed by irrelevant citations.
 - **Written by hand per scenario:** only the expected answers, the required tool calls and the judge's rubric, a few lines of YAML. The scoring code is shared.
 - **No keyword lists:** a word list would fail "no need to delete the pods" and pass "scale to 0".
 
 ### 2.4 Constraints
-- Runs with only Docker, a local Kubernetes cluster and an Anthropic API key.
-- **Supported and tested: OrbStack (macOS).** Other local clusters (kind, minikube, Docker Desktop) should work but are untested; Docker Desktop needs host networking switched on (next point).
+- Runs with only Docker, a local Kubernetes cluster and an Anthropic API key. Until M7 packages it, the CLI also needs uv and Helm 4 on the host (Helm 4: `--rollback-on-failure` exists only there); from M7, Helm is in the app image.
+- **Supported and tested: OrbStack (macOS);** kind (Linux) is tested by CI from M7. Other local clusters (minikube, Docker Desktop) should work but are untested; Docker Desktop needs host networking switched on (next point).
 - Docker must allow host networking for our containers that talk to the cluster ([3.10](#310-networking)). It's built in on Linux and OrbStack. On Docker Desktop (4.34+) it's one setting: Settings → Resources → Network → Enable host networking.
 - Read-only by default.
 - No secrets in images or committed files (`.env.example` holds placeholders only).
@@ -641,36 +656,41 @@ Each role has its own short prompt file. Tool output is untrusted data in all th
 - `up` recreates the namespace from the folder (Namespace with the ownership label, app manifests, RoleBindings), then waits briefly until the fault is live: pods ready or not ready, plus "restarts ≥ 2" for crashloop.
 - `down` deletes the namespace and waits until it's gone.
 
-**Evals: `mlflow.genai.evaluate`**
-- **Decision:** `agent eval` calls MLflow's `mlflow.genai.evaluate(data, scorers, predict_fn)`.
-- **Checked by the design session (2026-11-08, MLflow 3.18.0 installed and its docs read):** custom `@scorer` functions; built-in judges (`Guidelines`, `Safety`) and `make_judge`; an async `predict_fn`; scorers can read the whole trace; thresholds via quality criteria (`min`, `mean`, …); and `evaluate` also accepts saved traces instead of re-running the agent.
+**Evals: `mlflow.genai.evaluate`, one evaluation per scenario**
+- **Decision:** `agent eval` loops over the scenarios. For each one: `scenario up` **once**, then one `mlflow.genai.evaluate(data, scorers, predict_fn, quality_criteria)` over that scenario's N runs (default 3), inside its own MLflow run.
+- **Why once per scenario, not per run:** a diagnosis run only reads the cluster, so every run sees the same broken state (M3's tests already reuse running scenarios). Rebuilding before each run (about 40 s for crashloop) was most of the eval's time, and cluster setup doesn't belong in MLflow's per-run `predict_fn`. Only the selector scenario's fix run changes the cluster, so the scenario is rebuilt after it.
+- **Checked by the design session (2026-11-08, MLflow 3.18.0 installed and its docs read):** custom `@scorer` functions; built-in `ExpectationsGuidelines`, `Guidelines`, `Safety`; `make_judge` with `{{ trace }}`; an async `predict_fn`; scorers can read the whole trace; `quality_criteria` (a bare scorer name checks its mean, `` `name/min` `` the worst run; the eval run "counts as passing only when every condition holds"); saved traces can be scored instead of re-running the agent.
 
 ```mermaid
 flowchart LR
-    data["data<br/>scenarios × N runs<br/>(default 3)"] --> predict
-    subgraph ev["mlflow.genai.evaluate"]
-        predict["predict_fn, per run<br/>reset the scenario,<br/>run the agent graph<br/>(question, no namespace),<br/>return the result + trace"]
-        predict --> scorers["scorers, per run<br/>code: diagnosis, refs exist,<br/>required tools, safe actions<br/>MLflow judge: evidence, advice"]
-        scorers --> thresholds["quality criteria<br/>the ≥2 of 3 runs thresholds,<br/>per scenario"]
+    up["scenario up<br/>(once per scenario)"] --> ev
+    subgraph ev["mlflow.genai.evaluate, per scenario"]
+        data["data<br/>the scenario's question × N runs<br/>(default 3), with its expectations"] --> predict
+        predict["predict_fn, per run<br/>ask the agent graph<br/>(question, no namespace)"]
+        predict --> scorers["scorers, per run<br/>code: diagnosis, refs exist,<br/>required tools, safe actions<br/>judges: ExpectationsGuidelines (advice),<br/>make_judge on the trace (evidence)"]
+        scorers --> criteria["quality_criteria<br/>≥2 of 3 = mean ≥ 0.66<br/>every run = min ≥ 1"]
     end
-    thresholds --> ml["MLflow<br/>each score on its run's trace,<br/>eval runs compared across versions"]
+    criteria --> ml["MLflow<br/>each score on its run's trace;<br/>eval runs compared across versions"]
 ```
 
 | Piece | What it is |
 |---|---|
-| `data` | The scenarios × N runs. |
-| `predict_fn` | Reset the scenario, run the agent graph through the same core function the CLI uses, asking the scenario's question **without a namespace** (the agent must find it), and return the result. The run's trace is captured. |
-| `scorers` | Our scoring rules ([2.3](#23-definition-of-done-evals)) as custom `@scorer` functions, which can read the whole trace: diagnosis vs accepted answers, cited refs exist, required tools, agent actions safe. Plus one MLflow judge (`make_judge` or `Guidelines`) holding our rubric, on `AGENT_JUDGE_MODEL`. |
-| Thresholds | The "≥2 of 3 runs" thresholds, per scenario, via quality criteria. `evaluate` runs per scenario if that's needed for "2 of 3". |
+| Setup | `scenario up` once before the scenario's evaluation; for the selector scenario, again after its fix run. |
+| `data` | The scenario's question × N runs, each with the scenario's expectations (accepted answers, required tools, judge rubric). |
+| `predict_fn` | Runs the agent graph through the same core function the CLI uses, asking the question **without a namespace** (the agent must find it). No cluster setup. The run's trace is captured. |
+| `scorers` | Four exact checks as our own `@scorer` functions (diagnosis vs accepted answers, cited refs exist, required tools, agent actions safe) + the two built-in judges ([2.3](#23-definition-of-done-evals)). |
+| `quality_criteria` | That scenario's thresholds in one line, e.g. `diagnosis_correct >= 0.66 AND evidence_supports >= 0.66 AND advice_ok >= 0.66 AND \`evidence_exists/min\` >= 1 AND \`actions_safe/min\` >= 1`. |
 | Concurrency | `EVAL_MAX_CONCURRENCY`, default 1: runs of the same scenario share a namespace. |
 
-- **Fix requests:** if a run reaches the approval pause, the eval rejects and records the request. The exception is the selector scenario's dedicated remediation run, which approves: the only automatic approval, in eval code.
-- **Output:** every score sits on its run's trace in MLflow, and eval runs compare across versions. Locally: `./eval-results/<timestamp>.json` plus a summary table. Non-zero exit if thresholds fail.
-- **Recorded runs:** the results file contains every run's full record (all steps). The traces from one real eval run are saved as test fixtures. `evaluate` accepts saved traces, so `make check` re-scores them with the same code scorers, with no server and no model, to prove the scoring code still works.
+- **Fix requests:** if a run reaches the approval pause, the eval rejects and records the request. The exception is the selector scenario's dedicated fix run, which approves: the only automatic approval, in eval code.
+- **Output:** every score sits on its run's trace in MLflow, and eval runs compare across versions. Locally: `./eval-results/<timestamp>.json` plus a summary table. Non-zero exit if any scenario fails its criteria.
+- **Speed and cost:** MLflow records duration, tokens and cost per traced run. The README shows the numbers from one real eval run (average per investigation, and the total), so accuracy is reported next to what it costs.
+- **CI (execution):** `eval.yml` runs these same evaluations on a throwaway kind cluster for every pull request to `main` ([1](#1-key-decisions)). The "the eval can fail" tests (a fake agent, judges given bad answers) run in `make accept M=5`.
 - **Why:** use the widely used tool we already run for tracing instead of a custom harness. Scores next to traces is exactly "see what the agent did, then judge it".
 - **Rejected:**
   - A custom eval runner.
   - DeepEval: a second tool next to MLflow, with a separate cloud UI.
+  - Rebuilding the scenario before every run: diagnosis runs don't change the cluster, so it only costs time.
 
 ### 3.7 Observability
 
@@ -698,21 +718,23 @@ Three layers. Nothing in `investigate` depends on the tracking server running; l
 - **Reliable, minimal install:** `agent setup` installs it with MLflow's official Helm chart via `helm upgrade --install --wait`, which returns only when the readiness check passes. A committed values file keeps it minimal: one replica, small CPU and memory requests, and SQLite on a small persistent volume, so traces survive a pod restart. M4 measures real memory use on OrbStack and sets the requests from it.
 - **Optional for `investigate`; required for running live evals,** since eval results go to the tracking server.
 - **One-line tracing:** `mlflow.langchain.autolog()` traces the LangGraph run: request → agent → model calls → tool calls → result. Each graph stage is its own span.
-- **One trace per run, approval included:** in the CLI, pause and resume happen in the same process, so one root span wraps the whole command and both halves land in it (M4 spike, 2026-11-08). In M8, where the approval arrives in a separate request, the trace context (`mlflow.tracing.get_tracing_context_headers_for_http_request()`, a W3C `traceparent`) is saved with the paused state and restored on resume with `set_tracing_context_from_http_request_headers(...)` (tested: one stored trace, spans from both halves).
+- **One trace per run, approval included:** the root span `investigation` is opened in the core function every caller uses (CLI, evals, M8 API), so each gets the same trace, `trace_id` and metadata. So in M6 the approval pause and the resume must happen inside that one call (e.g. an approval callback the CLI passes in); a second call would start a second trace. In M8, where the approval arrives in a separate request, the trace context (`mlflow.tracing.get_tracing_context_headers_for_http_request()`, a W3C `traceparent`) is saved with the paused state and restored on resume with `set_tracing_context_from_http_request_headers(...)` (tested: one stored trace, spans from both halves).
 - **M4 spike findings** (2026-11-08, full report in the shared notes):
   - **Helm:** the chart's defaults get OOMKilled (1.8 GiB); set `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`. Then ~400 MiB working set and ~5m CPU idle; install takes 15 s warm, about 2m20s on the first image pull.
-  - **Exit with the server down:** set `MLFLOW_HTTP_REQUEST_MAX_RETRIES=0` plus timeouts, so exit takes ~7 s instead of over 90 s.
-  - **Refused tool call as an error span:** `handle_tool_error=False` plus a small middleware that turns the error back into a message for the model (built in M3).
+  - **Exit with the server down:** `MLFLOW_HTTP_REQUEST_MAX_RETRIES=0` and `MLFLOW_HTTP_REQUEST_TIMEOUT` (3 s) are the two settings that matter. With them, exit takes ~1 s; with MLflow's defaults it hangs for minutes (M4, measured).
+  - **Refused tool call as an error span:** `handle_tool_error=False` plus a small middleware that turns the error back into a message for the model (built in M4).
   - **Verified working:** Python 3.14; the slim `mlflow-tracing` package with LangGraph autolog; stage names; tool arguments, output and timing; user and session; tokens; cost; the critic's verdict; the trace link.
 - **Readable trace:** the agents and stages are named explicitly (graph node names; `name` on the agents, `run_name` on the critic call). So a trace's top level reads intake → investigator → critic → result (and remediator → recheck from M6), matching the graph diagram in [3.1](#31-agent-topology-a-langgraph-workflow-with-three-roles).
 - **The model's reasoning summaries** are included (`thinking.display: "summarized"`), so a trace shows how the conclusion was reached (the brief asks for this).
 - **Native fields:** `mlflow.tracing.context(session_id=thread_id, user=user_id)`, stored as `mlflow.trace.session` and `mlflow.trace.user` and filterable in the UI. `run_id`, the git commit and the model settings go into trace metadata.
 - **Reproducibility:** each trace and each eval run records the git commit and the model settings. The prompts are in the repo, so the commit identifies them.
 - **Errors visible:** a refused tool call (e.g. a namespace the agent can't access) shows up as an error span. This covers the brief's "failures or errors".
-- **Link from answer to trace:** `mlflow.get_last_active_trace_id()` gives the trace ID. The CLI prints the trace's MLflow UI link on stderr, next to the progress lines, and the result JSON includes `trace_id` ([4.2](#42-run-json)).
-- **Tokens, latency and cost:** tokens and latency come from the traces, so there's no separate eval table for them. If cost isn't shown, the README says so. No custom pricing; the brief doesn't ask for cost.
+- **Link from answer to trace:** the trace ID comes from the run's own root span (`mlflow.get_last_active_trace_id()` is process-wide, so wrong when runs overlap). The CLI prints the trace's MLflow UI link on stderr, next to the progress lines, and the result JSON includes `trace_id` ([4.2](#42-run-json)).
+- **Tokens, latency and cost:** tokens, latency and cost come from the traces (MLflow shows each model call's and each run's cost; checked in M4), so there's no separate eval table for them. No custom pricing.
 - **Checked once at start:** if the tracking server is unreachable, `investigate` logs one warning and continues without tracing. The evals require it, and fail with a clear message.
-- **Flush on exit:** the CLI calls `mlflow.flush_trace_async_logging()` before exiting, with a short time limit, so a down server can't hang it.
+- **Flush on exit:** the CLI calls `mlflow.flush_trace_async_logging()` before exiting, bounded by the two HTTP settings above, so a down server can't hang it.
+- **MLflow's usage telemetry** (calls to MLflow's own servers) is off by default, in the agent and in the tracking server (`MLFLOW_DISABLE_TELEMETRY`).
+- **Port 5050, not 5000:** macOS's AirPlay Receiver often holds 5000. On OrbStack the server is at `http://localhost:5050`; elsewhere, a port-forward on the same port.
 - **Packaging:** the agent container uses MLflow's slim `mlflow-tracing` package if it supports the LangGraph autolog (to verify in M4). The full `mlflow` package (88 dependencies) is installed only where the evals run.
 
 **What a trace shows, against the brief's observability list.** One M4 acceptance test checks a real stored trace against every line; M4 isn't done unless all pass.
@@ -731,7 +753,7 @@ Three layers. Nothing in `investigate` depends on the tracking server running; l
 - An official Helm chart.
 - Widely used: ~28.7k GitHub stars, ~19.9M monthly PyPI downloads.
 - One-line LangGraph tracing: `mlflow.langchain.autolog()`.
-- Evals built in: `mlflow.genai.evaluate` with custom scorers, built-in judges and quality criteria, including re-scoring saved traces with no server and no model ([3.6](#36-scenarios-and-evals)).
+- Evals built in: `mlflow.genai.evaluate` with custom scorers, built-in judges and quality criteria ([3.6](#36-scenarios-and-evals)).
 
 **Rejected**
 - **Langfuse:** ClickHouse is mandatory (maintainer-confirmed). Official minimums are ~20 GB on paper and 8–16 GB in practice. Its Helm chart needs cert-manager and the ClickHouse operator, and startup can take up to 5 minutes. Too heavy for a small local assignment.
@@ -936,7 +958,14 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 | `AGENT_LOG_LEVEL` | `INFO` | Structured JSON logs. `DEBUG` adds a line per tool call. |
 | `EVAL_RUNS_PER_SCENARIO` / `EVAL_PASS_MIN_RUNS` | 3 / 2 | |
 | `EVAL_MAX_CONCURRENCY` | 1 | Eval concurrency; runs of the same scenario share a namespace |
-| `MLFLOW_TRACKING_URI` | unset = tracing off | The tracking server's address (OrbStack LoadBalancer or port-forward) |
+| `MLFLOW_TRACKING_URI` | unset = tracing off | The tracking server's address: `http://localhost:5050` (OrbStack LoadBalancer or port-forward) |
+| `MLFLOW_EXPERIMENT_NAME` | `k8s-agent` | MLflow's own variable |
+| `MLFLOW_HTTP_REQUEST_TIMEOUT` / `MLFLOW_HTTP_REQUEST_MAX_RETRIES` | 3 / 0 | MLflow's own variables; fail fast so a stopped server can't hold up exit |
+| `MLFLOW_DISABLE_TELEMETRY` | `true` | MLflow's usage telemetry to its own servers |
+| `AGENT_MLFLOW_CHART` / `AGENT_MLFLOW_CHART_VERSION` | `oci://ghcr.io/mlflow/charts/mlflow` / `3.18.0` | The chart `agent setup` installs |
+| `AGENT_MLFLOW_RELEASE` / `AGENT_MLFLOW_NAMESPACE` | `mlflow` / `mlflow` | |
+| `AGENT_MLFLOW_VALUES_FILE` | `deploy/mlflow-values.yaml` | The minimal values |
+| `AGENT_MLFLOW_INSTALL_TIMEOUT_SECONDS` | 600 | The first install pulls a ~1.4 GB image |
 
 **M8 extra**
 
@@ -957,10 +986,10 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 | CLI | Typer + Rich |
 | Schemas / config | Pydantic + pydantic-settings |
 | Tests | pytest. `make check`: lint + unit tests with a fake model and a fake cluster; no network. `make accept M=n`: acceptance tests for milestones 1..n on a real cluster (real model from M3). |
-| CI | GitHub Actions, `ci.yml` only, on every push/PR: `make check` (including the evaluator functions re-scoring the recorded runs), image build, scenario-file validation. |
+| CI | GitHub Actions. `ci.yml` on every push/PR: `make check`, image build, scenario-file validation. `eval.yml` on pull requests to `main` + a manual button: kind cluster (`helm/kind-action`), Helm 4, `agent setup`, `agent eval` with the `ANTHROPIC_API_KEY` secret. |
 | Tracing | MLflow 3 tracing (`mlflow.langchain.autolog()`). Tracking server in the cluster via MLflow's official Helm chart (`helm upgrade --install --wait`, a committed minimal values file), SQLite on a small persistent volume. The agent container uses the slim `mlflow-tracing` package if it covers autolog; the full `mlflow` package only where the evals run. |
-| Evals | `mlflow.genai.evaluate`: custom `@scorer` functions, plus one MLflow judge (`make_judge` or `Guidelines`) holding our rubric |
-| Containers | One app image (non-root, slim). Compose services: `k8s-mcp`, `agent` (remediator creds), `admin` (admin kubeconfig). The MLflow tracking server runs in the cluster (Helm), not in compose. M8 adds `api` and `postgres`. |
+| Evals | `mlflow.genai.evaluate`, one evaluation per scenario: four custom `@scorer` functions (exact checks) plus two built-in judges, `ExpectationsGuidelines` (advice) and `make_judge` with `{{ trace }}` (evidence), with per-scenario `quality_criteria` |
+| Containers | One app image (non-root, slim, with Helm 4 pinned for `agent setup`). Compose services: `k8s-mcp`, `agent` (remediator creds), `admin` (admin kubeconfig). The MLflow tracking server runs in the cluster (Helm), not in compose. M8 adds `api` and `postgres`. |
 | M8 extra | FastAPI 0.162.x + Uvicorn, Postgres 18 (pinned minor), psycopg 3, `langgraph-checkpoint-postgres`, Alembic; API tests on a real Postgres (testcontainers) |
 
 ---
@@ -972,7 +1001,8 @@ Each item says what's already confirmed and what's still to check.
 1. **Host networking on other setups**
    - Confirmed: tested on OrbStack.
    - To check: native Linux Docker with `AGENT_CONTAINER_USER`.
-   - kind, minikube and Docker Desktop stay untested ([1](#1-key-decisions)); CI no longer runs a kind cluster.
+   - kind on Linux (native Docker) gets exercised by the CI eval workflow (M7) ([1](#1-key-decisions)); minikube and Docker Desktop stay untested.
+   - To check in M7: on kind, `agent setup` completes with Helm 4 and MLflow answers through `kubectl port-forward`.
 2. **kubernetes-mcp-server**
    - Confirmed: done in M2's first build. Release pinned (v0.1.2), tool argument names read, Secret refusal tested.
 3. **Structured output with tools on Sonnet 5.5**
@@ -986,14 +1016,8 @@ Each item says what's already confirmed and what's still to check.
    - To check: `thinking.display: "summarized"` isn't documented, so confirm it passes through. Refusals aren't covered by LangChain's docs, so detect `stop_reason: refusal` in the response metadata → `inconclusive`.
 6. **MLflow tracing**
    - Confirmed by the design session (2026-11-08, MLflow 3.18.0 installed, docs read): `mlflow.langchain.autolog()` traces LangGraph; trace context can be saved at the pause and restored on resume, giving one stored trace with spans from both halves.
-   - To check (M4):
-     - autolog span names for our graph
-     - trace continuation with the real graph
-     - reasoning summaries are captured
-     - a refused tool call gets an error span status
-     - the slim `mlflow-tracing` package covers the LangGraph autolog
-     - MLflow installs on Python 3.14
-     - the Helm chart's minimal values, and its memory use on OrbStack
+   - Confirmed in M4 (2026-11-08): span names for our graph; reasoning summaries captured; a refused tool call is an error span; the slim `mlflow-tracing` package covers the LangGraph autolog; Python 3.14; the minimal Helm values (365 MiB working set on OrbStack).
+   - To check in M6: the approval pause and resume inside one call stay in one trace.
 7. **Timeout**
    - To check: wrap each graph invocation (`asyncio.timeout`, `AGENT_RUN_MAX_SECONDS`) and keep partial steps.
 8. **JSON Patch with a version test**
@@ -1004,8 +1028,8 @@ Each item says what's already confirmed and what's still to check.
    - To confirm in M3: `create_agent` works as a node or subgraph.
    - To confirm in M6: the `HumanInTheLoopMiddleware` pause inside the remediator agent (a subgraph of the main graph) pauses and resumes the whole graph through the parent checkpointer. Fallback: run the remediator as a plain node sharing the graph state. Also: the middleware works together with `response_format`.
 10. **MLflow evaluation**
-    - Confirmed by the design session (2026-11-08): `mlflow.genai.evaluate(data, scorers, predict_fn)` with custom `@scorer` functions, built-in judges (`Guidelines`, `Safety`) and `make_judge`; an async `predict_fn`; scorers can read the whole trace; thresholds via quality criteria (`min`, `mean`, …); saved traces can be scored instead of re-running the agent.
-    - To check (M5): the per-scenario "2 of 3" thresholds with quality criteria (or one `evaluate` per scenario); saving one eval run's traces as fixtures and re-scoring them with no server and no model.
+    - Confirmed by the design session (2026-11-08): `mlflow.genai.evaluate(data, scorers, predict_fn, quality_criteria)` with custom `@scorer` functions, built-in judges (`ExpectationsGuidelines`, `Guidelines`, `Safety`) and `make_judge` with `{{ trace }}`; an async `predict_fn`; scorers can read the whole trace; `quality_criteria` with `mean`/`min`/… aggregations; saved traces can be scored instead of re-running the agent.
+    - To check (M5): how the pass/fail of `quality_criteria` is exposed in Python (so `agent eval` exits non-zero); that `quality_criteria` works on a self-hosted server (the docs say "certain advanced features" need Databricks, without listing them; fallback: compute the same means and minimums from `result.metrics`); `ExpectationsGuidelines` reads per-row guidelines as expected.
 
 ---
 
@@ -1020,4 +1044,4 @@ From the brief.
 - [ ] Dockerfile + compose (`k8s-mcp`, `agent`, `admin`; M8: `api`, `postgres`) + the MLflow Helm install
 - [ ] Safety: RBAC setup + tool allowlist + one narrow fix tool behind human approval
 - [x] Git repository (private GitHub repo)
-- [ ] CI: GitHub Actions (M7); tag `assignment-complete`
+- [ ] CI: GitHub Actions, `ci.yml` + `eval.yml` (M7); tag `assignment-complete`
