@@ -66,7 +66,7 @@ establish the diagnosis: its status, fault category, affected resource and root 
 false if any finding is not shown by its cited output, if the diagnosis claims more than the
 cited outputs show, or if there is no diagnosis."""
 
-# Checks that may miss in a run, and must pass in at least AGENT_EVAL_PASS_MIN_RUNS of them;
+# Checks that may miss in a run, and must pass in at least AGENT_EVAL_PASS_SHARE of them;
 # exact checks that must pass in every run.
 MOST_RUNS = ("diagnosis_correct", "evidence_supports", "advice_ok")
 EVERY_RUN = ("evidence_exists", "right_tools", "actions_safe")

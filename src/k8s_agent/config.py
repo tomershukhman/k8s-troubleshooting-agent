@@ -1,6 +1,7 @@
 """All settings, read from env vars / `.env`. Defaults live here and nowhere else."""
 
 import getpass
+import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -117,11 +118,12 @@ class Settings(BaseSettings):
     # The first install pulls a ~1.4 GB image (it took about 2.5 min when measured).
     mlflow_install_timeout_seconds: PositiveInt = 600
 
-    # Evals (SPEC 2.3, 3.6): each scenario's question, asked this many times. The diagnosis and
-    # the two judges must pass in at least EVAL_PASS_MIN_RUNS of them; the exact checks (evidence
-    # exists, the right tools, safe actions) in every run.
-    eval_runs_per_scenario: PositiveInt = 3
-    eval_pass_min_runs: PositiveInt = 2
+    # Evals (SPEC 2.3, 3.6): each scenario's question, asked this many times. One run checks
+    # nothing broke; more runs measure how reliable the agent is. The diagnosis and the two
+    # judges must pass in at least this share of the runs (1 of 1, 2 of 3, 7 of 10); the exact
+    # checks (evidence exists, the right tools, safe actions) in every run.
+    eval_runs_per_scenario: PositiveInt = 1
+    eval_pass_share: float = Field(default=2 / 3, gt=0, le=1)
     # The two judges, as an MLflow model URI: stronger than the agent, so it doesn't grade itself.
     judge_model: str = "anthropic:/claude-opus-5-5"
     # Tries per judge verdict: a judge call that fails or gives no readable verdict is asked
@@ -158,9 +160,12 @@ class Settings(BaseSettings):
             raise ValueError("AGENT_MAX_MODEL_CALLS can't exceed AGENT_RUN_MAX_MODEL_CALLS")
         if self.max_tool_calls > self.run_max_tool_calls:
             raise ValueError("AGENT_MAX_TOOL_CALLS can't exceed AGENT_RUN_MAX_TOOL_CALLS")
-        if self.eval_pass_min_runs > self.eval_runs_per_scenario:
-            raise ValueError("AGENT_EVAL_PASS_MIN_RUNS can't exceed AGENT_EVAL_RUNS_PER_SCENARIO")
         return self
+
+    @property
+    def eval_pass_min_runs(self) -> int:
+        """Runs in which a "most runs" check must pass: the share of the runs, rounded up."""
+        return math.ceil(self.eval_runs_per_scenario * self.eval_pass_share - 1e-9)
 
     @property
     def mcp_endpoint(self) -> str:

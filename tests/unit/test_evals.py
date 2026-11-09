@@ -21,7 +21,7 @@ from k8s_agent import cli, evals, scenarios, tracing
 from k8s_agent.agent import McpUnavailable, NotStarted
 from k8s_agent.agent.records import RunRecord, RunResult, Step
 from k8s_agent.cli import app
-from k8s_agent.config import get_settings
+from k8s_agent.config import Settings, get_settings
 from k8s_agent.scenarios import ScenarioError, get_scenario
 from tests.fakes import SERVICE_ARGS, diagnosis, healthy, selector_fix
 
@@ -291,8 +291,20 @@ def test_the_fix_run_is_the_scenarios_question_marked_for_approval_and_must_pass
 # --- the pass marks -------------------------------------------------------------------------
 
 
+def three_runs() -> Settings:
+    return get_settings().model_copy(update={"eval_runs_per_scenario": 3})
+
+
+def test_the_pass_share_sets_the_marks_for_any_number_of_runs():
+    def least(runs: int) -> int:
+        return get_settings().model_copy(update={"eval_runs_per_scenario": runs}).eval_pass_min_runs
+
+    assert (least(1), least(3), least(10)) == (1, 2, 7)  # the default: 1 run, which must pass
+    assert evals.criteria(get_settings())["diagnosis_correct/mean"] == 1
+
+
 def test_the_recorded_quality_criteria_are_exactly_the_marks_checked():
-    marks = evals.criteria(get_settings())
+    marks = evals.criteria(three_runs())
     line = evals.criteria_line(marks)
     rules = parse_quality_criteria(evals.scorers(get_settings()), line)  # MLflow's own parser
     assert {r.metric_key: r.threshold for r in rules} == marks
@@ -310,7 +322,7 @@ ALL_PASS = {n: [True, True, "yes"] for n in evals.MOST_RUNS + evals.EVERY_RUN}
 
 def missed(**values: list) -> list[str]:
     found = evals.verdicts(result(ALL_PASS | values), ALL_PASS)
-    return evals.missed(found, evals.criteria(get_settings()), 3)
+    return evals.missed(found, evals.criteria(three_runs()), 3)
 
 
 def test_two_of_three_is_enough_for_most_checks_but_not_for_exact_ones():

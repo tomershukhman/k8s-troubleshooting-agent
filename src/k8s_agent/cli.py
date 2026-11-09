@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import math
 import os
 import sys
 import termios
@@ -244,9 +243,8 @@ def eval_(
     2: nothing ran (settings, tracking server, cluster, scenarios, MCP server, or the eval
     extra missing)."""
     s = _settings(EXIT_NOT_STARTED)
-    if runs:  # the same share of runs must pass: 2 of 3 is 7 of 10, and 1 of 1
-        least = math.ceil(runs * s.eval_pass_min_runs / s.eval_runs_per_scenario)
-        s = s.model_copy(update={"eval_runs_per_scenario": runs, "eval_pass_min_runs": least})
+    if runs:  # the pass marks follow: AGENT_EVAL_PASS_SHARE of the runs
+        s = s.model_copy(update={"eval_runs_per_scenario": runs})
     setup_logging(s.log_level, s.log_file, enabled=bool(s.log_file) or not sys.stderr.isatty())
     tracing.mlflow_env(s)  # before evals imports mlflow, which reads some of it on import
     try:

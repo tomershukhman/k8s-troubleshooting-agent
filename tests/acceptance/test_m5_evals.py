@@ -95,7 +95,7 @@ def always_no_fault(messages):
 
 
 def test_a_fake_agent_that_always_answers_no_fault_fails(judges, env):
-    env(eval_runs_per_scenario="1", eval_pass_min_runs="1")  # one run is enough to fail
+    env(eval_runs_per_scenario="1")  # one run is enough to fail
     s = get_settings()
     scn = get_scenario(s.scenarios_dir, "crashloop")
     predict = evals.PredictFn(s, model=ScriptedModel(then=always_no_fault), critic_model=critic())
