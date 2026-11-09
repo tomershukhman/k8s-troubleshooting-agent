@@ -168,7 +168,23 @@ def test_control_characters_from_the_cluster_or_a_model_never_reach_the_terminal
     console.print(ui.approval(request(explanation=ESCAPES)))
     shown = console.file.getvalue()
     assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", shown)
-    assert shown.count("\ufffd[1A\ufffd[2K✓ approved\ufffd\ufffd31m") == 5
+    assert shown.count("✓ approved\ufffd") == 5  # the sequences gone, the bell replaced
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("\x1b[31mERROR\x1b[0m boom", "ERROR boom"),  # colours in a pod's log
+        ("\x1b[38;5;196mred\x1b[m", "red"),
+        ("\x9b1mbold\x9b0m", "bold"),  # the 8-bit CSI
+        ("\x1b]0;a title\x07log", "log"),  # an OSC ended by BEL
+        ("\x1b]8;;https://x.test\x1b\\link\x1b]8;;\x1b\\", "link"),  # a link, ended by ST
+        ("a\x1bb\x07c\x1b]no end", "a\ufffdb\ufffdc\ufffd]no end"),  # no sequence: replaced
+        ("tab\tand\nnewline", "tab\tand\nnewline"),
+    ],
+)
+def test_escape_sequences_are_removed_and_other_control_characters_replaced(text, shown):
+    assert ui.safe(text) == shown
 
 
 def test_a_table_row_with_nothing_under_name_is_previewed_not_a_crash():

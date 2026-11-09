@@ -60,14 +60,20 @@ LABELS = {
     "verdict": ("", "", 4),
     "next": ("", "", 2),
 }
+# ANSI escape sequences, such as the colours in a pod's log.
+ANSI = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"  # CSI: ESC [ (or 8-bit), parameters, a final byte
+    r"|\x1b\][^\x00-\x1f\x7f-\x9f]*(?:\x07|\x1b\\|\x9c)"  # OSC: ESC ], text, BEL or ST
+)
 # C0 and C1 control characters but tab and newline. From the cluster or a model they could
 # move the cursor or rewrite lines on the terminal; Rich keeps ESC.
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def safe(text: str) -> str:
-    """`text` fit for the terminal: each control character but tab and newline becomes U+FFFD."""
-    return CONTROL.sub("\ufffd", text)
+    """`text` fit for the terminal: ANSI escape sequences removed, then each other control
+    character but tab and newline replaced by U+FFFD."""
+    return CONTROL.sub("\ufffd", ANSI.sub("", text))
 
 
 def _scrub(value: Any) -> Any:
