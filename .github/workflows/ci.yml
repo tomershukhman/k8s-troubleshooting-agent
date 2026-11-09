@@ -26,6 +26,8 @@ jobs:
           version: "0.13.7"
           enable-cache: true
       - run: make check
+        env:
+          PYTEST_ADDOPTS: -rA  # list every test by name, passed ones too
 
   image:
     runs-on: ubuntu-24.04
