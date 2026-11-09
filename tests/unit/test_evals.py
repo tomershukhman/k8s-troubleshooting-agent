@@ -435,7 +435,7 @@ def test_eval_sets_mlflows_environment_before_mlflow_is_imported(monkeypatch):
     seen = {}
 
     class Watch(importlib.abc.MetaPathFinder):
-        def find_spec(self, name, path, target=None):  # noqa: ANN001
+        def find_spec(self, name, path, target=None):
             if name == "k8s_agent.evals":  # what imports mlflow on this path, first
                 seen.update(os.environ)
                 raise ImportError("stopped by the test")
@@ -459,11 +459,11 @@ def eval_run(monkeypatch, fail: str):
         if fail == f"{name} {steps[name]}":
             raise error
 
-    def evaluate(scn, _settings, _predict):  # noqa: ANN001
+    def evaluate(scn, _settings, _predict):
         step("evaluate", McpUnavailable("cannot use the MCP server"))
         return evals.ScenarioResult(scn.name, "run", {}, [], 1, [])
 
-    def up(scn, *_args, **_kwargs):  # noqa: ANN001
+    def up(scn, *_args, **_kwargs):
         step("up", ScenarioError(f"{scn.name} didn't come up"))
 
     monkeypatch.setattr(tracing, "enable", lambda _s: tracing.Tracing("http://mlflow", "1"))

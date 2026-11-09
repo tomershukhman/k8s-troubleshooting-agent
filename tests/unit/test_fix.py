@@ -444,7 +444,7 @@ def test_once_applied_a_fix_stays_applied_whatever_the_endpoint_wait_finds(monke
 
 
 def test_ready_endpoints_are_counted_once_each_and_an_unset_ready_is_ready():
-    def endpoint(uid: str | None, ip: str, conditions):  # noqa: ANN001
+    def endpoint(uid: str | None, ip: str, conditions):
         ref = k.V1ObjectReference(kind="Pod", uid=uid) if uid else None
         return k.V1Endpoint(addresses=[ip], conditions=conditions, target_ref=ref)
 

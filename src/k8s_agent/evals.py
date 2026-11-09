@@ -247,7 +247,7 @@ def retrying(judge: Any, attempts: int) -> Any:
         for _ in range(attempts - 1):
             try:
                 feedback = judge(inputs=inputs, outputs=outputs, expectations=expectations)
-            except Exception:
+            except Exception:  # noqa: S112 (retried; the last attempt's error is raised)
                 continue
             if verdict_of(feedback.value) is not None:
                 return feedback

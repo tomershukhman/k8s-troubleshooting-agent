@@ -38,7 +38,8 @@ def install(settings: Settings, c: AdminClients, progress: Progress) -> int | No
         f"installing the MLflow tracking server (Helm release {s.mlflow_release} in namespace "
         f"{s.mlflow_namespace}); the first install pulls a ~1.4 GB image"
     )
-    done = subprocess.run(command, capture_output=True, text=True, check=False)
+    # An argument list with no shell; helm comes from PATH and its arguments from our settings.
+    done = subprocess.run(command, capture_output=True, text=True, check=False)  # noqa: S603
     if done.returncode != 0:
         raise InstallError(
             f"helm could not install the MLflow tracking server: {done.stderr.strip()}"

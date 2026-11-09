@@ -119,7 +119,7 @@ def test_the_flow_request_agent_model_tool_calls_response(selector):
     assert set(stages[len(investigation) :]) <= {"remediate", "investigate", "recheck"}  # M6
     for stage in trace.search_spans(name="investigate"):
         # the agent, inside its stage (then `after_investigate`: where the graph goes next)
-        assert [s.name for s in children(trace, stage)][0] == "investigator"
+        assert children(trace, stage)[0].name == "investigator"
     assert model_calls(trace) and tool_calls(trace)
     every_call = trace.search_spans(span_type=SpanType.TOOL)  # each inside the agent that made it
     assert all(

@@ -52,12 +52,12 @@ class ScriptedModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "scripted"
 
-    def bind_tools(self, tools, **kwargs):  # noqa: ANN001
+    def bind_tools(self, tools, **kwargs):
         self.bound_tools.append([t.name for t in tools])
         self.bind_kwargs.append(kwargs)
         return self
 
-    def with_structured_output(self, schema, **kwargs):  # noqa: ANN001
+    def with_structured_output(self, schema, **kwargs):
         self.structured.append({"schema": schema, **kwargs})
 
         async def reply(messages):
@@ -66,10 +66,10 @@ class ScriptedModel(BaseChatModel):
 
         return RunnableLambda(reply)
 
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         raise NotImplementedError("the agent runs async")
 
-    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         return ChatResult(generations=[ChatGeneration(message=await _next(self, messages))])
 
 
@@ -205,12 +205,12 @@ class FakeCluster:
             return await respond("events_list", {"namespace": namespace})
 
         @tool
-        async def resources_get(apiVersion: str, kind: str, name: str, namespace: str = "") -> str:  # noqa: N803
+        async def resources_get(apiVersion: str, kind: str, name: str, namespace: str = "") -> str:
             args = {"apiVersion": apiVersion, "kind": kind, "name": name, "namespace": namespace}
             return await respond("resources_get", args)
 
         @tool
-        async def resources_list(apiVersion: str, kind: str, namespace: str = "") -> str:  # noqa: N803
+        async def resources_list(apiVersion: str, kind: str, namespace: str = "") -> str:
             args = {"apiVersion": apiVersion, "kind": kind, "namespace": namespace}
             return await respond("resources_list", args)
 
@@ -259,29 +259,29 @@ class FakeKube:
             api=SimpleNamespace(configuration=conf), core=self, dynamic=self, context="fake"
         )
 
-    def server_side_apply(self, res, body, namespace, field_manager, force_conflicts):  # noqa: ANN001
+    def server_side_apply(self, res, body, namespace, field_manager, force_conflicts):
         self.applied.append(body)
         self.log.append(f"apply {body['kind']}/{body['metadata']['name']}")
         if body["kind"] == "Namespace":
             self.namespaces[body["metadata"]["name"]] = body["metadata"].get("labels", {})
 
-    def read_namespace(self, name):  # noqa: ANN001
+    def read_namespace(self, name):
         if name not in self.namespaces:
             raise k.ApiException(status=404)
         return k.V1Namespace(metadata=k.V1ObjectMeta(name=name, labels=self.namespaces[name]))
 
-    def delete_namespace(self, name):  # noqa: ANN001
+    def delete_namespace(self, name):
         self.log.append(f"delete Namespace/{name}")
         del self.namespaces[name]
 
-    def read_namespaced_service_account(self, name, namespace):  # noqa: ANN001
+    def read_namespaced_service_account(self, name, namespace):
         self.log.append(f"wait ServiceAccount/{name}")
         return k.V1ServiceAccount()
 
-    def list_namespaced_pod(self, namespace):  # noqa: ANN001
+    def list_namespaced_pod(self, namespace):
         return k.V1PodList(items=self.pods)
 
-    def create_namespaced_service_account_token(self, name, namespace, body):  # noqa: ANN001
+    def create_namespaced_service_account_token(self, name, namespace, body):
         self.log.append(f"token {name} ttl={body.spec.expiration_seconds}")
         expires = datetime(2030, 1, 1, tzinfo=UTC)
         return SimpleNamespace(
@@ -312,20 +312,20 @@ class FakeServices:
         """Someone changes the Service (any field): a new resourceVersion."""
         self.version += 1
 
-    def read_namespaced_service(self, name, namespace, **_):  # noqa: ANN001
+    def read_namespaced_service(self, name, namespace, **_):
         if (namespace, name) != ("shop-checkout", "checkout"):
             raise k.ApiException(status=404, reason="Not Found")
         meta = k.V1ObjectMeta(name=name, namespace=namespace, resource_version=str(self.version))
         return k.V1Service(metadata=meta, spec=k.V1ServiceSpec(selector=dict(self.selector)))
 
-    def list_namespaced_pod(self, namespace, label_selector=None, **_):  # noqa: ANN001
+    def list_namespaced_pod(self, namespace, label_selector=None, **_):
         want = dict(kv.split("=", 1) for kv in label_selector.split(",")) if label_selector else {}
         return k.V1PodList(items=[
             labelled_pod(name, labels, ready)
             for name, (labels, ready) in self.pods.items() if want.items() <= labels.items()
         ])  # fmt: skip
 
-    def list_namespaced_endpoint_slice(self, namespace, label_selector, **_):  # noqa: ANN001
+    def list_namespaced_endpoint_slice(self, namespace, label_selector, **_):
         """One endpoint per ready pod the selector matches."""
         ready = k.V1EndpointConditions(ready=True)
         endpoints = [
@@ -338,7 +338,7 @@ class FakeServices:
             items=[k.V1EndpointSlice(address_type="IPv4", endpoints=endpoints)]
         )
 
-    def patch_namespaced_service(self, name, namespace, body, _content_type, **_):  # noqa: ANN001
+    def patch_namespaced_service(self, name, namespace, body, _content_type, **_):
         self.patches.append((namespace, name, body, _content_type))
         for op in body:
             if op["op"] == "test" and op["value"] != str(self.version):

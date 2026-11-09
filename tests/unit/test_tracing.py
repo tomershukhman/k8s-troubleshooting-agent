@@ -106,7 +106,7 @@ def test_a_failed_tracking_server_install_says_why(monkeypatch, helm, run, error
 def test_the_tracking_server_chart_is_pinned_by_digest(monkeypatch):
     ran = []
 
-    def helm(command, **_kwargs):  # noqa: ANN001
+    def helm(command, **_kwargs):
         ran.append(command)
         return subprocess.CompletedProcess(command, 1, "", "Error: stop here\n")
 

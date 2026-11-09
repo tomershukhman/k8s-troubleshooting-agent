@@ -2,7 +2,7 @@
 
 First, that they can fail: a fake agent that always answers "no fault", and each judge given a
 bad answer, which it must reject every time it's asked. Then the real thing: one full
-`agent eval` (every scenario × 3 runs), which must pass."""
+`agent eval` (every scenario, 3 runs each), which must pass."""
 
 import json
 import os

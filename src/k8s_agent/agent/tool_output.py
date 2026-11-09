@@ -52,7 +52,7 @@ def strip_fields(text: str, fields: list[str]) -> str:
     if not any(f in text for f in fields):
         return text
     try:
-        data = yaml.load(text, Loader=_NoAliases)
+        data = yaml.load(text, Loader=_NoAliases)  # noqa: S506 (a SafeLoader, minus aliases)
     except yaml.YAMLError:
         return text
     is_object = isinstance(data, dict) and ("kind" in data or "apiVersion" in data)

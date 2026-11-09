@@ -119,7 +119,7 @@ def test_an_existing_file_is_made_private_before_the_new_text_is_written(tmp_pat
     path.chmod(0o644)
     modes, fdopen = [], os.fdopen
 
-    def opened(fd, *args, **kwargs):  # noqa: ANN001
+    def opened(fd, *args, **kwargs):
         modes.append(stat.S_IMODE(os.fstat(fd).st_mode))
         return fdopen(fd, *args, **kwargs)
 

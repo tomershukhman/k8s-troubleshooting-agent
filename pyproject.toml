@@ -59,7 +59,13 @@ filterwarnings = [
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+select = ["E", "F", "I", "B", "UP", "SIM", "C4", "PERF", "ASYNC", "RUF", "S"]
+# Mutable class defaults are safe on pydantic models, which copy them per instance.
+ignore = ["RUF012"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, run the CLI and helm/kubectl/docker by name, use fake tokens and open local URLs.
+"tests/**" = ["S101", "S603", "S607", "S106", "S310"]
 
 [tool.pyright]
 include = ["src"]
