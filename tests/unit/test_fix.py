@@ -23,6 +23,7 @@ from k8s_agent.agent import Answer, investigate
 from k8s_agent.agent.graph import InvestigationState, fixable, remediate_node
 from k8s_agent.agent.records import Change, Facts, FixArgs, FixOutcome
 from k8s_agent.agent.remediator import Kube, apply_fix, build_remediator
+from k8s_agent.agent.remediator import tools as remediator_tools
 from k8s_agent.config import get_settings
 from k8s_agent.kube import KubeError
 from k8s_agent.policy import FIX_TOOL, READ_ONLY_TOOLS, REMEDIATOR_READ_TOOLS
@@ -302,6 +303,16 @@ def test_only_the_remediator_holds_the_write_tool():
     assert all(set(tools) == READ_ONLY_TOOLS for tools in model.bound_tools)  # recheck included
     assert judge.bound_tools == []
     assert {frozenset(t) for t in rem.bound_tools} == {REMEDIATOR_READ_TOOLS | {FIX_TOOL}}
+
+
+def test_the_remediators_reads_have_the_investigators_safety_cap(env):
+    env(tool_output_max_chars="60")
+    services = FakeServices()
+    services.pods = {f"checkout-{i}": ({"app": "checkout"}, True) for i in range(20)}
+    reads = {t.name: t for t in remediator_tools(services.kube, get_settings())}
+    kept, cut = reads["list_pods"].invoke(NS).split("\n[… ")
+    assert kept.startswith("20 of 20 pods ready, in total\ncheckout-0") and len(kept) == 60
+    assert cut.endswith(" characters cut …]")
 
 
 def test_the_fix_is_requested_at_most_once():

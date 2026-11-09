@@ -41,6 +41,7 @@ from k8s_agent.agent.records import (
     FixStep,
     Remediation,
 )
+from k8s_agent.agent.tool_output import cap
 from k8s_agent.config import Settings
 from k8s_agent.kube import KubeError
 from k8s_agent.policy import FIX_TOOL
@@ -203,7 +204,11 @@ def wait_for_endpoints(kube: Kube, namespace: str, service: str, settings: Setti
 
 def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
     """The remediator's tools, all through `kube()` (the remediator identity). A read that
-    fails raises, so its trace span is an error; ToolErrorAsResult gives the model the text."""
+    fails raises, so its trace span is an error; ToolErrorAsResult gives the model the text.
+    A read's result has the investigator's safety cap (AGENT_TOOL_OUTPUT_MAX_CHARS)."""
+
+    def capped(text: str) -> str:
+        return cap(text, settings.tool_output_max_chars)
 
     def read[T](do: Callable[[Kube], T]) -> T:
         try:
@@ -218,8 +223,8 @@ def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
     def get_service(namespace: str, name: str) -> str:
         """Read a Service: its selector and its resourceVersion."""
         svc = read(lambda k: k.service(namespace, name))
-        return (f"Service {namespace}/{name}: selector {labels(svc.spec.selector)}, "
-                f"resourceVersion {svc.metadata.resource_version}")  # fmt: skip
+        return capped(f"Service {namespace}/{name}: selector {labels(svc.spec.selector)}, "
+                      f"resourceVersion {svc.metadata.resource_version}")  # fmt: skip
 
     def list_pods(namespace: str, selector: dict[str, str] | None = None) -> str:
         """List the pods in a namespace, or only those an exact label selector matches: each
@@ -228,12 +233,13 @@ def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
         which = f"matching {labels(selector)}" if selector else "in total"
         rows = [f"{p.metadata.name}  {'ready' if ready(p) else 'not ready'}  "
                 f"labels {labels(p.metadata.labels)}" for p in pods]  # fmt: skip
-        return "\n".join([f"{sum(map(ready, pods))} of {len(pods)} pods ready, {which}", *rows])
+        summary = f"{sum(map(ready, pods))} of {len(pods)} pods ready, {which}"
+        return capped("\n".join([summary, *rows]))
 
     def list_endpoint_slices(namespace: str, service: str) -> str:
         """Count a Service's ready endpoints, from its EndpointSlices."""
         n = read(lambda k: k.ready_endpoints(namespace, service))
-        return f"Service {namespace}/{service} has {n} ready endpoint{'s' * (n != 1)}"
+        return capped(f"Service {namespace}/{service} has {n} ready endpoint{'s' * (n != 1)}")
 
     def patch_service_selector(**fields: Any) -> tuple[str, dict[str, Any]]:
         """Replace a Service's whole selector with `selector`. A person approves or rejects
