@@ -99,8 +99,8 @@ def run(
         except BaseException as e:
             if not isinstance(e, Exception):  # MLflow records exceptions, not a Ctrl-C or cancel
                 status = SpanStatus(SpanStatusCode.ERROR, f"interrupted: {type(e).__name__}")
-                # MLflow annotates it SpanStatusCode | str, but it takes a SpanStatus (as its
-                # docstring says; a bare SpanStatusCode fails there).
+                # MLflow annotates it SpanStatusCode | str, but it also takes a SpanStatus (its
+                # docstring and code), the one way to set a description too.
                 span.set_status(status)  # pyright: ignore[reportArgumentType]
             raise
 
