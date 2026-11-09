@@ -11,7 +11,7 @@ from typing import Any, NamedTuple
 import yaml
 from kubernetes import client, config
 
-from k8s_agent.kube import AdminClients, Progress, apply, load_yaml
+from k8s_agent.kube import AdminClients, Progress, apply, load_yaml, present
 from k8s_agent.policy import AGENT_NAMESPACE
 
 READER = "reader"
@@ -62,7 +62,8 @@ def request_token(c: AdminClients, service_account: str, ttl_seconds: int) -> tu
         spec=client.V1TokenRequestSpec(audiences=[], expiration_seconds=ttl_seconds)
     )
     resp = c.core.create_namespaced_service_account_token(service_account, AGENT_NAMESPACE, body)
-    return resp.status.token, resp.status.expiration_timestamp
+    status = present(resp.status)
+    return present(status.token), present(status.expiration_timestamp)
 
 
 def whoami(kubeconfig: dict) -> str:
@@ -71,7 +72,8 @@ def whoami(kubeconfig: dict) -> str:
         review = client.AuthenticationV1Api(api).create_self_subject_review(
             client.V1SelfSubjectReview()
         )
-    return review.status.user_info.username
+    user = present(present(review.status).user_info)
+    return present(user.username)
 
 
 def setup(

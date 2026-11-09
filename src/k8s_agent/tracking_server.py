@@ -6,7 +6,7 @@ import shutil
 import subprocess
 
 from k8s_agent.config import Settings
-from k8s_agent.kube import AdminClients, Progress
+from k8s_agent.kube import AdminClients, Progress, present
 
 
 class InstallError(Exception):
@@ -48,5 +48,5 @@ def install(settings: Settings, c: AdminClients, progress: Progress) -> int | No
     services = c.core.list_namespaced_service(
         s.mlflow_namespace, label_selector=f"app.kubernetes.io/instance={s.mlflow_release}"
     ).items
-    lb = [svc for svc in services if svc.spec.type == "LoadBalancer"]
-    return lb[0].spec.ports[0].port if lb else None
+    lb = [spec for spec in (present(svc.spec) for svc in services) if spec.type == "LoadBalancer"]
+    return present(lb[0].ports)[0].port if lb else None

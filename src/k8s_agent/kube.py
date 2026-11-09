@@ -35,7 +35,9 @@ def admin_clients(settings: Settings) -> AdminClients:
     try:
         contexts, active = config.list_kube_config_contexts(config_file=config_file)
         name = settings.kube_context or active["name"]
-        if name not in {c["name"] for c in contexts}:
+        # The kubeconfig loader is unannotated, and pyright infers a context may be a list.
+        known = {c["name"] for c in contexts}  # pyright: ignore[reportCallIssue, reportArgumentType]
+        if name not in known:
             raise KubeError(f"kube context {name!r} not found in kubeconfig")
         api = config.new_client_from_config(config_file=config_file, context=name)
     except ConfigException as e:
@@ -68,8 +70,17 @@ def apply(c: AdminClients, docs: Iterable[dict[str, Any]], progress: Progress) -
         progress(f"applied {doc['kind']}/{meta['name']}{where}")
 
 
+def present[T](value: T | None) -> T:
+    """A field the API server always sets, such as an object's metadata, spec, status or name:
+    the client types every field Optional."""
+    if value is None:
+        raise ValueError("the API server's answer lacks a field it always sets")
+    return value
+
+
 def pod_ready(pod: client.V1Pod) -> bool:
-    return any(c.type == "Ready" and c.status == "True" for c in pod.status.conditions or [])
+    conditions = present(pod.status).conditions
+    return any(c.type == "Ready" and c.status == "True" for c in conditions or [])
 
 
 def read_or_none[T](read: Callable[[], T]) -> T | None:

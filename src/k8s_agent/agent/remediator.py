@@ -44,7 +44,7 @@ from k8s_agent.agent.records import (
 )
 from k8s_agent.agent.tool_output import cap
 from k8s_agent.config import Settings
-from k8s_agent.kube import KubeError, pod_ready
+from k8s_agent.kube import KubeError, pod_ready, present
 from k8s_agent.policy import FIX_TOOL
 from k8s_agent.schemas import ProposedFix, RemediatorAnswer
 
@@ -64,8 +64,8 @@ def labels(selector: dict[str, str] | None) -> str:
 class Kube:
     """The remediator's cluster access. Every call has a time limit."""
 
-    core: Any  # client.CoreV1Api
-    discovery: Any  # client.DiscoveryV1Api
+    core: client.CoreV1Api
+    discovery: client.DiscoveryV1Api
     timeout: float
 
     @classmethod
@@ -88,15 +88,19 @@ class Kube:
         return self.core.read_namespaced_service(name, namespace, _request_timeout=self.timeout)
 
     def pods(self, namespace: str, selector: dict[str, str] | None = None) -> list[client.V1Pod]:
-        query = {"label_selector": labels(selector)} if selector else {}
-        found = self.core.list_namespaced_pod(namespace, _request_timeout=self.timeout, **query)
-        return [p for p in found.items if p.metadata.deletion_timestamp is None]
+        found = self.core.list_namespaced_pod(
+            namespace,
+            label_selector=labels(selector) if selector else None,  # None: every pod
+            _request_timeout=self.timeout,
+        )
+        return [p for p in found.items if present(p.metadata).deletion_timestamp is None]
 
     def ready_pods(self, namespace: str, selector: dict[str, str]) -> list[str]:
         """The ready pods the exact `selector` matches (as a Service's: an empty one, none)."""
         if not selector:
             return []
-        return sorted(p.metadata.name for p in self.pods(namespace, selector) if pod_ready(p))
+        pods = self.pods(namespace, selector)
+        return sorted(present(present(p.metadata).name) for p in pods if pod_ready(p))
 
     def ready_endpoints(self, namespace: str, service: str) -> int:
         """Ready endpoints across the Service's EndpointSlices, by the API's rules: an unset
@@ -112,7 +116,9 @@ class Kube:
             if e.conditions is None or e.conditions.ready is not False
         })  # fmt: skip
 
-    def replace_selector(self, namespace: str, name: str, selector: dict[str, str], version: str):
+    def replace_selector(
+        self, namespace: str, name: str, selector: dict[str, str], version: str
+    ) -> client.V1Service:
         """One JSON Patch, applied atomically by the API server: the test fails (422) if the
         Service is no longer at `version`, and then nothing is applied. `replace` sets the
         whole selector, so no old key survives (a merge patch would keep them)."""
@@ -149,7 +155,7 @@ def apply_fix(kube: Kube, args: FixArgs, settings: Settings) -> FixResult:
     before = None
     try:
         svc = kube.service(ns, name)
-        before, version = svc.spec.selector, svc.metadata.resource_version
+        before, version = present(svc.spec).selector, present(svc.metadata).resource_version
         if version != args.resource_version:
             return stale(args, version, before)
         if not kube.ready_pods(ns, args.selector):
@@ -187,7 +193,7 @@ def failure(kube: Kube, args: FixArgs, e: ApiException, before: dict | None) -> 
         return FixResult(FixOutcome.invalid, f"Service {args.namespace}/{args.service} not found")
     if e.status == 422:
         try:
-            version = kube.service(args.namespace, args.service).metadata.resource_version
+            version = present(kube.service(args.namespace, args.service).metadata).resource_version
         except KUBE_ERRORS:
             version = None
         if version != args.resource_version:
@@ -228,16 +234,17 @@ def tools(load_kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
     def get_service(namespace: str, name: str) -> str:
         """Read a Service: its selector and its resourceVersion."""
         svc = read(lambda k: k.service(namespace, name))
-        return capped(f"Service {namespace}/{name}: selector {labels(svc.spec.selector)}, "
-                      f"resourceVersion {svc.metadata.resource_version}")  # fmt: skip
+        selector, version = present(svc.spec).selector, present(svc.metadata).resource_version
+        return capped(f"Service {namespace}/{name}: selector {labels(selector)}, "
+                      f"resourceVersion {version}")  # fmt: skip
 
     def list_pods(namespace: str, selector: dict[str, str] | None = None) -> str:
         """List the pods in a namespace, or only those an exact label selector matches: each
         with whether it is ready, and its labels."""
         pods = read(lambda k: k.pods(namespace, selector))
         which = f"matching {labels(selector)}" if selector else "in total"
-        rows = [f"{p.metadata.name}  {'ready' if pod_ready(p) else 'not ready'}  "
-                f"labels {labels(p.metadata.labels)}" for p in pods]  # fmt: skip
+        rows = [f"{present(p.metadata).name}  {'ready' if pod_ready(p) else 'not ready'}  "
+                f"labels {labels(present(p.metadata).labels)}" for p in pods]  # fmt: skip
         summary = f"{sum(map(pod_ready, pods))} of {len(pods)} pods ready, {which}"
         return capped("\n".join([summary, *rows]))
 

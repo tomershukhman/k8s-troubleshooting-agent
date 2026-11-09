@@ -34,7 +34,7 @@ from k8s_agent.agent.records import (
 )
 from k8s_agent.agent.remediator import KUBE_ERRORS, Kube, labels
 from k8s_agent.config import Settings
-from k8s_agent.kube import KubeError
+from k8s_agent.kube import KubeError, present
 from k8s_agent.schemas import Diagnosis, ProposedFix
 
 NO_APPROVER = "no interactive approval available"
@@ -52,8 +52,8 @@ def read_facts(load_kube: Callable[[], Kube], args: FixArgs) -> Facts:
     except (KubeError, *KUBE_ERRORS) as e:
         return Facts(error=str(e))
     return Facts(
-        current_selector=svc.spec.selector,
-        resource_version=svc.metadata.resource_version,
+        current_selector=present(svc.spec).selector,
+        resource_version=present(svc.metadata).resource_version,
         ready_pods=pods,
     )
 

@@ -11,7 +11,15 @@ from typing import Any
 from kubernetes import client
 from pydantic import Field
 
-from k8s_agent.kube import AdminClients, Progress, apply, load_yaml, pod_ready, read_or_none
+from k8s_agent.kube import (
+    AdminClients,
+    Progress,
+    apply,
+    load_yaml,
+    pod_ready,
+    present,
+    read_or_none,
+)
 from k8s_agent.schemas import DiagnosisStatus, FaultCategory, Strict
 
 # `up` and `down` touch only namespaces with this label (set in each namespace.yaml).
@@ -112,12 +120,12 @@ def live_state(pods: list[client.V1Pod]) -> ReadyWhen:
     """What `ready_when` compares against, from the pods not being deleted."""
     ready = not_ready = restarts = 0
     for pod in pods:
-        if pod.metadata.deletion_timestamp is not None:
+        if present(pod.metadata).deletion_timestamp is not None:
             continue
-        is_ready = pod_ready(pod)
+        status, is_ready = present(pod.status), pod_ready(pod)
         ready += is_ready
-        not_ready += pod.status.phase == "Running" and not is_ready
-        for cs in pod.status.container_statuses or []:
+        not_ready += status.phase == "Running" and not is_ready
+        for cs in status.container_statuses or []:
             restarts = max(restarts, cs.restart_count)
     return ReadyWhen(pods_ready=ready, pods_not_ready=not_ready, restarts=restarts)
 
@@ -144,12 +152,13 @@ def down(
     ns = read_or_none(lambda: c.core.read_namespace(scn.namespace))
     if ns is None:
         return False
-    if (ns.metadata.labels or {}).get(OWNER_LABEL) != OWNER_VALUE:
+    meta = present(ns.metadata)
+    if (meta.labels or {}).get(OWNER_LABEL) != OWNER_VALUE:
         raise ScenarioError(
             f"namespace {scn.namespace} exists but wasn't created by `agent scenario` "
             f"(no {OWNER_LABEL}={OWNER_VALUE} label); refusing to touch it"
         )
-    if ns.metadata.deletion_timestamp is None:
+    if meta.deletion_timestamp is None:
         c.core.delete_namespace(scn.namespace)
         progress(f"deleting namespace {scn.namespace}")
 
