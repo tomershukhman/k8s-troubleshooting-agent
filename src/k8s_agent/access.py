@@ -45,9 +45,9 @@ def kubeconfig_for(conf: client.Configuration, service_account: str, token: str)
 
 
 def write_private(path: Path, text: str) -> None:
-    """Write a credential file, mode 0600, in place: a bind-mounted single file keeps its
-    inode, so replacing the file (write + rename) would leave a running container on the old
-    token."""
+    """Write a file only its owner can read (mode 0600), in place: a bind-mounted credential
+    file keeps its inode, so replacing the file (write + rename) would leave a running
+    container on the old token."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:

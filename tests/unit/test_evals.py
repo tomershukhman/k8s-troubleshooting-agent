@@ -4,6 +4,7 @@ judges and `mlflow.genai.evaluate` itself run in tests/acceptance/test_m5_evals.
 import importlib.abc
 import json
 import os
+import stat
 import sys
 from collections import Counter
 from pathlib import Path
@@ -483,3 +484,9 @@ def test_eval_exits_2_when_nothing_ran_and_1_once_a_scenario_was_scored(
     if code == 1:  # what was scored before it stopped is kept
         [saved] = Path("eval-results").glob("*.json")
         assert [s["name"] for s in json.loads(saved.read_text())["scenarios"]] == ["crashloop"]
+
+
+def test_eval_results_are_readable_by_their_owner_only(monkeypatch):
+    assert eval_run(monkeypatch, "none").exit_code == 0
+    [saved] = Path("eval-results").glob("*.json")  # they hold every tool output in full
+    assert stat.S_IMODE(saved.stat().st_mode) == 0o600

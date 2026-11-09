@@ -265,8 +265,7 @@ def eval_(
                          "runs": s.eval_runs_per_scenario, "pass_min_runs": s.eval_pass_min_runs},
             "scenarios": [scored(r) | {"fix": r.fix and scored(r.fix)} for r in results],
         }  # fmt: skip
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(report, indent=2, default=str))
+        access.write_private(path, json.dumps(report, indent=2, default=str))  # full outputs
 
     def up(scn: scenarios.Scenario) -> None:
         with _clean_errors(failed()):
