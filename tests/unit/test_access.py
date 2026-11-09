@@ -2,8 +2,10 @@
 
 import base64
 import stat
+from types import SimpleNamespace
 
 import yaml
+from kubernetes import client
 
 from k8s_agent import access
 from k8s_agent.config import get_settings
@@ -90,3 +92,13 @@ def test_credentials_are_rewritten_in_place_and_kept_private(tmp_path):
     access.write_private(path, "new")
     assert path.read_text() == "new" and path.stat().st_ino == inode
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_whoami_closes_its_client(monkeypatch):
+    closed = []
+    monkeypatch.setattr(client.ApiClient, "close", lambda api: closed.append(api))
+    review = SimpleNamespace(status=SimpleNamespace(user_info=SimpleNamespace(username="u")))
+    api = SimpleNamespace(create_self_subject_review=lambda _body: review)
+    monkeypatch.setattr(access.client, "AuthenticationV1Api", lambda _client: api)
+    kubeconfig = access.kubeconfig_for(FakeKube().clients.api.configuration, "reader", "t")
+    assert access.whoami(kubeconfig) == "u" and len(closed) == 1

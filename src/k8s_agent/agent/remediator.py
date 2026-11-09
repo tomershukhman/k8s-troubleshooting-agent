@@ -79,6 +79,10 @@ class Kube:
             ) from e
         return cls(client.CoreV1Api(api), client.DiscoveryV1Api(api), timeout)
 
+    def close(self) -> None:
+        """Close the connections of the client both APIs share."""
+        self.core.api_client.close()
+
     def service(self, namespace: str, name: str) -> client.V1Service:
         return self.core.read_namespaced_service(name, namespace, _request_timeout=self.timeout)
 

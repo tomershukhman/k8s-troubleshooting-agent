@@ -304,6 +304,12 @@ def _remediation(values: dict[str, Any], asked: Asked, stopped: str | None) -> R
     return done
 
 
+def _close_if_loaded(kube: Any) -> None:
+    """At the end of a run, the remediator's client, if the run loaded it (`kube`: cached)."""
+    if kube.cache_info().currsize:
+        kube().close()
+
+
 async def investigate(
     question: str,
     *,
@@ -350,9 +356,10 @@ async def investigate(
             log.error("model_unavailable", extra={"error": f"{type(e).__name__}: {e}"})
             raise NotStarted(f"cannot create the models: {type(e).__name__}: {e}") from e
         # Loaded on first use: a run that proposes no fix never needs it.
-        kube = remediator_kube or cache(
+        own_kube = cache(
             lambda: Kube.load(settings.remediator_kubeconfig, settings.remediator_timeout_seconds)
         )
+        kube = remediator_kube or own_kube
         context = RunContext(settings=settings, log=log, critic=critic)
         gate = Gate(settings, kube, approve, user_id, log)
         config = {
@@ -362,6 +369,7 @@ async def investigate(
             "run_name": "graph",  # its trace span (default: "LangGraph")
         }
         async with AsyncExitStack() as stack:
+            stack.callback(_close_if_loaded, own_kube)
             tools = await _load_tools(stack, mcp_target or mcp_client(settings), settings, log)
             build = lambda: build_graph(model, tools, settings, remediator_llm, kube)  # noqa: E731
             outcome, values, asked = await _run(build, inputs, config, context, on_event, gate)

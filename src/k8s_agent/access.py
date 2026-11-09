@@ -67,10 +67,10 @@ def request_token(c: AdminClients, service_account: str, ttl_seconds: int) -> tu
 
 def whoami(kubeconfig: dict) -> str:
     """The username the API server sees for a kubeconfig (proves the token and CA work)."""
-    api = config.new_client_from_config_dict(kubeconfig)
-    review = client.AuthenticationV1Api(api).create_self_subject_review(
-        client.V1SelfSubjectReview()
-    )
+    with config.new_client_from_config_dict(kubeconfig) as api:  # closes its connections
+        review = client.AuthenticationV1Api(api).create_self_subject_review(
+            client.V1SelfSubjectReview()
+        )
     return review.status.user_info.username
 
 

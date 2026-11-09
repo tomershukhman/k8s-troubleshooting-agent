@@ -408,6 +408,23 @@ def test_ready_endpoints_are_counted_once_each_and_an_unset_ready_is_ready():
     assert Kube(None, discovery, timeout=1).ready_endpoints("shop-checkout", "checkout") == 4
 
 
+@pytest.mark.parametrize("proposes_fix", [True, False])
+def test_the_remediators_own_client_is_closed_when_a_run_that_loaded_it_ends(
+    monkeypatch, proposes_fix
+):
+    services, closed = FakeServices(), []
+    services.api_client = SimpleNamespace(close=lambda: closed.append(True))  # its Kube's client
+    monkeypatch.setattr(Kube, "load", classmethod(lambda _cls, _path, _timeout: services.kube()))
+    no_fix = ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(diagnosis("E1"))])
+    asyncio.run(
+        investigate("q", settings=get_settings(), approve=approver(yes=False),
+                    model=investigator() if proposes_fix else no_fix, critic_model=critic(),
+                    remediator_model=remediator(READS, fix_call()),
+                    mcp_target=FakeCluster().server)
+    )  # fmt: skip
+    assert closed == ([True] if proposes_fix else [])
+
+
 def broken_connection(*_args, **_kwargs):
     raise urllib3.exceptions.ReadTimeoutError(None, "/", "read timed out")
 
