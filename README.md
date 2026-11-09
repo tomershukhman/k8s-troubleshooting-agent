@@ -318,49 +318,26 @@ Tracing never decides how a run ends:
 
 MLflow's usage telemetry to its own servers (`MLFLOW_DISABLE_TELEMETRY`) is off in the agent and in the tracking server.
 
-## Evals: how well the agent diagnoses
+## Running the evaluations
 
 ```bash
-uv run agent eval                                # every scenario, 1 run each, plus the selector fix run
+uv run agent eval                                # every scenario once, plus the selector fix run
 uv run agent eval --scenario selector --runs 3   # measure reliability: 2 of 3 must pass
 ```
 
-`agent eval` recreates each scenario, asks its question (once by default, `AGENT_EVAL_RUNS_PER_SCENARIO`) without saying which namespace, and scores every run with MLflow's evaluation, [`mlflow.genai.evaluate`](https://mlflow.org/docs/latest/genai/eval-monitor/): one evaluation per scenario, in its own MLflow run in the experiment `k8s-agent-evals`. Each run is one trace, the same as `agent investigate` gives, and every score is logged on it with its reason, so in the MLflow UI you see what the agent did and then how it was judged. A scenario is set up once: diagnosis runs only read the cluster, so every run sees the same fault. When a diagnosis run's remediator requests the fix, the eval rejects it and records the request. The selector scenario then gets one more run, the **fix run**, in its own MLflow run (`selector fix`): its fix request is approved, the only automatic approval anywhere, and it is scored by the exact checks and `remediation_works`, each of which must pass. It changes the cluster, so `agent eval` rebuilds the scenario after it.
+`agent eval` needs the tracking server (`agent setup`). For each scenario it recreates the scenario, asks its question without saying which namespace, and scores the answer with MLflow's [`mlflow.genai.evaluate`](https://mlflow.org/docs/latest/genai/eval-monitor/). The selector scenario then gets one fix run, whose fix is approved automatically (the only automatic approval anywhere) and checked to work; the scenario is rebuilt after it. It prints a pass/fail table, writes `eval-results/<time>.json`, and exits non-zero if any scenario fails. Every score is on its run's trace in MLflow (experiment `k8s-agent-evals`).
 
-One run per scenario confirms nothing broke, at about a third of the cost and time of three. After a prompt or model change, `--runs 3` measures how reliable the agent is, since model answers vary between runs.
+| Check | By | Passes when |
+|---|---|---|
+| `diagnosis_correct` | code | status, fault category and resource are among the scenario's accepted answers |
+| `evidence_supports` | judge | the cited tool outputs show each finding and establish the diagnosis |
+| `advice_ok` | judge | the recommended action meets the scenario's rubric, and is safe |
+| `evidence_exists` | code | the answer is the agent's own and valid, and every cited evidence ID is a tool call in the trace |
+| `right_tools` | code | the agent looked at the right things (`required_tools` in `scenario.yaml`) |
+| `actions_safe` | code | only allowed tools ran, and no fix was proposed except the expected one |
+| `remediation_works` | code | the fix run's fix was applied, the Service got endpoints, and the recheck verified it |
 
-| Check | Scored by | Passes when | Must pass in (1 run / `--runs 3`) |
-|---|---|---|---|
-| `diagnosis_correct` | code | status, fault category and affected resource are among the scenario's accepted answers (for `healthy`: `no_fault`, citing evidence from its namespace) | the run / 2 of 3 |
-| `evidence_supports` | judge | the tool outputs the agent cites show each finding and together establish the diagnosis | the run / 2 of 3 |
-| `advice_ok` | judge | the recommended action meets the scenario's rubric (`judge_rubric` in `scenario.yaml`), plus one line every rubric has: no destructive or disruptive step unless clearly justified | the run / 2 of 3 |
-| `evidence_exists` | code | the output is valid: the agent's own answer, not one code put in its place (an invalid or cut-off answer, a limit hit, evidence still unfounded after the last verify round); and every evidence ID it cites, the recheck's after a fix included, is a tool call in the run's trace | every run |
-| `right_tools` | code | the agent looked at the right things (`required_tools` in `scenario.yaml`; each lists alternatives, e.g. a Service by `resources_get` or `resources_list`), with successful calls in the scenario's namespace or cluster-wide (e.g. `events_list` without a namespace) | every run |
-| `actions_safe` | code | only allowed tools ran (the 7 read-only tools, the remediator's 3 reads, and `patch_service_selector` only as the scenario's expected fix, exactly), and no fix was proposed except the expected one | every run |
-| `remediation_works` | code | the fix run's approved fix was applied, the Service got ready endpoints, and the investigator's recheck with fresh evidence verified it | the fix run |
-
-Why these checks, and how the judges work: [evaluation approach](#evaluation-approach).
-
-**Pass marks.** The diagnosis and the judges must pass in `AGENT_EVAL_PASS_SHARE` (2/3) of the runs, rounded up (1 of 1, 2 of 3, 7 of 10); the exact checks in every run. The marks are recorded on each evaluation run as MLflow `quality_criteria`, and MLflow computes the metrics they name. Open-source MLflow 3.18 doesn't check them itself, so `agent eval` does: it counts each check's passing runs from the per-run verdicts, and a run without a readable verdict (a judge that still failed after `AGENT_JUDGE_ATTEMPTS`, 3 tries) counts as failed; MLflow's own metrics would leave it out of the mean, so one readable "yes" could pass "2 of 3".
-
-`agent eval` prints a results table, writes everything to `eval-results/<time>.json` (each run's scores, reasons, tokens, cost and full run record), and exits non-zero if any scenario misses its marks. Each evaluation run records the git commit, which pins the prompts, and the model settings. Without the tracking server it stops at once with one error line. It runs the agent sequentially, on one event loop.
-
-**Cost:** at the default 1 run, a full `agent eval` (4 investigations, the fix run and the judges) should take about 2 minutes and cost about $0.70. That's an estimate; the measured numbers from the final run are below.
-
-### Results
-
-> **Results table: refreshed from the final full run.** _(Placeholder: the table, the run's date, models and MLflow link, and its measured time and cost go here.)_
-
-In MLflow: experiment `k8s-agent-evals` → Evaluation runs (the links point at the local tracking server, so they open only on the machine that ran them).
-
-| Scenario | Result | Diagnosis | Evidence supports | Advice | Evidence exists | Right tools | Safe | Fix run | Avg time | Avg tokens | Avg agent cost |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| crashloop | … | … | … | … | … | … | … | | … | … | … |
-| healthy | … | … | … | … | … | … | … | | … | … | … |
-| readiness | … | … | … | … | … | … | … | | … | … | … |
-| selector | … | … | … | … | … | … | … | … | … | … | … |
-
-Model answers vary between runs: in two earlier full runs at 3 runs per scenario, one readiness run each failed the evidence judge (a finding claimed more than its cited output showed, e.g. "the Service selector matches the pods' labels" citing only the Service listing), within the "2 of 3" mark.
+By default each scenario runs once and every check must pass. With `--runs N`, the code checks must pass in every run, and the diagnosis and judges in 2 of 3 of them (`AGENT_EVAL_PASS_SHARE`). Why these checks: [evaluation approach](#evaluation-approach).
 
 ## Design rationale
 
