@@ -18,6 +18,7 @@ from k8s_agent.config import get_settings
 from k8s_agent.policy import READ_ONLY_TOOLS
 from k8s_agent.schemas import CATEGORY_DEFINITIONS, CriticVerdict
 from tests.fakes import (
+    DEPLOYMENT_YAML,
     SERVICE_ARGS,
     FakeCluster,
     FakeServices,
@@ -176,6 +177,13 @@ def test_strip_fields_come_from_config(env):
     [deploy] = seen(model, 1)
     # the configured field went; the default one (managedFields) is no longer stripped
     assert "  labels:" not in deploy.content and "  managedFields:" in deploy.content
+
+
+def test_a_pods_log_is_never_parsed_for_fields_to_strip():
+    cluster = FakeCluster({"pods_log": DEPLOYMENT_YAML})  # a log that happens to be object YAML
+    model = ScriptedModel(script=[call(("pods_log", LOG)), answer(diagnosis("E1"))])
+    run(model, cluster)
+    assert seen(model, 1)[-1].content == f"[E1] {DEPLOYMENT_YAML}"
 
 
 def test_the_cap_comes_from_config(env):

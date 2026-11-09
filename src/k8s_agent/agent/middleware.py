@@ -116,7 +116,9 @@ class EvidenceMiddleware(AgentMiddleware):
             return result
         latency_ms = round((time.monotonic() - t0) * 1000)
         settings = ctx.settings
-        text = tool_output.strip_fields(result.text, settings.tool_output_strip_fields)
+        text = result.text
+        if call["name"] != "pods_log":  # a log is the pod's own text, never object YAML
+            text = tool_output.strip_fields(text, settings.tool_output_strip_fields)
         capped = tool_output.cap(text, settings.tool_output_max_chars)
         error = result.status == "error"
         ctx.log.log(

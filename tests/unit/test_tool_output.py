@@ -33,3 +33,11 @@ def test_text_that_is_not_an_object_is_unchanged():
     table = "NAME   READY   STATUS\ncheckout-1   1/1   Running\n"
     for text in (log, table):
         assert strip_fields(text, ["managedFields"]) == text
+
+
+def test_yaml_with_aliases_is_unchanged_so_an_alias_bomb_cannot_expand():
+    # each level holds 9 aliases of the one before: 9**levels items once expanded
+    lines = ["kind: Pod", "managedFields: x", "a0: &a0 [x, x, x, x, x, x, x, x, x]"]
+    lines += [f"a{i}: &a{i} [{', '.join([f'*a{i - 1}'] * 9)}]" for i in range(1, 5)]
+    bomb = "\n".join(lines) + "\n"
+    assert strip_fields(bomb, ["managedFields"]) == bomb

@@ -21,6 +21,17 @@ PERMANENT = re.compile(
 )
 
 
+class _NoAliases(yaml.SafeLoader):
+    """SafeLoader without aliases. Object YAML from the MCP server has none, while nested
+    aliases (a "billion laughs") would make walking and dumping the data blow up."""
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(yaml.AliasEvent):
+            mark = self.peek_event().start_mark
+            raise yaml.composer.ComposerError(None, None, "aliases are not allowed", mark)
+        return super().compose_node(parent, index)
+
+
 def _remove(node: Any, fields: frozenset[str]) -> Any:
     if isinstance(node, list):
         return [_remove(v, fields) for v in node]
@@ -36,11 +47,11 @@ def _remove(node: Any, fields: frozenset[str]) -> Any:
 def strip_fields(text: str, fields: list[str]) -> str:
     """Remove keys named in `fields` from Kubernetes object YAML (a mapping with kind or
     apiVersion, or a list of mappings such as events), outside `spec` and `status`. Anything
-    else, logs and tables included, comes back unchanged."""
+    else, logs, tables and YAML with aliases included, comes back unchanged."""
     if not any(f in text for f in fields):
         return text
     try:
-        data = yaml.safe_load(text)
+        data = yaml.load(text, Loader=_NoAliases)
     except yaml.YAMLError:
         return text
     is_object = isinstance(data, dict) and ("kind" in data or "apiVersion" in data)
