@@ -1,7 +1,6 @@
 """`agent` command line. Interface only: core modules never import this."""
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -10,8 +9,7 @@ import termios
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext, redirect_stdout
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Annotated, Any, NoReturn
+from typing import Annotated, NoReturn
 
 import typer
 from kubernetes.client.exceptions import ApiException
@@ -263,73 +261,21 @@ def eval_(
         found = scenarios.load_all(s.scenarios_dir)
         if scenario:
             found = {scenario: scenarios.get_scenario(s.scenarios_dir, scenario)}
-        c = admin_clients(s)
-    started = datetime.now(UTC)
-    path = s.eval_results_dir / f"{started:%Y%m%dT%H%M%SZ}.json"
-    agent, results = evals.Agent(s), []
-    evaluated = False  # until a scenario is scored, a failure means nothing ran
-
-    def failed() -> int:
-        return EXIT_FAILED if evaluated else EXIT_NOT_STARTED
-
-    def scored(r: evals.ScenarioResult) -> dict[str, Any]:
-        return {"name": r.name, "passed": r.passed, "failures": r.failures, "metrics": r.metrics,
-                "mlflow_run": trace.run_url(r.run_id), "runs": r.runs}  # fmt: skip
-
-    def save() -> None:  # after each scenario, so a later failure keeps what was scored
-        report = {
-            "started_at": started.isoformat(),
-            "passed": all(r.passed for r in results),
-            "settings": {**s.model_settings, "judge_model": s.judge_model,
-                         "runs": s.eval_runs_per_scenario, "pass_min_runs": s.eval_pass_min_runs},
-            "scenarios": [scored(r) | {"fix": r.fix and scored(r.fix)} for r in results],
-        }  # fmt: skip
-        access.write_private(path, json.dumps(report, indent=2, default=str))  # full outputs
-
-    def up(scn: scenarios.Scenario) -> None:
-        with _clean_errors(failed()):
-            scenarios.up(
-                scn,
-                c,
-                ready_timeout=s.scenario_ready_timeout_seconds,
-                delete_timeout=s.scenario_delete_timeout_seconds,
-                poll=s.scenario_poll_seconds,
-                progress=lambda msg: _say(f"{scn.name}: {msg}"),
-            )
-
-    def say_verdict(r: evals.ScenarioResult) -> None:
-        verdict = "passed" if not r.failures else "FAILED: " + "; ".join(r.failures)
-        _say(f"{r.name}: {verdict}\n  {trace.run_url(r.run_id)}")
-
+        suite = evals.Suite(s, admin_clients(s), trace.run_url, _say)
     try:
-        for scn in found.values():
-            up(scn)
-            _say(f"{scn.name}: {s.eval_runs_per_scenario} runs, then scoring")
-            with redirect_stdout(sys.stderr):  # MLflow prints its own summary; stdout: the table
-                result = evals.evaluate(scn, s, agent)
-            evaluated = True
-            say_verdict(result)
-            if scn.spec.expected_fix is not None:
-                _say(f"{scn.name}: the fix run (it approves the fix), then a rebuild")
-                try:
-                    with redirect_stdout(sys.stderr):
-                        result.fix = evals.evaluate_fix(scn, s, agent)
-                finally:
-                    up(scn)  # the fix changed the cluster: broken again, as the scenario is
-                say_verdict(result.fix)
-            results.append(result)
-            save()
-    except McpUnavailable as e:
-        _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", failed())
-    except NotStarted as e:
-        _fail(str(e), failed())
+        with redirect_stdout(sys.stderr):  # MLflow prints its own summaries; stdout: the table
+            results = suite.run(found.values())
+    except (NotStarted, *CLUSTER_ERRORS) as e:
+        code = EXIT_FAILED if suite.scored else EXIT_NOT_STARTED  # until then, nothing ran
+        if isinstance(e, McpUnavailable):
+            _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", code)
+        _fail(str(e), code)
     finally:
-        agent.close()
         tracing.flush()
     out = Console()
     out.width = max(out.width, 140)  # the table, unwrapped, when piped (80 columns by default)
     out.print(ui.eval_table(results))
-    _say(f"results: {path}")
+    _say(f"results: {suite.path}")
     if not all(r.passed for r in results):
         raise typer.Exit(EXIT_FAILED)
 

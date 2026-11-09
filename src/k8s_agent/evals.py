@@ -7,7 +7,8 @@ judgment. The scenario passes when its quality criteria hold.
 
 These diagnosis runs reject every fix the agent requests (and record it). A scenario with an
 expected fix (selector) then gets one fix run, which approves it: the only automatic approval
-there is. It changes the cluster, so the caller rebuilds the scenario after it.
+there is. It changes the cluster, so the scenario is rebuilt after it. `Suite` runs them all,
+scenario by scenario, and writes the report.
 
 MLflow 3.18 records `quality_criteria` on the evaluation run and computes the metrics they name,
 but nothing in open-source MLflow checks them (no pass/fail in Python, and its UI doesn't read
@@ -19,9 +20,12 @@ Needs the full `mlflow` package (the `eval` extra); the agent itself uses only m
 
 import asyncio
 import contextvars
+import json
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import mlflow
@@ -32,9 +36,11 @@ from mlflow.tracing.constant import AssessmentMetadataKey
 from mlflow.utils.git_utils import get_git_commit
 from mlflow.utils.mlflow_tags import MLFLOW_GIT_COMMIT
 
+from k8s_agent import access, scenarios
 from k8s_agent.agent import Answer, ApprovalRequest, NotStarted, RunRecord, investigate
 from k8s_agent.agent.middleware import EVIDENCE_REF
 from k8s_agent.config import Settings
+from k8s_agent.kube import AdminClients
 from k8s_agent.policy import FIX_TOOL, READ_ONLY_TOOLS, REMEDIATOR_READ_TOOLS
 from k8s_agent.scenarios import Scenario
 
@@ -498,3 +504,81 @@ def per_run(trace: Any, record: RunRecord | None) -> dict[str, Any]:
         ),
         "record": record.model_dump(mode="json") if record else None,
     }
+
+
+# --- every scenario --------------------------------------------------------------------------
+
+
+@dataclass
+class Suite:
+    """One `agent eval`: for each scenario, rebuild it and score its diagnosis runs; for one with
+    an expected fix, then its fix run and a rebuild. The report goes to `path` after each
+    scenario, so a later stop keeps what was scored. `run_url`: an MLflow run's page;
+    `progress`: what it's doing, for a person."""
+
+    settings: Settings
+    clients: AdminClients
+    run_url: Callable[[str], str]
+    progress: Callable[[str], None]
+    started: datetime = field(default_factory=lambda: datetime.now(UTC))
+    results: list[ScenarioResult] = field(default_factory=list)
+    scored: bool = False  # a scenario has been scored (its fix run may still be to come)
+
+    @property
+    def path(self) -> Path:
+        return self.settings.eval_results_dir / f"{self.started:%Y%m%dT%H%M%SZ}.json"
+
+    def run(self, found: Iterable[Scenario]) -> list[ScenarioResult]:
+        """Raises what stops it: NotStarted (the agent couldn't run), or a cluster or scenario
+        error from a rebuild."""
+        s, agent = self.settings, Agent(self.settings)
+        try:
+            for scn in found:
+                self.up(scn)
+                self.progress(f"{scn.name}: {s.eval_runs_per_scenario} runs, then scoring")
+                result = evaluate(scn, s, agent)
+                self.scored = True
+                self.verdict(result)
+                if scn.spec.expected_fix is not None:
+                    self.progress(f"{scn.name}: the fix run (it approves the fix), then a rebuild")
+                    try:
+                        result.fix = evaluate_fix(scn, s, agent)
+                    finally:
+                        self.up(scn)  # the fix changed the cluster: back to the scenario's fault
+                    self.verdict(result.fix)
+                self.results.append(result)
+                self.save()
+        finally:
+            agent.close()
+        return self.results
+
+    def up(self, scn: Scenario) -> None:
+        s = self.settings
+        scenarios.up(
+            scn,
+            self.clients,
+            ready_timeout=s.scenario_ready_timeout_seconds,
+            delete_timeout=s.scenario_delete_timeout_seconds,
+            poll=s.scenario_poll_seconds,
+            progress=lambda msg: self.progress(f"{scn.name}: {msg}"),
+        )
+
+    def verdict(self, r: ScenarioResult) -> None:
+        verdict = "passed" if not r.failures else "FAILED: " + "; ".join(r.failures)
+        self.progress(f"{r.name}: {verdict}\n  {self.run_url(r.run_id)}")
+
+    def scored_json(self, r: ScenarioResult) -> dict[str, Any]:
+        return {"name": r.name, "passed": r.passed, "failures": r.failures, "metrics": r.metrics,
+                "mlflow_run": self.run_url(r.run_id), "runs": r.runs}  # fmt: skip
+
+    def save(self) -> None:
+        s = self.settings
+        report = {
+            "started_at": self.started.isoformat(),
+            "passed": all(r.passed for r in self.results),
+            "settings": {**s.model_settings, "judge_model": s.judge_model,
+                         "runs": s.eval_runs_per_scenario, "pass_min_runs": s.eval_pass_min_runs},
+            "scenarios": [self.scored_json(r) | {"fix": r.fix and self.scored_json(r.fix)}
+                          for r in self.results],
+        }  # fmt: skip
+        access.write_private(self.path, json.dumps(report, indent=2, default=str))  # full outputs
