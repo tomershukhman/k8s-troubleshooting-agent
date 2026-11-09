@@ -46,15 +46,3 @@ def isolated_settings(monkeypatch, tmp_path):
     tracing._on = None  # tracing.enable() sets process-wide state: MLflow's, and these
     for key in [k for k in os.environ if k.startswith("MLFLOW_")]:
         del os.environ[key]  # then monkeypatch restores the shell's own
-
-
-@pytest.fixture
-def env(monkeypatch):
-    """Set AGENT_* settings for one test: env(max_tool_calls="2")."""
-
-    def set_env(**values: str) -> None:
-        for key, value in values.items():
-            monkeypatch.setenv(f"AGENT_{key.upper()}", value)
-        get_settings.cache_clear()
-
-    return set_env

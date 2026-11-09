@@ -112,16 +112,6 @@ def test_a_fake_agent_that_always_answers_no_fault_fails(judges, env):
     assert "diagnosis_correct: passed 0 of 1 runs" in got.failures
 
 
-@pytest.fixture
-def env(monkeypatch):
-    def set_env(**values: str) -> None:
-        for key, value in values.items():
-            monkeypatch.setenv(f"AGENT_{key.upper()}", value)
-        get_settings.cache_clear()
-
-    return set_env
-
-
 def agent_eval(*args: str, timeout: float) -> tuple[subprocess.CompletedProcess, float]:
     """`agent eval` as a user runs it."""
     t0 = time.monotonic()
