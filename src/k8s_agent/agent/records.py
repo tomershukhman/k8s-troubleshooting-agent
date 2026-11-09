@@ -98,7 +98,7 @@ class Answer:
     """An approver's answer, and how it was given (recorded with the decision)."""
 
     approved: bool
-    how: str  # e.g. "answered yes in the terminal"
+    reason: str  # how it was given, e.g. "answered yes in the terminal"
 
 
 class Decision(BaseModel):

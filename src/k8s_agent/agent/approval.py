@@ -58,7 +58,7 @@ def read_facts(load_kube: Callable[[], Kube], args: FixArgs) -> Facts:
     )
 
 
-def differs(args: FixArgs, fix: ProposedFix) -> str | None:
+def why_differs(args: FixArgs, fix: ProposedFix) -> str | None:
     if (args.namespace, args.service, args.selector) == (
         fix.namespace,
         fix.service,
@@ -103,7 +103,7 @@ class Gate:
         else:
             facts = await asyncio.to_thread(read_facts, self.load_kube, args)
             request = request.model_copy(update={"facts": facts})
-            problem = differs(args, final.proposed_fix)
+            problem = why_differs(args, final.proposed_fix)
         with tracing.span("approval", request.model_dump(mode="json"), "GUARDRAIL") as span:
             if problem:  # nobody is asked to approve it
                 approved, reason, by = False, problem, AGENT
@@ -126,4 +126,4 @@ class Gate:
                 answer = await self.approve(request, final, evidence)
         except TimeoutError:
             return False, f"the approval timed out after {limit:g} s", AGENT
-        return answer.approved, answer.how, self.user_id
+        return answer.approved, answer.reason, self.user_id

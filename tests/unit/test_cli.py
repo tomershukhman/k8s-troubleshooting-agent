@@ -365,8 +365,8 @@ def test_in_a_terminal_the_change_is_shown_and_only_an_answer_typed_after_it_cou
         explained = request(explanation="[/] Selects [app=x].")
         return await cli._approver(err, spinner)(explained, *VERIFIED)
 
-    how = f"answered {'yes' if approved else 'no'} in the terminal"
-    assert asyncio.run(ask()) == Answer(approved, how)
+    reason = f"answered {'yes' if approved else 'no'} in the terminal"
+    assert asyncio.run(ask()) == Answer(approved, reason)
     assert spinner.events == ["paused", "answered", "resumed"]  # no spinner over the prompt
     shown = err.export_text()
     # first the diagnosis the fix comes from, as the summary shows it; then the change; then y/N

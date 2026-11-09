@@ -248,7 +248,7 @@ async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext
     return Command(goto="result", update={"rounds": [round_], "forced_reason": reason})
 
 
-def forced(reason: str) -> Diagnosis:
+def forced_inconclusive(reason: str) -> Diagnosis:
     return Diagnosis(
         status=DiagnosisStatus.inconclusive,
         fault_category=FaultCategory.none,
@@ -263,7 +263,7 @@ def forced(reason: str) -> Diagnosis:
 
 def final_diagnosis(state: InvestigationState) -> Diagnosis:
     if reason := state.get("forced_reason"):
-        return forced(reason)
+        return forced_inconclusive(reason)
     draft = state["structured_response"]
     steps = steps_from_messages(state["messages"])
     if draft.status is DiagnosisStatus.inconclusive and any(
@@ -350,7 +350,7 @@ def after_investigate(state: InvestigationState) -> str:
     return "recheck" if state.get("remediation") else "verify_evidence"
 
 
-def unverified(r: Remediation, check: PostFixCheck | None, fresh: list[Step]) -> str | None:
+def why_unverified(r: Remediation, check: PostFixCheck | None, fresh: list[Step]) -> str | None:
     """Why the fix isn't verified; None when it is: the fix tool counted ready endpoints and
     the recheck, citing only its own fresh calls, says resolved."""
     if check is None or not check.evidence:
@@ -371,7 +371,7 @@ def recheck(state: InvestigationState) -> dict[str, Any]:
     asked = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
     answer = state.get("structured_response")
     check = answer.post_fix_check if answer else None
-    note = unverified(fix, check, steps_from_messages(messages[asked:]))
+    note = why_unverified(fix, check, steps_from_messages(messages[asked:]))
     return {
         "final": state["final"].model_copy(update={"post_fix_check": check}),
         "remediation": fix.model_copy(update={"verified": note is None, "recheck_note": note}),

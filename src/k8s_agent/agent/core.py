@@ -41,7 +41,7 @@ from k8s_agent import tracing
 from k8s_agent.agent import approval
 from k8s_agent.agent.approval import Approver, Gate
 from k8s_agent.agent.critic import with_verdict
-from k8s_agent.agent.graph import build_graph, forced
+from k8s_agent.agent.graph import build_graph, forced_inconclusive
 from k8s_agent.agent.middleware import RunContext
 from k8s_agent.agent.records import (
     ApprovalRequest,
@@ -259,7 +259,7 @@ async def _run(
             command = Command(resume=answers)  # the same thread: the graph goes on where it paused
     except Exception as e:
         if reason := _stop_reason(e, context.settings):
-            outcome = Outcome(RunStatus.completed, forced(reason), None, reason)
+            outcome = Outcome(RunStatus.completed, forced_inconclusive(reason), None, reason)
         elif isinstance(e, ModelError):
             outcome = Outcome(RunStatus.failed, error=f"model API error: {type(e).__name__}: {e}")
         else:
