@@ -152,25 +152,45 @@ For one kind of fault, a Service whose selector doesn't match its pods, in a nam
 1. **The investigator proposes the fix** in its diagnosis (`proposed_fix`), and the critic checks the evidence backs it: the new selector matches the labels of the pods the investigator read.
 2. **Routing (code)** sends only that kind of fix, in an allowed namespace, on to the remediator. Any other recommendation stays advice.
 3. **The remediator checks it would work.** It is a separate agent ([its prompt](src/k8s_agent/agent/remediator.md)) with its own identity, `remediator`, and its own tools: three reads (the Service, the pods, the EndpointSlices) and `patch_service_selector`, the only tool anywhere that can change something. It doesn't use the MCP server. It reads the Service and its `resourceVersion`, checks that the exact new selector matches ready pods, then requests the fix with an explanation of its effect; if the check fails, it declines and says why.
-4. **The run pauses before the tool runs** (LangChain's `HumanInTheLoopMiddleware`). You see the change and facts that code has just read as the remediator, and answer y/N:
+4. **The run pauses before the tool runs** (LangChain's `HumanInTheLoopMiddleware`). First you see the diagnosis the fix is based on, the one the critic verified, as the summary shows it: the root cause, each finding with the tool call it came from, and the next step. Then the change, with facts that code has just read as the remediator, and you answer y/N. This happens wherever the prompt appears: also with `--quiet`, and with `--json` when stdin is a terminal.
 
 ```
 node     remediate
   agent    remediator · claude-sonnet-5-5
     tool     get_service(checkout -n shop-checkout)
-             Service shop-checkout/checkout: selector app=check-out, resourceVersion 34730
+             Service shop-checkout/checkout: selector app=check-out, resourceVersion 34889
     tool     list_pods(-n shop-checkout selector=app=checkout)
              2 of 2 pods ready, matching app=checkout
+╭─ Fault found · selector_mismatch · Service/checkout in shop-checkout ──────────────────────────────────────╮
+│ The checkout Service selects pods with app=check-out, but the checkout pods are labeled app=checkout. The  │
+│ selector matches no pods, so the Service has no endpoints and nothing can reach it.                        │
+│                                                                                                            │
+│ Ref  Finding                                                 From                                          │
+│ E2   Service shop-checkout/checkout has selector             resources_list Service -n shop-checkout       │
+│      app=check-out.                                                                                        │
+│ E3   Both checkout pods are Running and Ready, with the      pods_list_in_namespace -n shop-checkout       │
+│      label app=checkout, not app=check-out.                                                                │
+│ E4   The checkout EndpointSlice has no endpoints (ENDPOINTS  resources_list EndpointSlice -n shop-checkout │
+│      <unset>).                                                                                             │
+│                                                                                                            │
+│ Next step: Change the Service selector from app=check-out to app=checkout so it matches the checkout pods. │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Approve this fix? ────────────────────────────────────────────────────────────────────────────────────────╮
 │ Service          shop-checkout/checkout                                                                    │
 │ Selector         app=check-out  →  app=checkout  (replaces the whole selector)                             │
-│ Remediator       Service selector currently app=check-out (typo) and matches no pods. Change it to         │
-│                  app=checkout, which matches 2 Ready pods (checkout-69db948c9f-9tksh and                   │
-│                  checkout-69db948c9f-qrg2k). Expect the Service's EndpointSlice to be populated with 2     │
+│ Remediator       Service shop-checkout/checkout currently selects app=check-out, which matches no pods     │
+│                  (typo). Change the selector to app=checkout. This matches the 2 ready pods                │
+│                  checkout-69db948c9f-5tx4d and checkout-69db948c9f-s77kl, so the Service should get 2      │
 │                  ready endpoints.                                                                          │
-│ Checked now      2 ready pods match app=checkout: checkout-69db948c9f-9tksh, checkout-69db948c9f-qrg2k     │
-│ Applies only if  the Service is still at version 34730                                                     │
+│ Checked now      2 ready pods match app=checkout: checkout-69db948c9f-5tx4d, checkout-69db948c9f-s77kl     │
+│ Applies only if  the Service is still at version 34889                                                     │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Apply this change? [y/N]
+```
+
+Approve (`y`), and the fix runs and the investigator rechecks it. The diagnosis is still on screen above, so the final panel doesn't repeat it: it says what happened to the fix (from an earlier run):
+
+```
 Apply this change? [y/N] y
   approval Service/checkout -n shop-checkout: app=check-out → app=checkout
     ✓ approved: answered yes in the terminal (by tomer)
@@ -191,6 +211,8 @@ node     recheck
 │ app=checkout; 2 ready endpoints. Verified by a recheck with fresh evidence (E7, E8, E9).                   │
 ```
 
+When stdout isn't the terminal the prompt used (say stderr goes to a file), the final panel is printed in full instead, so a saved output is complete; piped or with `--json`, stdout is the result JSON as before. A run without a fix, or whose fix code rejects without asking, shows nothing before the summary.
+
 5. **On approval the tool checks again and applies exactly that change.** It re-checks the namespace and the ready pods, then sends one JSON Patch that holds only if the Service is still at the version the remediator read (`test /metadata/resourceVersion`) and replaces the whole selector (`replace /spec/selector`, so no old key survives). The API server applies it all or nothing. If the Service changed in the meantime, the outcome is `stale` and nothing is applied. Then the tool waits up to `AGENT_VERIFY_WAIT_SECONDS` (20) for ready endpoints.
 6. **The investigator, not the remediator, checks again:** one more round of its own conversation (so its evidence IDs carry on and the round counts toward the run's budget), with fresh tool calls, filling `post_fix_check`. There's no critic round; code checks the answer. The fix is `verified` only if the Service has ready endpoints and the recheck, citing only its own new evidence, says the problem is gone.
 
@@ -201,18 +223,20 @@ What you can answer, and when it's a reject:
 - **A request other than the proposed fix is rejected without asking you.** If the remediator asks for any selector but the one the investigator proposed and the critic checked, or its request is malformed, code refuses it.
 - **At most one request per run.**
 
-A reject (any answer but `y` or `yes`):
+A reject (any answer but `y` or `yes`), from the run above:
 
 ```
 Apply this change? [y/N] n
   approval Service/checkout -n shop-checkout: app=check-out → app=checkout
-    ✗ rejected: answered no in the terminal (by tomer)
+    ✗ rejected: answered no in the terminal (by tomer.shukhman)
 node     remediate · resumed
     tool     get_service(checkout -n shop-checkout)
-             Service shop-checkout/checkout: selector app=check-out, resourceVersion 34730
+             Service shop-checkout/checkout: selector app=check-out, resourceVersion 34889
   → not_applied: the request was rejected, so nothing was applied
-…
-│ Fix: rejected: answered no in the terminal (by tomer, 23:00:11 UTC). Nothing was changed.                  │
+Trace: http://localhost:5050/#/experiments/3/traces?selectedEvaluationId=tr-22e3049278247001ae26aa7fd9e11673
+╭─ Fault found · selector_mismatch · Service/checkout in shop-checkout ──────────────────────────────────────╮
+│ Fix: rejected: answered no in the terminal (by tomer.shukhman, 09:59:27 UTC). Nothing was changed.         │
+╰────────────────────────────────── 27.1 s · 1 verify round · run 5673ba95 ──────────────────────────────────╯
 ```
 
 (The repeated `get_service`: the remediator had asked for a read and the fix in one turn, and on resume LangGraph runs that turn's tool calls again from the start. Only the fix waits for your answer, and it runs at most once.)

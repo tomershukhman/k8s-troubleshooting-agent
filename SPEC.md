@@ -475,7 +475,7 @@ sequenceDiagram
         alt malformed, or not the proposed fix
             CLI->>G: resume: reject, without asking you
         else interactive terminal: you approve
-            CLI->>U: change, explanation, facts. Apply this change? [y/N]
+            CLI->>U: the verified diagnosis and its evidence, then the change, explanation, facts. Apply this change? [y/N]
             U->>CLI: y
             CLI->>G: resume on the same thread_id: approve (keyed by interrupt ID)
             G->>R: the remediator resumes: exactly the approved call runs
@@ -531,12 +531,17 @@ sequenceDiagram
 - There is no `--yes` flag.
 - The only automatic approval is the eval's dedicated fix run, in eval code ([3.6](#36-scenarios-and-evals)).
 
-**What the user sees at the pause** (the brief: explain the change and its effect before asking):
-- the namespace and the Service
-- the current selector → the new selector (it replaces the whole selector)
-- the remediator's explanation
-- facts read by code with the remediator identity: how many ready pods the **exact new selector** matches, and which
-- the version the fix is pinned to, and a warning if approving would be refused (the Service changed since the remediator read it; no ready pod matches)
+**What the user sees at the pause** (the brief: explain the change and its effect before asking), wherever the prompt appears (on stderr; with `--quiet`; with `--json` when stdin is a terminal):
+1. **The diagnosis the fix is based on,** the one the critic verified, rendered as the final summary renders it: the root cause, the evidence table (each finding with the tool call it came from), and the recommended next step. The core passes the approver this diagnosis and its evidence steps beside the request.
+2. **The change:**
+   - the namespace and the Service
+   - the current selector → the new selector (it replaces the whole selector)
+   - the remediator's explanation
+   - facts read by code with the remediator identity: how many ready pods the **exact new selector** matches, and which
+   - the version the fix is pinned to, and a warning if approving would be refused (the Service changed since the remediator read it; no ready pod matches)
+3. `Apply this change? [y/N]`
+
+**At the end,** when the summary goes to the terminal the prompt used (stdout and stderr the same terminal), it doesn't repeat the diagnosis: it shows what happened to the fix (the decision, the outcome, and whether the recheck verified it, with the recheck's fresh evidence). Otherwise (stdout on another terminal) it prints in full, so a saved output is complete; piped or with `--json`, stdout is the result JSON, unchanged. A run without a fix, or whose fix code rejected without asking, shows nothing before the summary, which is in full.
 
 **Approve:** resume on the same thread with `Command(resume={interrupt_id: {"type": "approve"}})`, inside the same core call. The tool then:
 1. **Validates:** the namespace is in `AGENT_REMEDIATION_NAMESPACES`; the selector has non-empty keys and values; the Service exists and is still at `resource_version` (else `stale`); the exact new selector matches ≥1 ready pod.

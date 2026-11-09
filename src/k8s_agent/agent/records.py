@@ -84,8 +84,9 @@ class Facts(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    """What the person is shown before deciding: the call exactly as it would run (FixArgs, once
-    the gate has checked it), and facts read at the pause."""
+    """The change the person is shown before deciding, after the verified diagnosis it comes
+    from: the call exactly as it would run (FixArgs, once the gate has checked it), and facts
+    read at the pause."""
 
     tool: str
     args: dict[str, Any]

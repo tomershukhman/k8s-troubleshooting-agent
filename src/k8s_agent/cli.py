@@ -9,6 +9,7 @@ import sys
 import termios
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext, redirect_stdout
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any, NoReturn
 
@@ -23,15 +24,16 @@ from k8s_agent import access, scenarios, tracing, tracking_server, ui
 from k8s_agent.agent import (
     Answer,
     ApprovalRequest,
-    Approver,
     McpUnavailable,
     NotStarted,
     RunStatus,
 )
 from k8s_agent.agent import investigate as run_investigation
+from k8s_agent.agent.records import EvidenceStep
 from k8s_agent.config import Settings, get_settings
 from k8s_agent.kube import KubeError, admin_clients
 from k8s_agent.logs import LOGGER, setup_logging
+from k8s_agent.schemas import Diagnosis
 
 app = typer.Typer(no_args_is_help=True, help="Kubernetes troubleshooting agent.")
 scenario_app = typer.Typer(no_args_is_help=True, help="Create or remove the broken scenarios.")
@@ -93,29 +95,44 @@ async def _read_line(fd: int) -> str:
         loop.remove_reader(fd)
 
 
-def _approver(err: Console, progress: ui.Progress | None) -> Approver | None:
-    """The y/N prompt, when stdin is a terminal: the prompt goes to stderr, so `--json | jq`
-    still asks. None otherwise (piped, scripted, CI): the agent then rejects the fix, "no
-    interactive approval available". There is no --yes."""
-    if not sys.stdin.isatty():
-        return None
+@dataclass
+class Prompt:
+    """The y/N prompt, on stderr, so `--json | jq` still asks: first the verified diagnosis
+    (as the summary shows it), then the change, then the question. `shown`: it was asked."""
 
-    async def ask(request: ApprovalRequest) -> Answer:
-        with progress.paused() if progress else nullcontext():
+    err: Console
+    progress: ui.Progress | None
+    shown: bool = False
+
+    async def __call__(
+        self, request: ApprovalRequest, diagnosis: Diagnosis, evidence_steps: list[EvidenceStep]
+    ) -> Answer:
+        with self.progress.paused() if self.progress else nullcontext():
             # Drop anything typed while the agent worked: only an answer typed after seeing
             # the change counts.
             termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-            err.print(ui.approval(request))
-            err.print(Text("Apply this change? [y/N] ", "bold"), end="")
+            self.err.print(ui.diagnosis(diagnosis, evidence_steps))
+            self.err.print(ui.approval(request))
+            self.shown = True
+            self.err.print(Text("Apply this change? [y/N] ", "bold"), end="")
             try:
                 reply = await _read_line(sys.stdin.fileno())
             except asyncio.CancelledError:  # the approval timed out
-                err.print()
+                self.err.print()
                 raise
         yes = reply.strip().lower() in ("y", "yes")
         return Answer(yes, f"answered {'yes' if yes else 'no'} in the terminal")
 
-    return ask
+
+def _approver(err: Console, progress: ui.Progress | None) -> Prompt | None:
+    """The y/N prompt, when stdin is a terminal. None otherwise (piped, scripted, CI): the agent
+    then rejects the fix, "no interactive approval available". There is no --yes."""
+    return Prompt(err, progress) if sys.stdin.isatty() else None
+
+
+def _one_terminal() -> bool:
+    """stdout is the terminal the prompt used (stderr's): neither is redirected elsewhere."""
+    return os.path.samestat(os.fstat(sys.stdout.fileno()), os.fstat(sys.stderr.fileno()))
 
 
 @contextmanager
@@ -146,8 +163,8 @@ def investigate(
 
     In a terminal: live progress, then a summary. Piped or with --json: the result JSON on
     stdout. For a broken Service selector (in AGENT_REMEDIATION_NAMESPACES) the agent can fix it:
-    it shows you the exact change and asks y/N; it runs only if you approve. Without a terminal
-    on stdin the fix is rejected. Exit codes:
+    it shows you the diagnosis and the exact change and asks y/N; it runs only if you approve.
+    Without a terminal on stdin the fix is rejected. Exit codes:
 
     0: a diagnosis, "inconclusive" included.
     1: the run failed; the result says why.
@@ -168,6 +185,7 @@ def investigate(
         "remediator": s.effective_remediator_model,
     }
     progress = None if quiet else ui.Progress(err, models, s.progress_summary_chars)
+    prompt = _approver(err, progress)
     try:
         with progress or nullcontext():
             record = asyncio.run(
@@ -177,7 +195,7 @@ def investigate(
                     namespace=namespace,
                     user_id=user_id,
                     on_event=progress or (lambda _: None),
-                    approve=_approver(err, progress),
+                    approve=prompt,
                 )
             )
     except McpUnavailable as e:
@@ -192,8 +210,9 @@ def investigate(
         err.print(Text.assemble(("Trace: ", "bold"), (url, f"link {url}")), soft_wrap=True)
     if as_json or not sys.stdout.isatty():
         typer.echo(result.model_dump_json(indent=2 if sys.stdout.isatty() else None))
-    else:
-        Console().print(ui.summary(result))
+    else:  # the diagnosis the prompt showed is still on screen above: not again
+        shown = prompt is not None and prompt.shown and _one_terminal()
+        Console().print(ui.summary(result, diagnosis_shown=shown))
     if result.status is RunStatus.failed:
         raise typer.Exit(EXIT_FAILED)
 

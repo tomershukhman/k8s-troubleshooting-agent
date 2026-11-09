@@ -76,7 +76,7 @@ def investigator(recheck: dict = RECHECKED) -> ScriptedModel:
 def approver(yes: bool = True, *, seen: list | None = None, then=None, delay: float = 0):
     """Answers after `delay`; records each request in `seen`, and calls `then()` first."""
 
-    async def ask(request):
+    async def ask(request, _diagnosis, _evidence_steps):
         if seen is not None:
             seen.append(request)
         if then:
@@ -137,6 +137,21 @@ def test_the_run_pauses_before_the_fix_runs_and_approving_applies_exactly_that_c
     d = record.result.diagnosis
     assert d.post_fix_check.resolved and d.proposed_fix == Diagnosis(**PROPOSED).proposed_fix
     assert [s.ref for s in record.result.evidence_steps] == ["E1", "E2", "E3"]  # E3: the recheck
+
+
+def test_the_approver_gets_the_verified_diagnosis_and_the_tool_calls_behind_it():
+    shown = []
+
+    async def ask(_request, diagnosis, evidence_steps):
+        shown.append((diagnosis, evidence_steps))
+        return Answer(False, "rejected in a test")
+
+    record = fix(ask)
+    [(d, steps)] = shown
+    assert d == Diagnosis(**PROPOSED) == record.result.diagnosis  # the one the critic verified
+    assert steps == record.result.evidence_steps  # the summary's own, cited ones only
+    assert [(s.ref, s.tool) for s in steps] == [("E1", "resources_get"),
+                                                ("E2", "pods_list_in_namespace")]  # fmt: skip
 
 
 def test_a_reject_applies_nothing_and_there_is_no_recheck():

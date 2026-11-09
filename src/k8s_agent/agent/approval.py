@@ -5,9 +5,10 @@ When the remediator's fix tool pauses the graph, `Gate.decide`:
    pods the exact new selector matches;
 2. rejects at once a request that is malformed or differs from the investigator's proposed
    fix (the one the critic checked), so nobody is asked to approve anything else;
-3. otherwise asks the approver the caller gave (the CLI's y/N prompt, or the evals). The wait
-   has its own clock: no answer within AGENT_APPROVAL_TIMEOUT_SECONDS is a reject. No approver
-   (no interactive terminal) is a reject too.
+3. otherwise asks the approver the caller gave (the CLI's y/N prompt, or the evals), with the
+   verified diagnosis the fix comes from and the tool calls behind its evidence. The wait has
+   its own clock: no answer within AGENT_APPROVAL_TIMEOUT_SECONDS is a reject. No approver (no
+   interactive terminal) is a reject too.
 
 The decision goes on the trace, as an `approval` span (what was shown, then the answer, who and
 when), and into the result.
@@ -23,16 +24,24 @@ from typing import Any
 from pydantic import ValidationError
 
 from k8s_agent import tracing
-from k8s_agent.agent.records import Answer, ApprovalRequest, Decision, Facts, FixArgs
+from k8s_agent.agent.records import (
+    Answer,
+    ApprovalRequest,
+    Decision,
+    EvidenceStep,
+    Facts,
+    FixArgs,
+)
 from k8s_agent.agent.remediator import KUBE_ERRORS, Kube, labels
 from k8s_agent.config import Settings
 from k8s_agent.kube import KubeError
-from k8s_agent.schemas import ProposedFix
+from k8s_agent.schemas import Diagnosis, ProposedFix
 
 NO_APPROVER = "no interactive approval available"
 AGENT = "k8s-agent"  # who decided, when it was code and not a person
 
-Approver = Callable[[ApprovalRequest], Awaitable[Answer]]
+# (the request, the verified diagnosis, the tool calls behind its evidence) -> the answer
+Approver = Callable[[ApprovalRequest, Diagnosis, list[EvidenceStep]], Awaitable[Answer]]
 
 
 def read_facts(kube: Callable[[], Kube], args: FixArgs) -> Facts:
@@ -79,10 +88,11 @@ class Gate:
     log: logging.LoggerAdapter
 
     async def decide(
-        self, pause: dict[str, Any], fix: ProposedFix
+        self, pause: dict[str, Any], final: Diagnosis, evidence: list[EvidenceStep]
     ) -> tuple[ApprovalRequest, Decision]:
         """`pause`: the middleware's interrupt value, with the tool call exactly as it would
-        run."""
+        run. `final`: the verified diagnosis that proposed the fix; `evidence`: the tool calls
+        behind it. The approver gets both, to show what the fix is based on."""
         request = ApprovalRequest(tool=pause["name"], args=pause["args"], facts=Facts())
         try:
             args = FixArgs.model_validate(pause["args"])
@@ -93,25 +103,27 @@ class Gate:
         else:
             facts = await asyncio.to_thread(read_facts, self.kube, args)
             request = request.model_copy(update={"facts": facts})
-            problem = differs(args, fix)
+            problem = differs(args, final.proposed_fix)
         with tracing.span("approval", request.model_dump(mode="json"), "GUARDRAIL") as span:
             if problem:  # nobody is asked to approve it
                 approved, reason, by = False, problem, AGENT
             else:
-                approved, reason, by = await self._answer(request)
+                approved, reason, by = await self._answer(request, final, evidence)
             decision = Decision(approved=approved, reason=reason, by=by, at=datetime.now(UTC))
             tracing.finish(span, decision.model_dump(mode="json"), None)
         self.log.info("fix_decided", extra=decision.model_dump(mode="json"))
         return request, decision
 
-    async def _answer(self, request: ApprovalRequest) -> tuple[bool, str, str]:
+    async def _answer(
+        self, request: ApprovalRequest, final: Diagnosis, evidence: list[EvidenceStep]
+    ) -> tuple[bool, str, str]:
         """(approved, how, by whom), from the approver, within the approval's own time limit."""
         if self.approve is None:
             return False, NO_APPROVER, AGENT
         limit = self.settings.approval_timeout_seconds
         try:
             async with asyncio.timeout(limit):
-                answer = await self.approve(request)
+                answer = await self.approve(request, final, evidence)
         except TimeoutError:
             return False, f"the approval timed out after {limit:g} s", AGENT
         return answer.approved, answer.how, self.user_id

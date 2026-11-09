@@ -27,10 +27,18 @@ from k8s_agent.agent import (
     Verified,
     tool_output,
 )
-from k8s_agent.agent.records import FixArgs, FixStep, Remediation, RunResult, Step, VerifyRound
+from k8s_agent.agent.records import (
+    EvidenceStep,
+    FixArgs,
+    FixStep,
+    Remediation,
+    RunResult,
+    Step,
+    VerifyRound,
+)
 from k8s_agent.agent.remediator import labels
 from k8s_agent.policy import FIX_TOOL
-from k8s_agent.schemas import PostFixCheck
+from k8s_agent.schemas import Diagnosis, PostFixCheck
 
 ACTIVITY = {
     "intake": "Starting…",
@@ -235,8 +243,10 @@ TITLES = {
 }
 
 
-def summary(result: RunResult) -> RenderableType:
-    """The result for a person: what's wrong, the evidence for it, and what to do."""
+def summary(result: RunResult, diagnosis_shown: bool = False) -> RenderableType:
+    """The result for a person: what's wrong, the evidence for it, and what to do, then what
+    happened to the fix. `diagnosis_shown`: the person saw the diagnosis at the approval prompt
+    (diagnosis()), so a run with a fix shows only what happened to it."""
     result = scrubbed(result)
     rounds = len(result.verification)
     footer = (
@@ -247,26 +257,10 @@ def summary(result: RunResult) -> RenderableType:
     if d is None:
         body = Text(result.error or "unknown error")
         return Panel(body, title="[bold red]Run failed", subtitle=footer, border_style="red")
-    label, color = TITLES[d.status]
-    # Text, not markup, wherever the model's words go: they may hold "[...]".
-    title = Text(label, f"bold {color}")
-    if d.status == "fault_found":
-        r = d.affected_resource
-        title.append(f" · {d.fault_category} · {r.kind}/{r.name} in {r.namespace}")
-    parts: list[RenderableType] = [Text(d.root_cause)]
-    if d.evidence:
-        steps = {s.ref: s for s in result.evidence_steps}
-        table = Table(box=None, show_header=True, header_style="bold dim", pad_edge=False)
-        table.add_column("Ref")
-        table.add_column("Finding", ratio=3)
-        table.add_column("From", style="dim", ratio=2)
-        for e in d.evidence:
-            s = steps.get(e.ref)
-            source = f"{s.tool} {describe_call(s.args)}" if s else ""
-            table.add_row(Text(e.ref), Text(e.finding), Text(source))
-        parts += [Text(), table]
-    parts += [Text(), Text.assemble(("Next step: ", "bold"), d.recommended_action)]
     rem = result.remediation
+    if rem and diagnosis_shown:
+        return _panel(d, [fix_summary(rem, d.post_fix_check)], footer)
+    parts = _findings(d, result.evidence_steps)
     if fix := d.proposed_fix:
         unchanged = "" if rem else " Nothing has been changed."  # else: the fix line says
         parts.append(
@@ -279,6 +273,41 @@ def summary(result: RunResult) -> RenderableType:
         )
     if rem:
         parts.append(fix_summary(rem, d.post_fix_check))
+    return _panel(d, parts, footer)
+
+
+def diagnosis(d: Diagnosis, evidence_steps: list[EvidenceStep]) -> RenderableType:
+    """The verified diagnosis as the summary shows it, for a person about to approve the fix
+    it proposes (the change itself: approval())."""
+    d = scrubbed(d)
+    return _panel(d, _findings(d, [scrubbed(s) for s in evidence_steps]))
+
+
+def _findings(d: Diagnosis, evidence_steps: list[EvidenceStep]) -> list[RenderableType]:
+    """What's wrong, each finding with the tool call it came from, and what to do."""
+    parts: list[RenderableType] = [Text(d.root_cause)]
+    if d.evidence:
+        steps = {s.ref: s for s in evidence_steps}
+        table = Table(box=None, show_header=True, header_style="bold dim", pad_edge=False)
+        table.add_column("Ref")
+        table.add_column("Finding", ratio=3)
+        table.add_column("From", style="dim", ratio=2)
+        for e in d.evidence:
+            s = steps.get(e.ref)
+            source = f"{s.tool} {describe_call(s.args)}" if s else ""
+            table.add_row(Text(e.ref), Text(e.finding), Text(source))
+        parts += [Text(), table]
+    return [*parts, Text(), Text.assemble(("Next step: ", "bold"), d.recommended_action)]
+
+
+def _panel(d: Diagnosis, parts: list[RenderableType], footer: str | None = None) -> Panel:
+    """`parts` in a panel titled with what was found."""
+    label, color = TITLES[d.status]
+    # Text, not markup, wherever the model's words go: they may hold "[...]".
+    title = Text(label, f"bold {color}")
+    if d.status == "fault_found":
+        r = d.affected_resource
+        title.append(f" · {d.fault_category} · {r.kind}/{r.name} in {r.namespace}")
     return Panel(
         Group(*parts), title=title, title_align="left", subtitle=footer, border_style=color
     )

@@ -119,7 +119,7 @@ def test_the_right_fix_is_proposed_and_requested_and_without_a_terminal_rejected
 
 
 def test_editing_the_service_during_the_pause_makes_the_fix_refuse(kube, want, rebuilt):
-    async def edit_then_approve(_request):
+    async def edit_then_approve(*_):
         edit = {"metadata": {"annotations": {"k8s-agent.test/edited": "during-the-pause"}}}
         kube.core.patch_namespaced_service(NAME, NS, edit)
         return Answer(True, "approved after an edit, by the M6 acceptance test")
@@ -157,7 +157,7 @@ def test_an_approved_fix_gets_endpoints_and_is_verified_all_in_one_trace(
 ):
     at_pause = []
 
-    async def approve(_request):
+    async def approve(*_):
         at_pause.append((service(kube).spec.selector, ready_endpoints(kube)))
         return Answer(True, "approved by the M6 acceptance test")
 

@@ -342,11 +342,11 @@ def answer(record: RunRecord) -> dict[str, Any]:
     }
 
 
-async def diagnosis_run_answer(_request: ApprovalRequest) -> Answer:
+async def diagnosis_run_answer(_request: ApprovalRequest, *_: Any) -> Answer:
     return Answer(False, "agent eval's diagnosis runs reject every fix")
 
 
-async def fix_run_answer(_request: ApprovalRequest) -> Answer:
+async def fix_run_answer(_request: ApprovalRequest, *_: Any) -> Answer:
     return Answer(True, "agent eval's fix run approves its fix")
 
 

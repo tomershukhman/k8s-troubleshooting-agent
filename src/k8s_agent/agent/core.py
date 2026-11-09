@@ -62,6 +62,7 @@ from k8s_agent.agent.records import (
     RunResult,
     RunStatus,
     Stage,
+    Step,
     ToolCalled,
     Verified,
     evidence_of,
@@ -249,9 +250,11 @@ async def _run(
             if not state.interrupts:
                 break
             answers = {}
-            fix = state.values["final"].proposed_fix
+            final = state.values["final"]  # verified: the fix comes from it
+            steps = steps_from_messages(state.values["messages"])
+            evidence = _evidence_steps(final, steps, context.settings)
             for pause in state.interrupts:  # one: the remediator may request the fix once
-                request, decision = await gate.decide(pause.value, fix)
+                request, decision = await gate.decide(pause.value, final, evidence)
                 asked.append((request, decision))
                 on_event(Decided(request, decision))
                 answers[pause.id] = approval.resume(decision)
@@ -302,6 +305,22 @@ def _remediation(values: dict[str, Any], asked: Asked, stopped: str | None) -> R
             change = change.model_copy(update={"before": request.facts.current_selector})
         done = done.model_copy(update={"request": request, "decision": decision, "change": change})
     return done
+
+
+def _evidence_steps(d: Diagnosis | None, steps: list[Step], s: Settings) -> list[EvidenceStep]:
+    """The tool call behind each evidence ID `d` cites, in citation order, with an excerpt."""
+    by_ref = {step.ref: step for step in steps}
+    return [
+        EvidenceStep(
+            ref=ref,
+            tool=step.tool,
+            args=step.args,
+            error=step.error,
+            output_excerpt=cap(step.output, s.evidence_excerpt_chars),
+        )
+        for ref in dict.fromkeys(d.refs if d else [])
+        if (step := by_ref.get(ref))
+    ]
 
 
 def _close_if_loaded(kube: Any) -> None:
@@ -376,8 +395,6 @@ async def investigate(
 
         remediation = _remediation(values, asked, outcome.fix_stopped)
         steps = steps_from_messages(values.get("messages", []))
-        by_ref = {s.ref: s for s in steps}
-        cited = dict.fromkeys(outcome.diagnosis.refs if outcome.diagnosis else [])
         result = RunResult(
             run_id=run_id,
             thread_id=thread_id,
@@ -391,17 +408,7 @@ async def investigate(
             duration_ms=round((time.monotonic() - t0) * 1000),
             diagnosis=outcome.diagnosis,
             error=outcome.error,
-            evidence_steps=[
-                EvidenceStep(
-                    ref=s.ref,
-                    tool=s.tool,
-                    args=s.args,
-                    error=s.error,
-                    output_excerpt=cap(s.output, settings.evidence_excerpt_chars),
-                )
-                for ref in cited
-                if (s := by_ref.get(ref))
-            ],  # fmt: skip
+            evidence_steps=_evidence_steps(outcome.diagnosis, steps, settings),
             verification=values.get("rounds", []),
             remediation=remediation,
         )

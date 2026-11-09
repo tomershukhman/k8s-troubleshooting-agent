@@ -7,7 +7,9 @@ import io
 import json
 import os
 import re
+import select
 import sys
+import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -19,9 +21,10 @@ from typer.testing import CliRunner
 
 from k8s_agent import cli, ui
 from k8s_agent.agent import Answer, ApprovalRequest, Reasoning, ToolCalled, core
-from k8s_agent.agent.records import Facts, RunResult, Step
+from k8s_agent.agent.records import EvidenceStep, Facts, RunResult, Step
 from k8s_agent.cli import app
 from k8s_agent.config import get_settings
+from k8s_agent.schemas import Diagnosis
 from tests.fakes import (
     SERVICE,
     SERVICE_ARGS,
@@ -45,9 +48,9 @@ def agent(*args: str):
 
 @pytest.fixture
 def fake(monkeypatch):
-    def use(model: ScriptedModel, judge: ScriptedModel | None = None) -> None:
+    def use(model: ScriptedModel, judge: ScriptedModel | None = None, fixer=None) -> None:
         # the investigator, the critic, then the remediator: it requests the selector fix
-        models = iter([model, judge or critic(), remediator(fix_call())])
+        models = iter([model, judge or critic(), fixer or remediator(fix_call())])
         monkeypatch.setattr(core, "make_model", lambda _settings, _name: next(models))
         monkeypatch.setattr(core, "mcp_client", lambda _settings: FakeCluster().server)
 
@@ -307,6 +310,14 @@ def request(**args) -> ApprovalRequest:
     return ApprovalRequest(tool="patch_service_selector", args=call, facts=facts)
 
 
+# What the approver gets besides the request: the verified diagnosis and its cited tool calls.
+VERIFIED = (
+    Diagnosis(**diagnosis("E1", proposed_fix=selector_fix())),
+    [EvidenceStep(ref="E1", tool="resources_get", args=SERVICE_ARGS, error=False,
+                  output_excerpt="kind: Service")],
+)  # fmt: skip
+
+
 class Spinner:
     """Records when the progress display is paused, and what happened meanwhile."""
 
@@ -335,12 +346,25 @@ def test_in_a_terminal_the_change_is_shown_and_only_an_answer_typed_after_it_cou
             os.write(terminal, typed)
 
         asyncio.get_running_loop().call_later(0.2, answer)
-        return await cli._approver(err, spinner)(request(explanation="[/] Selects [app=x]."))
+        explained = request(explanation="[/] Selects [app=x].")
+        return await cli._approver(err, spinner)(explained, *VERIFIED)
 
     how = f"answered {'yes' if approved else 'no'} in the terminal"
     assert asyncio.run(ask()) == Answer(approved, how)
     assert spinner.events == ["paused", "answered", "resumed"]  # no spinner over the prompt
     shown = err.export_text()
+    # first the diagnosis the fix comes from, as the summary shows it; then the change; then y/N
+    order = [
+        "Fault found · selector_mismatch · Service/checkout in shop-checkout",
+        "The Service selects app=check-out; the pods are labelled app=checkout.",
+        "E1   finding E1",
+        "resources_get Service/checkout -n shop-checkout",
+        "Next step: Set the Service selector to app=checkout.",
+        "Approve this fix?",
+        "Apply this change? [y/N]",
+    ]
+    at = [shown.index(text) for text in order]
+    assert at == sorted(at)
     assert "Service          shop-checkout/checkout" in shown
     assert "app=check-out  →  app=checkout  (replaces the whole selector)" in shown
     assert "[/] Selects [app=x]." in shown  # the remediator's words, as written: not markup
@@ -351,7 +375,7 @@ def test_in_a_terminal_the_change_is_shown_and_only_an_answer_typed_after_it_cou
 def test_a_prompt_nobody_answers_is_given_up_cleanly(terminal):
     async def unanswered():
         with pytest.raises(TimeoutError):  # the approval's own time limit (approval.py)
-            await asyncio.wait_for(cli._approver(Console(), None)(request()), 0.2)
+            await asyncio.wait_for(cli._approver(Console(), None)(request(), *VERIFIED), 0.2)
         return asyncio.get_running_loop().remove_reader(sys.stdin.fileno())
 
     assert asyncio.run(unanswered()) is False  # it stopped watching the terminal
@@ -362,3 +386,138 @@ def test_the_prompt_warns_when_approving_would_be_refused():
     console = Console(record=True, width=200)
     console.print(ui.approval(request().model_copy(update={"facts": changed})))
     assert "changed since the remediator read it (version 101)" in console.export_text()
+
+
+class Terminal:
+    """A pseudo-terminal, as a person sees it: everything shown on it, and (when it is stdin)
+    `answer` typed once the y/N prompt is up."""
+
+    def __init__(self, answer: bytes | None = b"n\n") -> None:
+        self.person, self.tty = os.openpty()
+        self.answer, self.seen, self.done = answer, b"", threading.Event()
+        self.watcher = threading.Thread(target=self.watch)
+        self.watcher.start()
+
+    def watch(self) -> None:
+        while (ready := select.select([self.person], [], [], 0.05)[0]) or not self.done.is_set():
+            if ready:
+                self.seen += os.read(self.person, 65536)
+            if self.answer and b"Apply this change? [y/N]" in self.seen:
+                os.write(self.person, self.answer)
+                self.answer = None
+
+    def file(self, mode: str):
+        if "b" in mode:
+            return open(self.tty, mode, buffering=0, closefd=False)
+        return open(self.tty, mode, encoding="utf-8", closefd=False)
+
+    def shown(self) -> str:
+        """What it showed, without colours or carriage returns."""
+        self.done.set()
+        self.watcher.join()
+        os.close(self.person)
+        os.close(self.tty)
+        return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", self.seen.decode()).replace("\r", "")
+
+
+@pytest.fixture
+def investigate_in(monkeypatch, env):
+    """`agent investigate` in-process (so with the fakes), with stdin and stderr on `terminal`
+    and stdout too unless given, as a person runs it."""
+    env(approval_timeout_seconds="10")  # a prompt that never shows fails the test, soon
+    monkeypatch.setenv("COLUMNS", "120")
+
+    def run(terminal: Terminal, *, stdout=None, as_json: bool = False) -> None:
+        out, err = stdout or terminal.file("w"), terminal.file("w")
+        with monkeypatch.context() as m:
+            m.setattr(sys, "stdin", terminal.file("rb"))
+            m.setattr(sys, "stdout", out)
+            m.setattr(sys, "stderr", err)
+            try:
+                cli.investigate("q", user="alice", as_json=as_json, quiet=True)
+            finally:
+                out.flush()
+                err.flush()
+
+    return run
+
+
+def proposing(fake, fixer=None) -> None:
+    proposed = diagnosis("E1", proposed_fix=selector_fix())
+    fake(ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(proposed)]),
+         fixer=fixer)  # fmt: skip
+
+
+ROOT_CAUSE = "The Service selects app=check-out; the pods are labelled app=checkout."
+
+
+def test_with_quiet_the_prompt_shows_the_diagnosis_first_and_the_end_does_not_repeat_it(
+    fake, investigate_in
+):
+    proposing(fake)
+    terminal = Terminal()
+    investigate_in(terminal)
+    shown = terminal.shown()
+    prompt = shown.index("Apply this change? [y/N] n")
+    before, after = shown[:prompt], shown[prompt:]
+    # nothing before the diagnosis (--quiet), and the diagnosis before the change
+    assert before.startswith("╭─ Fault found · selector_mismatch · Service/checkout in shop-")
+    assert before.index(ROOT_CAUSE) < before.index("Next step:") < before.index("Approve this fix?")
+    assert "resources_get Service/checkout -n shop-checkout" in before  # where E1 came from
+    assert "Proposed fix:" not in shown  # the change panel says it, once
+    # the end: the fix's outcome only, in a panel with the same title
+    assert "Fault found · selector_mismatch" in after and ROOT_CAUSE not in after
+    assert "Fix: rejected: answered no in the terminal (by alice," in after
+    assert "Next step:" not in after and "E1 " not in after
+
+
+def test_with_json_the_prompt_shows_the_diagnosis_and_stdout_is_the_result_json_alone(
+    fake, investigate_in, tmp_path
+):
+    proposing(fake)
+    terminal = Terminal()
+    with open(tmp_path / "out.json", "w") as stdout:
+        investigate_in(terminal, stdout=stdout, as_json=True)
+    shown, out = terminal.shown(), (tmp_path / "out.json").read_text()
+    assert shown.index(ROOT_CAUSE) < shown.index("Approve this fix?") < shown.index("[y/N] n")
+    assert "Fix:" not in shown  # the result went to stdout
+    result = RunResult.model_validate_json(out)
+    assert out == result.model_dump_json() + "\n"  # exactly the result: nothing added
+    assert set(json.loads(out)["remediation"]["request"]) == {"tool", "args", "facts"}
+    assert result.remediation.decision.reason == "answered no in the terminal"
+
+
+def test_the_full_summary_prints_when_stdout_is_not_the_terminal_the_prompt_used(
+    fake, investigate_in
+):
+    proposing(fake)
+    terminal, other = Terminal(), Terminal(answer=None)
+    stdout = other.file("w")
+    investigate_in(terminal, stdout=stdout)
+    shown, printed = terminal.shown(), other.shown()
+    assert ROOT_CAUSE in shown and "Fix:" not in shown
+    flat = " ".join(printed.replace("│", " ").split())  # the panel wraps lines
+    assert ROOT_CAUSE in flat and "resources_get Service/checkout -n shop-checkout" in flat
+    assert "Next step: Set the Service selector to app=checkout." in flat
+    assert "Proposed fix: set the selector of Service shop-checkout/checkout" in flat
+    assert "Fix: rejected: answered no in the terminal (by alice," in flat
+
+
+@pytest.mark.parametrize(
+    "fixer",
+    [
+        None,  # no fix proposed
+        remediator(fix_call(selector={"app": "other"})),  # code rejects it without asking
+    ],
+)
+def test_a_run_whose_fix_nobody_is_asked_about_shows_only_the_summary(fixer, fake, investigate_in):
+    if fixer is None:
+        fake(ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(diagnosis("E1"))]))
+    else:
+        proposing(fake, fixer)
+    terminal = Terminal()
+    investigate_in(terminal)
+    shown = terminal.shown()
+    assert shown.startswith("╭─ Fault found · selector_mismatch")  # the summary, and only it
+    assert shown.count(ROOT_CAUSE) == 1 and "Next step:" in shown
+    assert "Approve this fix?" not in shown and "[y/N]" not in shown

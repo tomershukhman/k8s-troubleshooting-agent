@@ -248,7 +248,7 @@ def test_only_the_fix_run_approves_a_fix(monkeypatch):
     answers = []
 
     async def investigate(question, *, approve, **_kwargs):
-        answers.append(await approve(None))
+        answers.append(await approve(None, None, []))
         raise NotStarted("stop here")
 
     monkeypatch.setattr(evals, "investigate", investigate)
