@@ -2,8 +2,11 @@
 judges and `mlflow.genai.evaluate` itself run in tests/acceptance/test_m5_evals.py."""
 
 import importlib.abc
+import json
 import os
 import sys
+from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -13,12 +16,12 @@ from mlflow.genai.evaluation.quality_criteria import parse_quality_criteria
 from typer.testing import CliRunner
 
 import k8s_agent
-from k8s_agent import evals
-from k8s_agent.agent import NotStarted
+from k8s_agent import cli, evals, scenarios, tracing
+from k8s_agent.agent import McpUnavailable, NotStarted
 from k8s_agent.agent.records import RunRecord, RunResult, Step
 from k8s_agent.cli import app
 from k8s_agent.config import get_settings
-from k8s_agent.scenarios import get_scenario
+from k8s_agent.scenarios import ScenarioError, get_scenario
 from tests.fakes import SERVICE_ARGS, diagnosis, healthy, selector_fix
 
 CHECKOUT = {"namespace": "shop-checkout"}
@@ -425,3 +428,58 @@ def test_eval_sets_mlflows_environment_before_mlflow_is_imported(monkeypatch):
     result = CliRunner().invoke(app, ["eval"])
     assert result.exit_code == 2 and "needs the eval extra" in result.stderr
     assert (seen["MLFLOW_DISABLE_TELEMETRY"], seen["MLFLOW_DISABLE_AGENT_HINT"]) == ("true", "true")
+
+
+def eval_run(monkeypatch, fail: str):
+    """`agent eval` with the tracking server, the cluster and the agent faked. `fail`: what goes
+    wrong: "scenario" (an unknown --scenario), "cluster" (no kubeconfig), "up 2" (the second
+    scenario's rebuild), "evaluate 1" (the MCP server, at the first scenario's runs), or "none"."""
+    steps = Counter()
+
+    def step(name: str, error: Exception) -> None:
+        steps[name] += 1
+        if fail == f"{name} {steps[name]}":
+            raise error
+
+    def evaluate(scn, _settings, _agent):  # noqa: ANN001
+        step("evaluate", McpUnavailable("cannot use the MCP server"))
+        return evals.ScenarioResult(scn.name, "run", {}, [], 1, [])
+
+    def up(scn, *_args, **_kwargs):  # noqa: ANN001
+        step("up", ScenarioError(f"{scn.name} didn't come up"))
+
+    monkeypatch.setattr(tracing, "enable", lambda _s: tracing.Tracing("http://mlflow", "1"))
+    monkeypatch.setattr(evals, "configure", lambda _s: None)
+    monkeypatch.setattr(evals, "Agent", lambda _s: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(evals, "evaluate", evaluate)
+    monkeypatch.setattr(evals, "evaluate_fix", evaluate)
+    monkeypatch.setattr(scenarios, "up", up)
+    if fail != "cluster":
+        monkeypatch.setattr(cli, "admin_clients", lambda _s: None)
+    get_settings.cache_clear()
+    only = ["--scenario", "nope"] if fail == "scenario" else []
+    return CliRunner().invoke(app, ["eval", *only])
+
+
+@pytest.mark.parametrize(
+    ("fail", "code", "error"),
+    [
+        ("none", 0, None),
+        ("scenario", 2, "error: unknown scenario 'nope'"),
+        ("cluster", 2, "error: cannot load kubeconfig"),
+        ("up 1", 2, "error: crashloop didn't come up"),
+        ("evaluate 1", 2, "error: cannot use the MCP server"),
+        ("up 2", 1, "error: healthy didn't come up"),
+        ("evaluate 2", 1, "error: cannot use the MCP server"),
+    ],
+)
+def test_eval_exits_2_when_nothing_ran_and_1_once_a_scenario_was_scored(
+    monkeypatch, fail, code, error
+):
+    result = eval_run(monkeypatch, fail)
+    assert result.exit_code == code, result.stderr
+    errors = [line for line in result.stderr.splitlines() if line.startswith("error:")]
+    assert [e.startswith(error) for e in errors] == ([True] if error else [])
+    if code == 1:  # what was scored before it stopped is kept
+        [saved] = Path("eval-results").glob("*.json")
+        assert [s["name"] for s in json.loads(saved.read_text())["scenarios"]] == ["crashloop"]

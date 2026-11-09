@@ -119,12 +119,12 @@ def _approver(err: Console, progress: ui.Progress | None) -> Approver | None:
 
 
 @contextmanager
-def _clean_errors() -> Iterator[None]:
-    """A cluster or scenario problem is one error line and exit 1, not a traceback."""
+def _clean_errors(code: int = EXIT_FAILED) -> Iterator[None]:
+    """A cluster or scenario problem is one error line and exit `code`, not a traceback."""
     try:
         yield
     except CLUSTER_ERRORS as e:
-        _fail(str(e))
+        _fail(str(e), code)
 
 
 @app.command()
@@ -218,8 +218,9 @@ def eval_(
     Exit codes:
 
     0: every scenario passed.
-    1: a scenario missed its pass marks.
-    2: nothing ran (settings, tracking server, MCP server, or the eval extra missing)."""
+    1: a scenario missed its pass marks, or the evals stopped after one was scored.
+    2: nothing ran (settings, tracking server, cluster, scenarios, MCP server, or the eval
+    extra missing)."""
     s = _settings(EXIT_NOT_STARTED)
     if runs:  # the same share of runs must pass: 2 of 3 is 7 of 10, and 1 of 1
         least = math.ceil(runs * s.eval_pass_min_runs / s.eval_runs_per_scenario)
@@ -239,7 +240,7 @@ def eval_(
     if trace is None:
         _fail("the evals store their results in MLflow: set MLFLOW_TRACKING_URI", EXIT_NOT_STARTED)
     evals.configure(s)
-    with _clean_errors():
+    with _clean_errors(EXIT_NOT_STARTED):
         found = scenarios.load_all(s.scenarios_dir)
         if scenario:
             found = {scenario: scenarios.get_scenario(s.scenarios_dir, scenario)}
@@ -247,6 +248,10 @@ def eval_(
     started = datetime.now(UTC)
     path = s.eval_results_dir / f"{started:%Y%m%dT%H%M%SZ}.json"
     agent, results = evals.Agent(s), []
+    evaluated = False  # until a scenario is scored, a failure means nothing ran
+
+    def failed() -> int:
+        return EXIT_FAILED if evaluated else EXIT_NOT_STARTED
 
     def scored(r: evals.ScenarioResult) -> dict[str, Any]:
         return {"name": r.name, "passed": r.passed, "failures": r.failures, "metrics": r.metrics,
@@ -264,7 +269,7 @@ def eval_(
         path.write_text(json.dumps(report, indent=2, default=str))
 
     def up(scn: scenarios.Scenario) -> None:
-        with _clean_errors():
+        with _clean_errors(failed()):
             scenarios.up(
                 scn,
                 c,
@@ -284,6 +289,7 @@ def eval_(
             _say(f"{scn.name}: {s.eval_runs_per_scenario} runs, then scoring")
             with redirect_stdout(sys.stderr):  # MLflow prints its own summary; stdout: the table
                 result = evals.evaluate(scn, s, agent)
+            evaluated = True
             say_verdict(result)
             if scn.spec.expected_fix is not None:
                 _say(f"{scn.name}: the fix run (it approves the fix), then a rebuild")
@@ -296,9 +302,9 @@ def eval_(
             results.append(result)
             save()
     except McpUnavailable as e:
-        _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", EXIT_NOT_STARTED)
+        _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", failed())
     except NotStarted as e:
-        _fail(str(e), EXIT_NOT_STARTED)
+        _fail(str(e), failed())
     finally:
         agent.close()
         tracing.flush()
