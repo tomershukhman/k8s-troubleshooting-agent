@@ -323,10 +323,10 @@ def _evidence_steps(d: Diagnosis | None, steps: list[Step], s: Settings) -> list
     ]
 
 
-def _close_if_loaded(kube: Any) -> None:
-    """At the end of a run, the remediator's client, if the run loaded it (`kube`: cached)."""
-    if kube.cache_info().currsize:
-        kube().close()
+def _close_if_loaded(load_kube: Any) -> None:
+    """At the end of a run, the remediator's client, if the run loaded it (`load_kube`: cached)."""
+    if load_kube.cache_info().currsize:
+        load_kube().close()
 
 
 async def investigate(
@@ -375,12 +375,12 @@ async def investigate(
             log.error("model_unavailable", extra={"error": f"{type(e).__name__}: {e}"})
             raise NotStarted(f"cannot create the models: {type(e).__name__}: {e}") from e
         # Loaded on first use: a run that proposes no fix never needs it.
-        own_kube = cache(
+        load_own_kube = cache(
             lambda: Kube.load(settings.remediator_kubeconfig, settings.remediator_timeout_seconds)
         )
-        kube = remediator_kube or own_kube
+        load_kube = remediator_kube or load_own_kube
         context = RunContext(settings=settings, log=log, critic=critic)
-        gate = Gate(settings, kube, approve, user_id, log)
+        gate = Gate(settings, load_kube, approve, user_id, log)
         config = {
             "configurable": {"thread_id": thread_id},
             "metadata": {"run_id": run_id, "user_id": user_id},
@@ -388,9 +388,9 @@ async def investigate(
             "run_name": "graph",  # its trace span (default: "LangGraph")
         }
         async with AsyncExitStack() as stack:
-            stack.callback(_close_if_loaded, own_kube)
+            stack.callback(_close_if_loaded, load_own_kube)
             tools = await _load_tools(stack, mcp_target or mcp_client(settings), settings, log)
-            build = lambda: build_graph(model, tools, settings, remediator_llm, kube)  # noqa: E731
+            build = lambda: build_graph(model, tools, settings, remediator_llm, load_kube)  # noqa: E731
             outcome, values, asked = await _run(build, inputs, config, context, on_event, gate)
 
         remediation = _complete_remediation(values, asked, outcome.fix_stopped)

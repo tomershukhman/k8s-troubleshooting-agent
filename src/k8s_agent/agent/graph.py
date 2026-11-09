@@ -383,14 +383,14 @@ def build_graph(
     tools: list[BaseTool],
     settings: Settings,
     remediator_model: BaseChatModel,
-    kube: Callable[[], Kube],
+    load_kube: Callable[[], Kube],
 ):
     builder = StateGraph(InvestigationState, context_schema=RunContext)
     builder.add_node("intake", intake)
     builder.add_node("investigate", build_investigator(model, tools, settings))
     builder.add_node("verify_evidence", verify_evidence, destinations=("investigate", "result"))
     builder.add_node("result", result, destinations=("remediate", END))
-    remediator = build_remediator(remediator_model, kube, settings)
+    remediator = build_remediator(remediator_model, load_kube, settings)
     builder.add_node("remediate", remediate_node(remediator), destinations=("investigate", END))
     builder.add_node("recheck", recheck)
     builder.add_edge(START, "intake")

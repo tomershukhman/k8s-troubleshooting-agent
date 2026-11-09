@@ -207,8 +207,8 @@ def wait_for_endpoints(kube: Kube, namespace: str, service: str, settings: Setti
 # --- the agent -------------------------------------------------------------------------------
 
 
-def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
-    """The remediator's tools, all through `kube()` (the remediator identity). A read that
+def tools(load_kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
+    """The remediator's tools, all through `load_kube()` (the remediator identity). A read that
     fails raises, so its trace span is an error; ToolErrorMiddleware gives the model the text.
     A read's result has the investigator's safety cap (AGENT_TOOL_OUTPUT_MAX_CHARS)."""
 
@@ -217,7 +217,7 @@ def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
 
     def read[T](do: Callable[[Kube], T]) -> T:
         try:
-            return do(kube())
+            return do(load_kube())
         except KubeError as e:
             raise ToolException(str(e)) from e
         except ApiException as e:
@@ -253,7 +253,7 @@ def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
         change, and waits for the Service's ready endpoints."""
         args = FixArgs(**fields)
         try:
-            result = apply_fix(kube(), args, settings)
+            result = apply_fix(load_kube(), args, settings)
         except KubeError as e:
             result = FixResult(FixOutcome.failed, str(e))
         return f"{result.outcome}: {result.detail}", asdict(result)
@@ -267,12 +267,12 @@ def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
     return [*reads, fix]
 
 
-def build_remediator(model: BaseChatModel, kube: Callable[[], Kube], settings: Settings):
+def build_remediator(model: BaseChatModel, load_kube: Callable[[], Kube], settings: Settings):
     """The limits count per remediation (`thread_limit`: kept across the approval pause, which
     resets run counts): the per-round limits, and one fix request."""
     return create_agent(
         model,
-        tools(kube, settings),
+        tools(load_kube, settings),
         system_prompt=PROMPT,
         response_format=ProviderStrategy(RemediatorAnswer),  # native structured output (SPEC 3.2)
         middleware=[

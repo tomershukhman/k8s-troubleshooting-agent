@@ -44,9 +44,9 @@ AGENT = "k8s-agent"  # who decided, when it was code and not a person
 Approver = Callable[[ApprovalRequest, Diagnosis, list[EvidenceStep]], Awaitable[Answer]]
 
 
-def read_facts(kube: Callable[[], Kube], args: FixArgs) -> Facts:
+def read_facts(load_kube: Callable[[], Kube], args: FixArgs) -> Facts:
     try:
-        k = kube()
+        k = load_kube()
         svc = k.service(args.namespace, args.service)
         pods = k.ready_pods(args.namespace, args.selector)
     except (KubeError, *KUBE_ERRORS) as e:
@@ -82,7 +82,7 @@ def resume(decision: Decision) -> dict[str, str]:
 @dataclass(frozen=True)
 class Gate:
     settings: Settings
-    kube: Callable[[], Kube]
+    load_kube: Callable[[], Kube]
     approve: Approver | None
     user_id: str
     log: logging.LoggerAdapter
@@ -101,7 +101,7 @@ class Gate:
                 f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()
             )
         else:
-            facts = await asyncio.to_thread(read_facts, self.kube, args)
+            facts = await asyncio.to_thread(read_facts, self.load_kube, args)
             request = request.model_copy(update={"facts": facts})
             problem = differs(args, final.proposed_fix)
         with tracing.span("approval", request.model_dump(mode="json"), "GUARDRAIL") as span:
