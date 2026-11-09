@@ -18,6 +18,17 @@ from k8s_agent.agent.remediator import Kube, apply_fix
 from k8s_agent.config import get_settings
 from k8s_agent.policy import FIX_TOOL
 from k8s_agent.scenarios import get_scenario
+from tests.fakes import (
+    SERVICE_ARGS,
+    ScriptedModel,
+    answer,
+    call,
+    critic,
+    diagnosis,
+    fix_call,
+    remediator,
+    selector_fix,
+)
 
 from .conftest import agent, run_selector, stored
 
@@ -113,12 +124,29 @@ def test_the_right_fix_is_proposed_and_requested_and_without_a_terminal_rejected
 
 
 def test_editing_the_service_during_the_pause_makes_the_fix_refuse(kube, want, rebuilt):
+    # Scripted models, so no cost and no retry: they only get the run to the pause. The MCP
+    # server, the pause, the remediator's identity and its fix tool are the real ones.
     async def edit_then_approve(*_):
         edit = {"metadata": {"annotations": {"k8s-agent.test/edited": "during-the-pause"}}}
         kube.core.patch_namespaced_service(NAME, NS, edit)
         return Answer(True, "approved after an edit, by the M6 acceptance test")
 
-    r = until_requested(want.spec.question, edit_then_approve).result.remediation
+    investigator = ScriptedModel(script=[
+        call(("resources_get", SERVICE_ARGS), ("pods_list_in_namespace", {"namespace": NS})),
+        answer(diagnosis("E1", "E2", proposed_fix=selector_fix())),  # app=checkout
+    ])  # fmt: skip
+    selector = want.spec.expected_fix.selector
+    reads = call(("get_service", {"namespace": NS, "name": NAME}),
+                 ("list_pods", {"namespace": NS, "selector": selector}))  # fmt: skip
+    version = service(kube).metadata.resource_version  # as the remediator reads it
+    get_settings.cache_clear()
+    record = LOOP.run(
+        investigate(want.spec.question, settings=get_settings(), user_id="bob",
+                    approve=edit_then_approve, model=investigator, critic_model=critic(),
+                    remediator_model=remediator(reads, fix_call(resource_version=version)))
+    )  # fmt: skip
+    r = record.result.remediation
+    assert r.request.facts.resource_version == version  # unchanged until the edit in the pause
     assert r.decision.approved and r.outcome == "stale" and "nothing was applied" in r.detail
     assert service(kube).spec.selector == BROKEN
 
