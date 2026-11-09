@@ -3,7 +3,10 @@
 Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
 
 ## Checks
-- `make check`: ruff lint + format check + unit tests (no cluster, no LLM). Keep green.
+- `make check`: ruff lint + format check + pyright (standard mode, `src` only) + unit tests (no
+  cluster, no LLM). Keep green. Narrow a Kubernetes field the API server always sets with
+  `kube.present()`; a `# pyright: ignore[rule]` only where a library's annotation is wrong, with
+  the reason beside it.
 - `make accept M=<n>`: milestone n's acceptance tests only, against the real cluster; `make accept`
   runs every milestone's.
 - **Run only the relevant tests.** While building a milestone, and before committing it: `make check`

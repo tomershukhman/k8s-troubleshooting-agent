@@ -1,9 +1,10 @@
 .PHONY: check accept
 
-# Lint + unit tests. No cluster, no model, no network.
+# Lint, type check (src) + unit tests. No cluster, no model, no network.
 check:
 	uv run ruff check .
 	uv run ruff format --check .
+	uv run pyright
 	uv run pytest tests/unit -q
 
 # Acceptance tests against the real cluster. `make accept M=3` runs milestone 3's tests only;

@@ -374,7 +374,7 @@ uv run agent scenario down selector      # delete the namespace (and the RoleBin
 ## Development
 
 ```bash
-make check         # lint + unit tests (no cluster, Docker or network; never reads your .env)
+make check         # lint, type check + unit tests (no cluster, Docker or network; never reads your .env)
 make accept M=6    # milestone 6's acceptance tests, against your cluster, the real model and MLflow
 make accept        # every milestone's acceptance tests (before committing a milestone)
 ```
