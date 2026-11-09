@@ -18,8 +18,9 @@ NameList = Annotated[list[Annotated[str, Field(min_length=1)]], NoDecode]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AGENT_", env_file=".env", extra="ignore")
 
-    # Admin access, used only by `agent scenario` and `agent setup`. Unset = the standard
-    # kubeconfig lookup ($KUBECONFIG, then ~/.kube/config) and its current context.
+    # Admin access, used only by `agent scenario`, `agent setup` and `agent eval` (it rebuilds
+    # the scenarios). Unset = the standard kubeconfig lookup ($KUBECONFIG, then ~/.kube/config)
+    # and its current context.
     kubeconfig: Path | None = None
     kube_context: str | None = None
 
@@ -64,7 +65,9 @@ class Settings(BaseSettings):
     max_model_calls: PositiveInt = 20
     max_tool_calls: PositiveInt = 15
     # Per run, across verify rounds (the investigator's calls; the critic adds one model call
-    # per verify round). Exhausted = inconclusive, keeping what was gathered.
+    # per verify round). As per round, tool calls beyond the budget are refused and the model
+    # concludes; a spent model-call or time budget ends the run inconclusive, keeping what was
+    # gathered.
     run_max_model_calls: PositiveInt = 40
     run_max_tool_calls: PositiveInt = 30
     run_max_seconds: PositiveFloat = 300
@@ -129,7 +132,8 @@ class Settings(BaseSettings):
     # polls (e.g. CrashLoopBackOff).
     accept_assert_timeout_seconds: PositiveFloat = 30
     # M2+ acceptance setup keeps scenarios already up (ours, manifests re-applied cleanly, fault
-    # live) and leaves them up afterwards: no tests change them. False = fresh, removed after.
+    # live) and leaves them up afterwards; a test that changes one (M6's, on the selector
+    # Service) rebuilds it. False = fresh, removed after.
     accept_reuse_scenarios: bool = True
     # Test runs trace here, so the experiment users open (MLFLOW_EXPERIMENT_NAME) shows real runs.
     accept_mlflow_experiment_name: str = "k8s-agent-tests"
