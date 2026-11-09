@@ -9,7 +9,7 @@ import pytest
 from fastmcp import Client as FastMCPClient
 from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
-from langchain_core.exceptions import ModelRateLimitError
+from langchain_core.exceptions import ModelRateLimitError, OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.serde import jsonplus
 
@@ -459,6 +459,27 @@ def test_the_critic_must_judge_every_finding(env):
     model = ScriptedModel(script=[call(LIST, LIST), answer(diagnosis("E1", "E2"))])
     env(max_verify_rounds="1")
     assert "Not every finding held up" in forced_reason(run(model, judge=judge))
+
+
+def test_a_verdict_founded_with_a_finding_not_supported_is_not_founded(env):
+    # The verdict contradicts itself: the stricter reading wins.
+    unsupported = [{"ref": "E1", "supported": False, "reason": "r"}]
+    judge = critic(verdict("E1", founded=True) | {"findings": unsupported})
+    record, _ = one_round(diagnosis("E1"), judge, rounds=1, env=env)
+    assert record.result.verification[0].founded is False
+    assert "Not every finding held up" in forced_reason(record)
+
+
+def test_a_critic_verdict_that_cannot_be_parsed_fails_the_run():
+    # Today's behaviour, pinned: a garbled verdict fails the run, as a bug would. Whether it
+    # should end inconclusive instead, as a garbled investigator answer does, is an open
+    # decision for the project owner; change this test with it.
+    judge = critic(OutputParserException('Invalid json output: {"findings": ['))
+    record, _ = one_round(diagnosis("E1"), judge)
+    result = record.result
+    assert (result.status, result.diagnosis) == (RunStatus.failed, None)
+    assert result.error.startswith("unexpected error: OutputParserException: Invalid json output")
+    assert [s.ref for s in record.steps] == ["E1"]  # what was gathered is kept
 
 
 def test_a_backed_fix_comes_through_in_the_result():
