@@ -50,6 +50,6 @@ def critic_input(question: str, draft: Diagnosis, steps: list[Step]) -> str:
     return "\n".join(lines)
 
 
-async def judge(critic: Any, question: str, draft: Diagnosis, steps: list[Step]) -> CriticVerdict:
+async def review(critic: Any, question: str, draft: Diagnosis, steps: list[Step]) -> CriticVerdict:
     messages = [SystemMessage(PROMPT), HumanMessage(critic_input(question, draft, steps))]
     return await critic.ainvoke(messages, config={"run_name": "critic"})  # the trace span's name

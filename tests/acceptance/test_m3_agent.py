@@ -8,7 +8,7 @@ import pytest
 
 from k8s_agent.agent import RunRecord, RunStatus, investigate, tool_output
 from k8s_agent.agent.core import make_model
-from k8s_agent.agent.critic import judge, with_verdict
+from k8s_agent.agent.critic import review, with_verdict
 from k8s_agent.agent.records import Step
 from k8s_agent.config import get_settings
 from k8s_agent.policy import READ_ONLY_TOOLS
@@ -153,7 +153,7 @@ def step(ref: str, tool: str, args: dict) -> Step:
 def verdict_on(draft: dict, steps: list[Step], question: str):
     s = get_settings()
     real = with_verdict(make_model(s, s.effective_critic_model))
-    verdict = LOOP.run(judge(real, question, Diagnosis.model_validate(draft), steps))
+    verdict = LOOP.run(review(real, question, Diagnosis.model_validate(draft), steps))
     print(f"\n  verdict: {verdict.model_dump_json()}")
     return verdict
 

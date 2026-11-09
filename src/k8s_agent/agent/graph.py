@@ -48,7 +48,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from k8s_agent.agent import tool_output
-from k8s_agent.agent.critic import judge
+from k8s_agent.agent.critic import review
 from k8s_agent.agent.middleware import (
     EvidenceMiddleware,
     RunContext,
@@ -222,7 +222,7 @@ async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext
     elif not draft.evidence:  # an inconclusive that cites nothing: nothing to check
         founded, feedback = True, None
     else:
-        verdict = await judge(ctx.critic, state["question"], draft, steps)
+        verdict = await review(ctx.critic, state["question"], draft, steps)
         findings = verdict.findings
         if draft.proposed_fix is not None:  # a fix verdict on a draft without a fix is noise
             fix_backed = verdict.proposed_fix is not None and verdict.proposed_fix.backed
