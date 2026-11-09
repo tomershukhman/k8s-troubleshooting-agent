@@ -75,8 +75,8 @@ Design: `DESIGN.md`.
   image itself. Settings reach containers only through `.env` (or `docker compose run -e`), not your
   shell. Pipe `--json` with `docker compose run -T`: a TTY merges stderr into stdout.
 - The image has no `.git`: CI stamps the commit (`GIT_COMMIT` build arg → `AGENT_GIT_COMMIT`); a
-  local `docker compose build` records none. MLflow logs a harmless "Failed to import Git" warning in
-  `agent eval` there (no git binary); `GIT_PYTHON_REFRESH=quiet` doesn't silence it.
+  local `docker compose build` records none. MLflow's "Failed to import Git" warnings (no git binary)
+  are silenced in `evals.configure` via its logger; `GIT_PYTHON_REFRESH=quiet` doesn't reach them.
 - CI (`.github/workflows/ci.yml`): lint → unit-tests → build-image → publish-image → mlflow-evals; the
   evals (PRs to main + the manual button) pull the image just published, by commit SHA. Don't run
   the evals locally to check CI changes: dispatch the workflow (`gh workflow run ci.yml --ref <branch>`).

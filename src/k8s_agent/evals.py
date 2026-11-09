@@ -22,6 +22,7 @@ Needs the full `mlflow` package (the `eval` extra); the agent itself uses only m
 import asyncio
 import contextvars
 import json
+import logging
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -435,6 +436,9 @@ def configure(settings: Settings) -> None:
     # evaluate turns on tracing for every installed library; the LangChain autolog already
     # traces each model call, and the Anthropic SDK's would add a second span to each.
     mlflow.anthropic.autolog(disable=True)
+    # The image has no git: each eval run's start would log three long "Failed to import Git"
+    # warnings (GIT_PYTHON_REFRESH doesn't reach them). The commit comes from AGENT_GIT_COMMIT.
+    logging.getLogger("mlflow.utils.git_utils").setLevel(logging.ERROR)
 
 
 def evaluate(scn: Scenario, settings: Settings, predict: PredictFn) -> ScenarioResult:

@@ -69,6 +69,9 @@ class ReadyWhen(Strict):
     pods_not_ready: int = 0
     restarts: int = 0
 
+    def __str__(self) -> str:  # only the conditions set, e.g. "restarts >= 2"
+        return ", ".join(f"{k} >= {v}" for k, v in self.model_dump(exclude_defaults=True).items())
+
 
 class ScenarioSpec(Strict):
     question: str
@@ -200,4 +203,4 @@ def up(scn: Scenario, c: AdminClients, s: Settings, progress: Progress) -> None:
     want = scn.spec.ready_when
     live = lambda: fault_live(scn, c)  # noqa: E731
     wait(f"{scn.name}: fault not live ({want})", live, timeout=ready_timeout, poll=poll)
-    progress(f"ready: {want}")
+    progress(f"condition met: {want}")
