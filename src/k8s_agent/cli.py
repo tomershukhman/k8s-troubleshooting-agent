@@ -225,6 +225,7 @@ def eval_(
         least = math.ceil(runs * s.eval_pass_min_runs / s.eval_runs_per_scenario)
         s = s.model_copy(update={"eval_runs_per_scenario": runs, "eval_pass_min_runs": least})
     setup_logging(s.log_level, s.log_file, enabled=bool(s.log_file) or not sys.stderr.isatty())
+    tracing.mlflow_env(s)  # before evals imports mlflow, which reads some of it on import
     try:
         from k8s_agent import evals  # the full mlflow package: the `eval` extra
     except ImportError as e:

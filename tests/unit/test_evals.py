@@ -1,6 +1,9 @@
 """The evals' exact checks and pass marks (SPEC 2.3), with hand-made answers and traces. The
 judges and `mlflow.genai.evaluate` itself run in tests/acceptance/test_m5_evals.py."""
 
+import importlib.abc
+import os
+import sys
 from types import SimpleNamespace
 
 import pandas as pd
@@ -9,6 +12,7 @@ from mlflow.entities import Feedback, SpanType
 from mlflow.genai.evaluation.quality_criteria import parse_quality_criteria
 from typer.testing import CliRunner
 
+import k8s_agent
 from k8s_agent import evals
 from k8s_agent.agent import NotStarted
 from k8s_agent.agent.records import RunRecord, RunResult, Step
@@ -404,3 +408,20 @@ def test_eval_with_the_tracking_server_unreachable_fails_at_once(monkeypatch):
     result = CliRunner().invoke(app, ["eval"])
     assert result.exit_code == 2
     assert result.stderr.startswith("error: cannot use the MLflow tracking server at http://127")
+
+
+def test_eval_sets_mlflows_environment_before_mlflow_is_imported(monkeypatch):
+    seen = {}
+
+    class Watch(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path, target=None):  # noqa: ANN001
+            if name == "k8s_agent.evals":  # what imports mlflow on this path, first
+                seen.update(os.environ)
+                raise ImportError("stopped by the test")
+
+    monkeypatch.delitem(sys.modules, "k8s_agent.evals")
+    monkeypatch.delattr(k8s_agent, "evals")
+    monkeypatch.setattr(sys, "meta_path", [Watch(), *sys.meta_path])
+    result = CliRunner().invoke(app, ["eval"])
+    assert result.exit_code == 2 and "needs the eval extra" in result.stderr
+    assert (seen["MLFLOW_DISABLE_TELEMETRY"], seen["MLFLOW_DISABLE_AGENT_HINT"]) == ("true", "true")

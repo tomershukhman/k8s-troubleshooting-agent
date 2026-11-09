@@ -42,6 +42,16 @@ class Tracing:
 _on: Tracing | None = None  # mirrors MLflow's own process-wide state (autolog, tracking URI)
 
 
+def mlflow_env(settings: Settings) -> None:
+    """MLflow's own settings, which it reads from the environment, some (telemetry, the agent
+    hint) on import: call before anything imports mlflow. Set here so `.env` works too."""
+    os.environ["MLFLOW_HTTP_REQUEST_TIMEOUT"] = str(settings.mlflow_http_request_timeout)
+    os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] = str(settings.mlflow_http_request_max_retries)
+    os.environ["MLFLOW_DISABLE_TELEMETRY"] = str(settings.mlflow_disable_telemetry).lower()
+    # The full mlflow package (installed for the evals) logs a hint for coding agents on import.
+    os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "true")
+
+
 def enable(settings: Settings) -> Tracing | None:
     """Turn tracing on if MLFLOW_TRACKING_URI is set; None if it isn't. Raises
     TracingUnavailable if the tracking server doesn't answer."""
@@ -50,12 +60,7 @@ def enable(settings: Settings) -> Tracing | None:
     uri = settings.mlflow_tracking_uri
     if not uri:
         return None
-    # MLflow reads these from the environment; set before the import so `.env` works too.
-    os.environ["MLFLOW_HTTP_REQUEST_TIMEOUT"] = str(settings.mlflow_http_request_timeout)
-    os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] = str(settings.mlflow_http_request_max_retries)
-    os.environ["MLFLOW_DISABLE_TELEMETRY"] = str(settings.mlflow_disable_telemetry).lower()
-    # The full mlflow package (installed for the evals) logs a hint for coding agents on import.
-    os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "true")
+    mlflow_env(settings)
     import mlflow
 
     mlflow.set_tracking_uri(uri)
