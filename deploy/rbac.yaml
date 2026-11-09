@@ -1,4 +1,4 @@
-# The agent's identities (SPEC 3.5), applied by `agent setup`. The per-namespace RoleBindings
+# The agent's identities (DESIGN 3.5), applied by `agent setup`. The per-namespace RoleBindings
 # live with each scenario (scenarios/<folder>/manifests/namespace.yaml): to let the agent read
 # another namespace, add a RoleBinding there. The reader's is to Kubernetes' built-in `view`
 # ClusterRole: read access to most objects, but not Secrets (credentials, incl. other

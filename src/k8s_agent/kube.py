@@ -218,11 +218,14 @@ class Kube:
             label_selector=f"{SERVICE_NAME_LABEL}={service}",
             _request_timeout=self.timeout,
         )
-        return len({
-            e.target_ref.uid if e.target_ref and e.target_ref.uid else tuple(e.addresses)
-            for s in slices.items for e in s.endpoints or []
-            if e.conditions is None or e.conditions.ready is not False
-        })  # fmt: skip
+        return len(
+            {
+                e.target_ref.uid if e.target_ref and e.target_ref.uid else tuple(e.addresses)
+                for s in slices.items
+                for e in s.endpoints or []
+                if e.conditions is None or e.conditions.ready is not False
+            }
+        )
 
     def replace_selector(
         self, namespace: str, name: str, selector: dict[str, str], version: str
@@ -235,9 +238,12 @@ class Kube:
             {"op": "replace", "path": "/spec/selector", "value": selector},
         ]
         return self.core.patch_namespaced_service(
-            name, namespace, ops,
-            _content_type="application/json-patch+json", _request_timeout=self.timeout,
-        )  # fmt: skip
+            name,
+            namespace,
+            ops,
+            _content_type="application/json-patch+json",
+            _request_timeout=self.timeout,
+        )
 
 
 def controller(pod: client.V1Pod) -> str | None:

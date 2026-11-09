@@ -118,8 +118,11 @@ def mcp_call(tool: str, args: dict) -> tuple[bool, str]:
 
 
 def crash_pod(kube: AdminClients) -> str:
-    [pod] = [p.metadata.name for p in kube.core.list_namespaced_pod("shop-orders").items
-             if not p.metadata.deletion_timestamp]  # fmt: skip
+    [pod] = [
+        p.metadata.name
+        for p in kube.core.list_namespaced_pod("shop-orders").items
+        if not p.metadata.deletion_timestamp
+    ]
     return pod
 
 
@@ -192,8 +195,12 @@ def investigate_cli(question: str, *args: str) -> tuple[dict[str, Any], str]:
     t0 = time.monotonic()
     done = subprocess.run(
         ["uv", "run", "agent", "investigate", question, "--json", *args],
-        cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600,
-    )  # fmt: skip
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
     seconds = time.monotonic() - t0
     print(f"\n$ agent investigate {question!r} {' '.join(args)}  ({seconds:.1f} s)\n{done.stderr}")
     assert done.returncode == 0, done.stderr

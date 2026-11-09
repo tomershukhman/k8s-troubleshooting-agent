@@ -1,8 +1,8 @@
 """The agent's records, all plain data:
-- the run record (SPEC §3.7) and the result JSON (SPEC §4.2): `investigate()` returns the full
+- the run record and the result JSON (DESIGN 2, "What comes back"): `investigate()` returns the full
   `RunRecord`; the CLI prints `RunRecord.result`, which carries only the cited steps. Steps are
   read back from the agent's messages, never tracked separately;
-- the fix (SPEC 3.4): its arguments, the approval request and decision, and its outcome;
+- the fix (DESIGN 3.6): its arguments, the approval request and decision, and its outcome;
 - the live progress events `investigate()` sends its caller (`ProgressEvent`)."""
 
 from collections.abc import Sequence
@@ -58,7 +58,7 @@ class EvidenceStep(BaseModel):
     output_excerpt: str
 
 
-# --- the fix (SPEC 3.4) ----------------------------------------------------------------------
+# --- the fix (DESIGN 3.6) --------------------------------------------------------------------
 
 
 class FixArgs(BaseModel):
@@ -141,8 +141,9 @@ class FixStep(BaseModel):
     @classmethod
     def of(cls, call: ToolCall, result: ToolMessage) -> FixStep:
         """The call, with the result it got."""
-        return cls(tool=call["name"], args=call["args"], output=result.text,
-                   error=result.status == "error")  # fmt: skip
+        return cls(
+            tool=call["name"], args=call["args"], output=result.text, error=result.status == "error"
+        )
 
 
 class Remediation(BaseModel):
@@ -275,6 +276,13 @@ class Rechecked:
 
 
 ProgressEvent = (
-    Stage | ToolCalled | Reasoning | Drafted | Verified | FixCalled | Decided | Remediated
+    Stage
+    | ToolCalled
+    | Reasoning
+    | Drafted
+    | Verified
+    | FixCalled
+    | Decided
+    | Remediated
     | Rechecked
-)  # fmt: skip
+)

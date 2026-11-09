@@ -222,8 +222,11 @@ class Progress:
                 a, now = q.args, q.facts.current_selector
                 change = f"{labels(now)} → " if now is not None else ""
                 wanted = a.get("selector") if isinstance(a.get("selector"), dict) else None
-                self.line("approval", f"Service/{a.get('service')} -n {a.get('namespace')}: ",
-                          (f"{change}{labels(wanted)}", "bold"))  # fmt: skip
+                self.line(
+                    "approval",
+                    f"Service/{a.get('service')} -n {a.get('namespace')}: ",
+                    (f"{change}{labels(wanted)}", "bold"),
+                )
                 mark = ("✓ ", "green") if d.approved else ("✗ ", "red")
                 verdict = ("approved", "bold green") if d.approved else ("rejected", "bold red")
                 self.line("verdict", mark, verdict, f": {d.reason}", (f" (by {d.by})", "dim"))
@@ -232,8 +235,11 @@ class Progress:
                 self.line("next", (f"→ {r.outcome}: ", style), r.detail)
             case Rechecked(remediation=r):
                 if r.verified:
-                    self.line("next", ("→ verified: ", "bold green"),
-                              "ready endpoints, and the recheck says resolved")  # fmt: skip
+                    self.line(
+                        "next",
+                        ("→ verified: ", "bold green"),
+                        "ready endpoints, and the recheck says resolved",
+                    )
                 else:
                     self.line("next", ("→ not verified: ", "bold yellow"), r.recheck_note or "")
 
@@ -438,8 +444,12 @@ def eval_table(results: list[ScenarioResult]) -> Table:
             *_costs(r.runs),
         )
     table.add_section()
-    table.add_row("All", f"{sum(r.passed for r in results)}/{len(results)} pass",
-                  *[""] * (len(EVAL_COLUMNS) + 1), *_costs(every, total=True))  # fmt: skip
+    table.add_row(
+        "All",
+        f"{sum(r.passed for r in results)}/{len(results)} pass",
+        *[""] * (len(EVAL_COLUMNS) + 1),
+        *_costs(every, total=True),
+    )
     return table
 
 

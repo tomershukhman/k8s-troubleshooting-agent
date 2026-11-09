@@ -1,4 +1,4 @@
-"""Tracing (SPEC §3.7) with no tracking server: off unless configured, and a server that can't be
+"""Tracing (DESIGN 3.9) with no tracking server: off unless configured, and a server that can't be
 reached neither fails a run nor holds up exit. The traces themselves are checked on the real
 server in tests/acceptance/test_tracing.py."""
 
@@ -19,8 +19,13 @@ STOPPED = "http://127.0.0.1:9"  # nothing listens: every connection is refused
 
 
 def investigate(monkeypatch):
-    models = iter([ScriptedModel(script=[call(("namespaces_list", {})), answer(diagnosis("E1"))]),
-                   critic(), ScriptedModel()])  # fmt: skip
+    models = iter(
+        [
+            ScriptedModel(script=[call(("namespaces_list", {})), answer(diagnosis("E1"))]),
+            critic(),
+            ScriptedModel(),
+        ]
+    )
     monkeypatch.setattr(core, "make_model", lambda _settings, _name: next(models))
     monkeypatch.setattr(core, "mcp_client", lambda _settings: FakeCluster().server)
     get_settings.cache_clear()
@@ -76,7 +81,11 @@ def test_a_tracking_server_that_goes_away_cannot_hold_up_exit(tmp_path):
     t0 = time.monotonic()
     done = subprocess.run(
         [sys.executable, "-c", SERVER_GONE],
-        cwd=tmp_path, env=dict(os.environ), capture_output=True, text=True, timeout=120,
-    )  # fmt: skip
+        cwd=tmp_path,
+        env=dict(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     assert done.returncode == 0, done.stderr
     assert time.monotonic() - t0 < 15, done.stderr  # with MLflow's defaults: minutes

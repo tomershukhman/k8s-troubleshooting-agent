@@ -1,4 +1,5 @@
-"""The answer schemas (SPEC 4.2). The consistency rules are code checks (test_agent.py)."""
+"""The answer schemas (DESIGN 2, "What comes back"). The consistency rules are code checks
+(test_agent.py)."""
 
 import pytest
 from pydantic import ValidationError

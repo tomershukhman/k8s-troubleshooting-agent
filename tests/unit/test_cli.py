@@ -87,7 +87,7 @@ def test_progress_shows_each_agent_at_work_and_the_result_json_goes_to_stdout(fa
         "  agent    investigator · investigator-model",
         "    thinking Compare the selector with the pod labels.",
         "    tool     resources_get(Service/checkout -n shop-checkout)  E1 · N ms",
-        "             Deployment (14 lines of YAML)",  # the fake's resources_get, managedFields cut
+        "             Deployment (11 lines of YAML)",  # the fake's resources_get
         "    draft    fault_found · selector_mismatch · Service/checkout · cites E1",
         "node     verify_evidence",
         "  check    code checks passed",
@@ -139,8 +139,11 @@ def test_the_summary_says_what_is_wrong_the_evidence_and_what_to_do(fake):
 
 def test_the_summary_shows_the_models_words_verbatim_not_as_markup(fake):
     finding = "[/] The selector [app=check-out] matches no pod."  # "[/]" alone breaks Rich markup
-    d = diagnosis("E1", affected_resource={**SERVICE, "name": "check[out]"},
-                  evidence=[{"ref": "E1", "finding": finding}])  # fmt: skip
+    d = diagnosis(
+        "E1",
+        affected_resource={**SERVICE, "name": "check[out]"},
+        evidence=[{"ref": "E1", "finding": finding}],
+    )
     fake(ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(d)]))
     out = json.loads(agent("investigate", "q", "--quiet").stdout)
     console = Console(width=200, record=True)
@@ -155,8 +158,15 @@ ESCAPES = "\x1b[1A\x1b[2K✓ approved\x07\x9b31m"
 
 def test_control_characters_from_the_cluster_or_a_model_never_reach_the_terminal(fake):
     console = Console(file=io.StringIO(), width=200)
-    log = Step(ref="E1", tool="pods_log", args={}, output=f"started\n{ESCAPES}", error=False,
-               latency_ms=1, truncated=0)  # fmt: skip
+    log = Step(
+        ref="E1",
+        tool="pods_log",
+        args={},
+        output=f"started\n{ESCAPES}",
+        error=False,
+        latency_ms=1,
+        truncated=0,
+    )
     progress = ui.Progress(console, {"investigator": "m", "critic": "m"}, 200)
     progress(ToolCalled(log))
     progress(Reasoning(ESCAPES))
@@ -325,9 +335,16 @@ def request(**args) -> ApprovalRequest:
 # What the approver gets besides the request: the verified diagnosis and its cited tool calls.
 VERIFIED = (
     Diagnosis(**diagnosis("E1", proposed_fix=selector_fix())),
-    [EvidenceStep(ref="E1", tool="resources_get", args=SERVICE_ARGS, error=False,
-                  output_excerpt="kind: Service")],
-)  # fmt: skip
+    [
+        EvidenceStep(
+            ref="E1",
+            tool="resources_get",
+            args=SERVICE_ARGS,
+            error=False,
+            output_excerpt="kind: Service",
+        )
+    ],
+)
 
 
 class Spinner:
@@ -396,16 +413,22 @@ def test_a_prompt_nobody_answers_is_given_up_cleanly(terminal):
 @pytest.mark.parametrize(
     ("facts", "warning"),
     [
-        (Facts(current_selector={"app": "x"}, resource_version="101", owners={"p": "RS/p"}),
-         "The Service changed since the remediator read it (version 101): approving will be "
-         "refused as stale."),
-        (Facts(error="403 Forbidden"),
-         "Couldn't check the Service as the remediator: 403 Forbidden"),
-        (Facts(current_selector={"app": "x"}, resource_version="100"),
-         "No ready pod matches the new selector: approving will be refused."),
+        (
+            Facts(current_selector={"app": "x"}, resource_version="101", owners={"p": "RS/p"}),
+            "The Service changed since the remediator read it (version 101): approving will be "
+            "refused as stale.",
+        ),
+        (
+            Facts(error="403 Forbidden"),
+            "Couldn't check the Service as the remediator: 403 Forbidden",
+        ),
+        (
+            Facts(current_selector={"app": "x"}, resource_version="100"),
+            "No ready pod matches the new selector: approving will be refused.",
+        ),
     ],
     ids=["stale", "unreadable", "no ready pod"],
-)  # fmt: skip
+)
 def test_the_prompt_warns_when_approving_would_be_refused(facts, warning):
     console = Console(record=True, width=200)
     console.print(ui.approval(request().model_copy(update={"facts": facts})))
@@ -419,7 +442,7 @@ class Terminal:
     def __init__(self, answer: bytes | None = b"n\n") -> None:
         self.person, self.tty = os.openpty()
         self.answer, self.seen, self.done = answer, b"", threading.Event()
-        self.watcher = threading.Thread(target=self.watch)
+        self.watcher = threading.Thread(target=self.watch, daemon=True)
         self.watcher.start()
 
     def watch(self) -> None:
@@ -468,8 +491,9 @@ def investigate_in(monkeypatch, env):
 
 def proposing(fake, fixer=None) -> None:
     proposed = diagnosis("E1", proposed_fix=selector_fix())
-    fake(ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(proposed)]),
-         fixer=fixer)  # fmt: skip
+    fake(
+        ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(proposed)]), fixer=fixer
+    )
 
 
 ROOT_CAUSE = "The Service selects app=check-out; the pods are labelled app=checkout."

@@ -1,4 +1,4 @@
-"""Structured JSON logs (SPEC §3.7): one JSON object per line. A run logs through a stdlib
+"""Structured JSON logs (DESIGN 3.9): one JSON object per line. A run logs through a stdlib
 `LoggerAdapter` that adds its run_id, thread_id and user_id to every line."""
 
 import json

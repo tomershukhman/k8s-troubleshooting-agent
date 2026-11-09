@@ -1,4 +1,4 @@
-"""`agent setup` (SPEC 3.5): what it applies and the kubeconfigs it writes. Fake API."""
+"""`agent setup` (DESIGN 3.5): what it applies and the kubeconfigs it writes. Fake API."""
 
 import base64
 import os
@@ -21,9 +21,12 @@ def setup(kube: FakeKube, tmp_path, monkeypatch):
     monkeypatch.setattr(access, "whoami", whoami)
     paths = {access.READER: tmp_path / "r.kubeconfig", access.REMEDIATOR: tmp_path / "m.kubeconfig"}
     creds = access.setup(
-        kube.clients, rbac_file=get_settings().rbac_file, token_ttl_seconds=3600,
-        kubeconfigs=paths, progress=print,
-    )  # fmt: skip
+        kube.clients,
+        rbac_file=get_settings().rbac_file,
+        token_ttl_seconds=3600,
+        kubeconfigs=paths,
+        progress=print,
+    )
     return creds, paths
 
 
@@ -80,6 +83,7 @@ def test_the_roles_setup_applies_are_the_boundary(tmp_path, monkeypatch):
         ("", "pods", ()): {"list"},
         ("discovery.k8s.io", "endpointslices", ()): {"list"},
     }
+    # Whatever the roles above become: never Secrets, wildcards, or a way into a container.
     for granted in roles.values():
         for (group, res, _), verbs in granted.items():
             assert "secrets" not in res and "*" not in {group, res, *verbs}

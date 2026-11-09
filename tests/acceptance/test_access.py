@@ -71,7 +71,6 @@ def test_mcp_offers_exactly_the_seven_read_tools():
         async with MCPAdapter(FastMCPClient(s.mcp_endpoint, timeout=s.mcp_timeout_seconds)) as a:
             tools = {t.name: set(t.args) for t in await a.list_tools()}
             # tools that change or run things don't exist on the server
-            unknown = []
             for name in (
                 "pods_exec",
                 "pods_run",
@@ -79,17 +78,14 @@ def test_mcp_offers_exactly_the_seven_read_tools():
                 "resources_create_or_update",
                 "resources_delete",
             ):
-                try:
+                with pytest.raises(Exception, match=f'unknown tool "{name}"'):
                     await a.client.call_tool(name, {"name": "x", "namespace": ORDERS})
-                except Exception as e:
-                    unknown.append(f'unknown tool "{name}"' in str(e))
-            return tools, unknown
+            return tools
 
-    tools, unknown = asyncio.run(go())
+    tools = asyncio.run(go())
     assert set(tools) == READ_ONLY_TOOLS
     assert {"apiVersion", "kind", "name", "namespace"} <= tools["resources_get"]
     assert {"name", "namespace", "previous", "tail"} <= tools["pods_log"]
-    assert unknown == [True] * 5
 
 
 @pytest.mark.parametrize(
@@ -231,10 +227,12 @@ OTHER = [  # never: credentials, a shell, who-may-do-what
     ("rbac.authorization.k8s.io", "roles", None),
     ("rbac.authorization.k8s.io", "rolebindings", None),
 ]
-REMEDIATE = {  # (verb, group, resource) the remediator may do in shop-checkout (SPEC 3.5)
-    ("get", "", "services"), ("patch", "", "services"), ("list", "", "pods"),
+REMEDIATE = {  # (verb, group, resource) the remediator may do in shop-checkout (DESIGN 3.5)
+    ("get", "", "services"),
+    ("patch", "", "services"),
+    ("list", "", "pods"),
     ("list", "discovery.k8s.io", "endpointslices"),
-}  # fmt: skip
+}
 SERVICE = "checkout"  # the only Service it may get or patch (resourceNames)
 
 

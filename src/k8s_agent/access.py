@@ -1,4 +1,4 @@
-"""The agent's identities (SPEC §3.5). `deploy/rbac.yaml` defines them; `setup` applies it and
+"""The agent's identities (DESIGN 3.5). `deploy/rbac.yaml` defines them; `setup` applies it and
 writes a short-lived kubeconfig per identity. Each scenario folder holds its namespace's
 RoleBindings. Uses the user's admin kubeconfig; the agent never does."""
 

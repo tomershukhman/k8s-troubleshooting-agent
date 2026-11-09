@@ -1,10 +1,10 @@
-"""What the agents' middleware needs (SPEC §3.3):
+"""What the agents' middleware needs (DESIGN 3.2, 3.4):
 - `RunContext`, the per-run dependencies every node and middleware gets;
 - the tool-error policy for LangChain's ToolRetryMiddleware and ToolErrorMiddleware: which
   failed calls are retried, and what the model sees when a call fails;
-- `EvidenceMiddleware`, the investigator's: each tool result is stripped of noise, capped, and
-  tagged `[E3]`; the evidence record (ID, effective arguments, timing) goes into the
-  ToolMessage's `artifact`, so the messages are the record of every step."""
+- `EvidenceMiddleware`, the investigator's: each tool result is capped and tagged `[E3]`; the
+  evidence record (ID, effective arguments, timing) goes into the ToolMessage's `artifact`, so
+  the messages are the record of every step."""
 
 import logging
 import time
@@ -111,18 +111,20 @@ class EvidenceMiddleware(AgentMiddleware):
         if not isinstance(result, ToolMessage):
             return result
         latency_ms = round((time.monotonic() - t0) * 1000)
-        settings = ctx.settings
         text = result.text
-        if call["name"] != "pods_log":  # a log is the pod's own text, never object YAML
-            text = tool_output.strip_fields(text, settings.tool_output_strip_fields)
-        capped = tool_output.cap(text, settings.tool_output_max_chars)
+        capped = tool_output.cap(text, ctx.settings.tool_output_max_chars)
         error = result.status == "error"
         ctx.log.log(
             logging.WARNING if error else logging.DEBUG,
             "tool_call",
-            extra={"ref": ref, "tool": call["name"], "tool_args": args, "latency_ms": latency_ms,
-                   "error": capped if error else None},
-        )  # fmt: skip
+            extra={
+                "ref": ref,
+                "tool": call["name"],
+                "tool_args": args,
+                "latency_ms": latency_ms,
+                "error": capped if error else None,
+            },
+        )
         evidence = {"ref": ref, "args": args, "latency_ms": latency_ms, "truncated": capped != text}
         return result.model_copy(
             update={

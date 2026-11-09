@@ -1,4 +1,4 @@
-"""The gate between the approval pause and the resume (SPEC 3.4).
+"""The gate between the approval pause and the resume (DESIGN 3.6).
 
 When the remediator's fix tool pauses the graph, `Gate.decide`:
 1. reads facts as the remediator: the Service's current selector and version, and the ready

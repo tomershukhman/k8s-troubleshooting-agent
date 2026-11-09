@@ -35,8 +35,13 @@ def sent(monkeypatch) -> list[tuple]:
         self.request("GET", "/apis")
 
     monkeypatch.setattr(DynamicClient, "__init__", discover)
-    monkeypatch.setattr(DynamicClient, "request", lambda _s, method, path, body=None, **params:
-                        sent.append((method, path, params.get("_request_timeout"))))  # fmt: skip
+    monkeypatch.setattr(
+        DynamicClient,
+        "request",
+        lambda _s, method, path, body=None, **params: sent.append(
+            (method, path, params.get("_request_timeout"))
+        ),
+    )
     return sent
 
 

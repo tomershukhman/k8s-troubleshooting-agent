@@ -57,7 +57,7 @@ def retried(check):
     pytest.fail(f"no attempt passed: {attempts}")
 
 
-def test_a_real_deployment_reaches_the_agent_with_status_and_without_managed_fields(cluster):
+def test_a_real_deployment_reaches_the_agent_with_status_and_without_managed_fields():
     # A scripted investigator makes the exact call: the real MCP server plus our middleware.
     args = {
         "apiVersion": "apps/v1",
@@ -65,10 +65,6 @@ def test_a_real_deployment_reaches_the_agent_with_status_and_without_managed_fie
         "name": "checkout",
         "namespace": "shop-checkout",
     }
-    deployments = cluster.dynamic.resources.get(api_version="apps/v1", kind="Deployment")
-    assert deployments.get(
-        name="checkout", namespace="shop-checkout"
-    ).metadata.managedFields  # not a no-op
     model = ScriptedModel(script=[call(("resources_get", args)), answer(diagnosis("E1"))])
     run("Why is checkout down?", model=model, critic_model=critic())
     [seen] = [m for m in model.received[1] if m.type == "tool"]
@@ -80,6 +76,7 @@ def test_a_real_deployment_reaches_the_agent_with_status_and_without_managed_fie
         and "\nstatus:\n" in seen.content
         and "availableReplicas: 2" in seen.content
     )
+    # The server drops managedFields (often half an object's YAML), so the agent needn't.
     assert "managedFields" not in seen.content
 
 
