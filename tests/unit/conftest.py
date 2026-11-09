@@ -1,8 +1,9 @@
 """Every unit test runs isolated from the developer's machine: no AGENT_* variables,
 KUBECONFIG, model API key or tracing settings (MLFLOW_*) from the shell, no `.env` (the working
 directory is an empty temp folder), a kubeconfig that doesn't exist (so nothing can reach a
-cluster), and the scenarios folder and RBAC file by absolute path. Tracing and logging state a
-test turns on is undone after it."""
+cluster), an MCP server address where nothing listens (so a test that forgets the fake cluster
+can't reach a real k8s-mcp), and the scenarios folder and RBAC file by absolute path. Tracing
+and logging state a test turns on is undone after it."""
 
 import logging
 import os
@@ -29,6 +30,7 @@ def isolated_settings(monkeypatch, tmp_path):
             monkeypatch.delenv(key)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENT_KUBECONFIG", str(tmp_path / "no-kubeconfig"))  # never a cluster
+    monkeypatch.setenv("AGENT_MCP_URL", "http://127.0.0.1:9/mcp")  # never a real MCP server
     monkeypatch.setenv("AGENT_SCENARIOS_DIR", str(REPO / "scenarios"))
     monkeypatch.setenv("AGENT_RBAC_FILE", str(REPO / "deploy" / "rbac.yaml"))
     get_settings.cache_clear()

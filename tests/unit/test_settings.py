@@ -12,7 +12,7 @@ def test_lists_are_comma_separated(env):
 
 
 def test_mcp_endpoint_follows_port_unless_set(env):
-    env(mcp_port="9090")
+    env(mcp_url="", mcp_port="9090")
     assert get_settings().mcp_endpoint == "http://localhost:9090/mcp"
     env(mcp_url="http://localhost:1/mcp")
     assert get_settings().mcp_endpoint == "http://localhost:1/mcp"
