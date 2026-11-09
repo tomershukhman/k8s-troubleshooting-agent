@@ -12,6 +12,7 @@ import pytest
 import urllib3
 import yaml
 from kubernetes import client as k
+from langchain_core.exceptions import ModelRateLimitError
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde import jsonplus
@@ -234,6 +235,28 @@ def test_a_time_budget_that_runs_out_in_the_fix_keeps_the_diagnosis(env):
     assert "the run stopped before the fix finished: The run hit its 1 s time budget" in r.detail
 
 
+@pytest.mark.parametrize(
+    ("limit", "turns", "why"),
+    [
+        (None, [READS, ModelRateLimitError("rate limited")],
+         "ModelRateLimitError: rate limited"),
+        ("2", [READS, READS, fix_call()], "ModelCallLimitExceededError: "),  # its 3rd call
+    ],
+)  # fmt: skip
+def test_a_remediator_that_stops_before_requesting_the_fix_keeps_the_diagnosis(
+    env, limit, turns, why
+):
+    if limit:  # per round and per remediation; the investigation needs 2
+        env(max_model_calls=limit)
+    services, seen = FakeServices(), []
+    rem = ScriptedModel(script=turns)
+    record = fix(approver(seen=seen), services=services, remediator_model=rem)
+    assert (record.result.status, record.result.diagnosis.status) == ("completed", "fault_found")
+    r = record.result.remediation
+    assert seen == [] and services.patches == [] and (r.outcome, r.decision) == ("failed", None)
+    assert r.detail.startswith(f"the remediator stopped before the fix tool ran: {why}")
+
+
 def test_the_agents_time_after_the_resume_counts_against_what_was_left(env):
     # 2 s of agent time: the investigation takes 1.5 s, the recheck after the approval 1 s more
     env(run_max_seconds="2")
@@ -394,6 +417,17 @@ def test_a_service_changed_just_before_the_patch_is_stale_too():
     assert (result.outcome, services.selector) == (FixOutcome.stale, {"app": "check-out"})
 
 
+@pytest.mark.parametrize("read", ["read_namespaced_service", "list_namespaced_pod"])
+def test_no_answer_from_the_api_server_before_the_patch_is_a_failure_and_nothing_is_applied(
+    monkeypatch, read
+):
+    services = FakeServices()
+    monkeypatch.setattr(services, read, broken_connection)
+    result = apply_fix(services.kube(), args(), get_settings())
+    assert (result.outcome, services.patches) == (FixOutcome.failed, [])
+    assert result.detail.startswith("no answer from the API server: ")
+
+
 def test_no_answer_from_the_api_server_to_the_patch_is_a_failure_that_says_check(monkeypatch):
     services = FakeServices()
     monkeypatch.setattr(services, "patch_namespaced_service", broken_connection)
@@ -481,6 +515,16 @@ def test_verified_needs_a_resolved_recheck_on_fresh_evidence(check, note):
     record = fix(approver(), model=investigator(PROPOSED | {"post_fix_check": check}))
     r = record.result.remediation
     assert (r.outcome, r.verified) == ("applied", False) and note in r.recheck_note
+
+
+def test_an_applied_fix_with_no_ready_endpoints_is_not_verified(env):
+    env(verify_wait_seconds="0.05", verify_poll_seconds="0.01")
+    services = FakeServices()
+    services.list_namespaced_endpoint_slice = lambda *_a, **_kw: k.V1EndpointSliceList(items=[])
+    r = fix(approver(), services=services).result.remediation  # the recheck says resolved
+    assert (r.outcome, r.endpoints_ready, services.selector) == ("applied", 0, {"app": "checkout"})
+    assert r.detail.endswith("; 0 ready endpoints")
+    assert (r.verified, r.recheck_note) == (False, "the fix tool counted no ready endpoints")
 
 
 def test_post_fix_check_in_the_investigation_is_sent_back():
