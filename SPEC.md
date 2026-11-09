@@ -683,8 +683,8 @@ Each role has its own short prompt file. Tool output is untrusted data in all th
 - for a container that keeps restarting, read its current log (`previous: false`): the previous one is often gone
 - at most `AGENT_MAX_TOOL_CALLS` calls per round; stop as soon as the evidence is enough
 - cite `E<n>` refs for every finding, including for `no_fault`, and only refs it has seen
-- each finding says only what its own result shows: two results (a selector and the pods' labels) are two findings, connected in `root_cause`
-- `root_cause` and `recommended_action` state only facts the findings show; any other fact, even a true one (an object's age), is left out or cited
+- each finding says only what its own result shows: two results (a selector and the pods' labels) are two findings, compared in `root_cause`
+- `root_cause` and `recommended_action` state only facts the findings show; a consequence it could check but didn't (no ready endpoints) or any other uncited fact (an object's age) is read and cited, or left out
 - the category definitions (root cause, not symptom)
 - answer `no_fault` only with evidence; answer `inconclusive` with a reason when it can't tell; never guess
 - `recommended_action`: the smallest change that fixes the root cause; no deleting or scaling to zero unless the evidence clearly requires it
