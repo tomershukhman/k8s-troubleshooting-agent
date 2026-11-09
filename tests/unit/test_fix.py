@@ -279,11 +279,14 @@ def test_only_a_selector_fix_in_an_allowed_namespace_is_routed(d, routed):
     assert fixable(Diagnosis(**d), get_settings()) is routed
 
 
-def test_the_remediator_declines_an_unsafe_proposal_and_nobody_is_asked():
-    seen, why = [], "No ready pod matches app=checkout."
+def test_a_remediator_that_finds_no_ready_pod_to_select_declines_and_nobody_is_asked():
+    services, seen, why = FakeServices(), [], "No ready pod matches app=checkout."
+    services.pods = {name: (labels, False) for name, (labels, _) in services.pods.items()}
     rem = remediator(READS, reason=why)
-    r = fix(approver(seen=seen), remediator_model=rem).result.remediation
-    assert seen == [] and (r.outcome, r.detail, r.decision) == ("not_applied", why, None)
+    r = fix(approver(seen=seen), services=services, remediator_model=rem).result.remediation
+    assert r.steps[1].output.startswith("0 of 2 pods ready, matching app=checkout")  # it saw
+    assert seen == [] and services.patches == []
+    assert (r.outcome, r.detail, r.decision) == ("not_applied", why, None)
 
 
 def test_a_request_other_than_the_proposed_fix_is_rejected_without_asking():
