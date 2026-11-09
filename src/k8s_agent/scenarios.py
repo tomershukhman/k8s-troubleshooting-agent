@@ -11,7 +11,7 @@ from typing import Any
 from kubernetes import client
 from pydantic import Field
 
-from k8s_agent.kube import AdminClients, Progress, apply, load_yaml, read_or_none
+from k8s_agent.kube import AdminClients, Progress, apply, load_yaml, pod_ready, read_or_none
 from k8s_agent.schemas import DiagnosisStatus, FaultCategory, Strict
 
 # `up` and `down` touch only namespaces with this label (set in each namespace.yaml).
@@ -114,8 +114,7 @@ def live_state(pods: list[client.V1Pod]) -> ReadyWhen:
     for pod in pods:
         if pod.metadata.deletion_timestamp is not None:
             continue
-        conditions = pod.status.conditions or []
-        is_ready = any(c.type == "Ready" and c.status == "True" for c in conditions)
+        is_ready = pod_ready(pod)
         ready += is_ready
         not_ready += pod.status.phase == "Running" and not is_ready
         for cs in pod.status.container_statuses or []:

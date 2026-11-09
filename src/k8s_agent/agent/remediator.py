@@ -44,7 +44,7 @@ from k8s_agent.agent.records import (
 )
 from k8s_agent.agent.tool_output import cap
 from k8s_agent.config import Settings
-from k8s_agent.kube import KubeError
+from k8s_agent.kube import KubeError, pod_ready
 from k8s_agent.policy import FIX_TOOL
 from k8s_agent.schemas import ProposedFix, RemediatorAnswer
 
@@ -96,7 +96,7 @@ class Kube:
         """The ready pods the exact `selector` matches (as a Service's: an empty one, none)."""
         if not selector:
             return []
-        return sorted(p.metadata.name for p in self.pods(namespace, selector) if ready(p))
+        return sorted(p.metadata.name for p in self.pods(namespace, selector) if pod_ready(p))
 
     def ready_endpoints(self, namespace: str, service: str) -> int:
         """Ready endpoints across the Service's EndpointSlices, by the API's rules: an unset
@@ -124,10 +124,6 @@ class Kube:
             name, namespace, ops,
             _content_type="application/json-patch+json", _request_timeout=self.timeout,
         )  # fmt: skip
-
-
-def ready(pod: client.V1Pod) -> bool:
-    return any(c.type == "Ready" and c.status == "True" for c in pod.status.conditions or [])
 
 
 # --- the fix ---------------------------------------------------------------------------------
@@ -240,9 +236,9 @@ def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
         with whether it is ready, and its labels."""
         pods = read(lambda k: k.pods(namespace, selector))
         which = f"matching {labels(selector)}" if selector else "in total"
-        rows = [f"{p.metadata.name}  {'ready' if ready(p) else 'not ready'}  "
+        rows = [f"{p.metadata.name}  {'ready' if pod_ready(p) else 'not ready'}  "
                 f"labels {labels(p.metadata.labels)}" for p in pods]  # fmt: skip
-        summary = f"{sum(map(ready, pods))} of {len(pods)} pods ready, {which}"
+        summary = f"{sum(map(pod_ready, pods))} of {len(pods)} pods ready, {which}"
         return capped("\n".join([summary, *rows]))
 
     def list_endpoint_slices(namespace: str, service: str) -> str:

@@ -1,5 +1,5 @@
-"""Kubernetes clients built from the user's own (admin) kubeconfig, and the helpers `setup` and
-`scenario` share."""
+"""Kubernetes clients built from the user's own (admin) kubeconfig, and the helpers `setup`,
+`scenario` and the remediator share."""
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -66,6 +66,10 @@ def apply(c: AdminClients, docs: Iterable[dict[str, Any]], progress: Progress) -
         )
         where = f" in {meta['namespace']}" if "namespace" in meta else ""
         progress(f"applied {doc['kind']}/{meta['name']}{where}")
+
+
+def pod_ready(pod: client.V1Pod) -> bool:
+    return any(c.type == "Ready" and c.status == "True" for c in pod.status.conditions or [])
 
 
 def read_or_none[T](read: Callable[[], T]) -> T | None:
