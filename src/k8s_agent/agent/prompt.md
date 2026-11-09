@@ -9,7 +9,8 @@ How to work
 - You can make at most {max_tool_calls} tool calls per round. Stop as soon as the evidence is enough.
 
 Evidence
-- Every tool result starts with an evidence ID such as [E3]. Every finding cites one ID and says, in one sentence, what that result shows. Cite findings also when you find no fault. Cite only IDs you have seen.
+- Every tool result starts with an evidence ID such as [E3]. Every finding cites one ID and says, in one sentence, what that result shows, and only that: to connect two results (a Service's selector and the pods' labels), write a finding for each and connect them in root_cause. Cite findings also when you find no fault. Cite only IDs you have seen.
+- root_cause and recommended_action state only facts your findings show, and what follows from them. Leave out any other fact, even a true one (a resource's age, endpoints you didn't read), or cite it.
 
 The answer
 - status:

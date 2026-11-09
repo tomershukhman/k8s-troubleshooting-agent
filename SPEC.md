@@ -246,6 +246,7 @@ By default every scenario runs **once** (`AGENT_EVAL_RUNS_PER_SCENARIO`, 1; user
 - **An LLM judge checks what needs judgment:** whether the cited evidence really supports the conclusion, and whether the recommended action is appropriate and safe as advice to a human operator.
   - Why judge the advice: the agent's own actions are safe by construction (read-only tools; one narrow fix tool, gated by human approval of its exact arguments). Its *advice* is not, because a human may run it with admin rights.
 - **Two built-in MLflow judges, separate from the critic:** both run offline on Opus 5.5 (`AGENT_JUDGE_MODEL`), as an independent check on the whole system. They see the answer and the cited tool outputs, never the critic's verdicts.
+  - The critic applies the evidence judge's standard inside the agent, in its own words: each finding shown by its own cited output, and no fact in the root cause or action that no cited output shows. So an answer the gate would fail goes back for another round first.
   - **Advice appropriate and safe:** `ExpectationsGuidelines`, which reads each scenario's rubric (from `scenario.yaml`) from that test case's expectations. No custom judge code.
   - **Evidence supports the conclusion:** `make_judge` on the answer and the full output of each cited tool call (`{{ inputs }}`, `{{ outputs }}`). We write only its instructions. Rejected: `{{ trace }}`, where the judge explores the whole trace itself: ~51k tokens and $0.23 per run, against ~$0.05 for both judges this way (measured in M5).
   - **Asked again** (`AGENT_JUDGE_ATTEMPTS`, 3 in all) when a judge's verdict can't be read or its call fails: MLflow retries 429 and 5xx itself, but not Anthropic's 529 "overloaded", and Opus now and then garbles its JSON verdict.
@@ -336,7 +337,7 @@ flowchart TD
 | Role | What it is | Identity and tools | Output | Used in |
 |---|---|---|---|---|
 | Investigator | `create_agent`, Sonnet 5.5 (`AGENT_MODEL`) | `reader`, through the 7 MCP read tools | Draft diagnosis + evidence + recommended action + an optional typed `proposed_fix` (namespace, service, new selector, why); after a fix, `post_fix_check` | investigate, including the recheck round after a fix |
-| Critic | A single structured call (`with_structured_output`) with its own prompt; no agent loop. Model: `AGENT_CRITIC_MODEL`, by default the investigator's model. | None: no tools | Per finding: supported or not, with a reason. Whether `proposed_fix` is backed by the evidence (e.g. the new selector matches the pod labels the investigator read). Overall: founded or not founded, with feedback. | verify_evidence |
+| Critic | A single structured call (`with_structured_output`) with its own prompt; no agent loop. Model: `AGENT_CRITIC_MODEL`, by default the investigator's model. | None: no tools | Per finding: supported or not by its own cited output, with a reason. Whether the root cause and recommended action state only facts the cited outputs show. Whether `proposed_fix` is backed by the evidence (e.g. the new selector matches the pod labels the investigator read). Overall: founded or not founded, with feedback. | verify_evidence |
 | Remediator | `create_agent`, with its own prompt and model setting (`AGENT_REMEDIATOR_MODEL`) | `remediator`, through its own tools: small read functions (get the Service; list pods and EndpointSlices in the fix namespace) and `patch_service_selector`. Not the MCP server, which runs as `reader`. | The explanation and expected effect, then the tool call; or a decline. Its structured answer: the reason. | remediate |
 
 **The stages**
@@ -682,6 +683,8 @@ Each role has its own short prompt file. Tool output is untrusted data in all th
 - for a container that keeps restarting, read its current log (`previous: false`): the previous one is often gone
 - at most `AGENT_MAX_TOOL_CALLS` calls per round; stop as soon as the evidence is enough
 - cite `E<n>` refs for every finding, including for `no_fault`, and only refs it has seen
+- each finding says only what its own result shows: two results (a selector and the pods' labels) are two findings, connected in `root_cause`
+- `root_cause` and `recommended_action` state only facts the findings show; any other fact, even a true one (an object's age), is left out or cited
 - the category definitions (root cause, not symptom)
 - answer `no_fault` only with evidence; answer `inconclusive` with a reason when it can't tell; never guess
 - `recommended_action`: the smallest change that fixes the root cause; no deleting or scaling to zero unless the evidence clearly requires it
@@ -690,7 +693,8 @@ Each role has its own short prompt file. Tool output is untrusted data in all th
 - in the recheck after a fix, use fresh tool calls and fill `post_fix_check`, citing only them
 
 **Critic**
-- judge each finding against the tool output it cites, with a reason
+- judge each finding against the tool output it cites, on its own, with a reason
+- check that the root cause and the recommended action state no fact that no cited output shows (linking cited facts, and advice, are fine)
 - check that `proposed_fix` is backed by the evidence
 - return founded or not founded, with feedback for the investigator
 

@@ -156,8 +156,9 @@ class CriticVerdict(Strict):
     findings: list[FindingVerdict] = Field(description="One entry per finding, same order")
     proposed_fix: FixVerdict | None = Field(description="null when the draft proposes no fix")
     founded: bool = Field(
-        description="True only if every finding is supported and together they establish the "
-        "conclusion (and the proposed fix, if any, is backed)"
+        description="True only if every finding is supported, the root cause and the action "
+        "state no fact that no cited output shows, together the findings establish the "
+        "conclusion, and the proposed fix, if any, is backed"
     )
     feedback: str = Field(
         description="When not founded: what is wrong and what evidence would settle it. "
