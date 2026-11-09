@@ -207,7 +207,7 @@ def test_the_cap_comes_from_config(env):
 
 
 def test_pods_log_tail_is_bounded_by_config(env):
-    env(log_tail_lines="20")
+    env(pod_log_tail_lines="20")
     cluster = FakeCluster()
     calls = call(
         ("pods_log", {**LOG, "tail": 500}), ("pods_log", LOG), ("pods_log", {**LOG, "tail": 5})

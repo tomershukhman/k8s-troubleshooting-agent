@@ -51,14 +51,14 @@ def next_ref(messages: Sequence[BaseMessage], call_id: str | None) -> str:
 
 
 def bounded_args(settings: Settings, tool: str, args: dict[str, Any]) -> dict[str, Any]:
-    """pods_log returns at most AGENT_LOG_TAIL_LINES lines, whatever the model asked for."""
+    """pods_log returns at most AGENT_POD_LOG_TAIL_LINES lines, whatever the model asked for."""
     if tool != "pods_log":
         return args
     try:
-        tail = int(args.get("tail") or settings.log_tail_lines)
+        tail = int(args.get("tail") or settings.pod_log_tail_lines)
     except TypeError, ValueError:
-        tail = settings.log_tail_lines
-    return {**args, "tail": min(max(tail, 1), settings.log_tail_lines)}
+        tail = settings.pod_log_tail_lines
+    return {**args, "tail": min(max(tail, 1), settings.pod_log_tail_lines)}
 
 
 def worth_retrying(exc: Exception) -> bool:

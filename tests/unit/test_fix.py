@@ -568,7 +568,7 @@ def test_verified_needs_a_resolved_recheck_on_fresh_evidence(check, note):
 
 
 def test_an_applied_fix_with_no_ready_endpoints_is_not_verified(env):
-    env(verify_wait_seconds="0.05", verify_poll_seconds="0.01")
+    env(fix_endpoints_wait_seconds="0.05", fix_endpoints_poll_seconds="0.01")
     services = FakeServices()
     services.list_namespaced_endpoint_slice = lambda *_a, **_kw: k.V1EndpointSliceList(items=[])
     r = fix(approver(), services=services).result.remediation  # the recheck says resolved

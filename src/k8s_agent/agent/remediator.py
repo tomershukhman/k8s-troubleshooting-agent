@@ -224,10 +224,10 @@ def failure(kube: Kube, args: FixArgs, e: ApiException, before: dict | None) -> 
 
 
 def wait_for_endpoints(kube: Kube, namespace: str, service: str, settings: Settings) -> int:
-    """Ready endpoints, polled until there is one or AGENT_VERIFY_WAIT_SECONDS pass."""
-    deadline = time.monotonic() + settings.verify_wait_seconds
+    """Ready endpoints, polled until there is one or AGENT_FIX_ENDPOINTS_WAIT_SECONDS pass."""
+    deadline = time.monotonic() + settings.fix_endpoints_wait_seconds
     while (n := kube.ready_endpoints(namespace, service)) == 0 and time.monotonic() < deadline:
-        time.sleep(settings.verify_poll_seconds)
+        time.sleep(settings.fix_endpoints_poll_seconds)
     return n
 
 

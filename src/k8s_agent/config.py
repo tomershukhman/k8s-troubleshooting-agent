@@ -43,8 +43,9 @@ class Settings(BaseSettings):
     # The fix (SPEC 3.4). The wait for a person's answer has its own clock: it isn't agent
     # working time (AGENT_RUN_MAX_SECONDS), and when it runs out the fix is rejected.
     approval_timeout_seconds: PositiveFloat = 600
-    verify_wait_seconds: PositiveFloat = 20  # max wait for the Service's endpoints after a fix
-    verify_poll_seconds: PositiveFloat = 1
+    # The Service's ready endpoints after a fix: the longest wait, and how often to check.
+    fix_endpoints_wait_seconds: PositiveFloat = 20
+    fix_endpoints_poll_seconds: PositiveFloat = 1
     remediator_timeout_seconds: PositiveFloat = 30  # per Kubernetes API call as the remediator
 
     # MCP server. Host networking (SPEC §3.10): the same URL works from the host and from
@@ -81,7 +82,7 @@ class Settings(BaseSettings):
     tool_retry_delay_seconds: float = Field(default=1.0, ge=0)  # first wait; doubles each retry
     tool_output_max_chars: PositiveInt = 40000  # safety cap per tool result
     tool_output_strip_fields: NameList = ["managedFields"]  # noise removed (never spec/status)
-    log_tail_lines: PositiveInt = 100  # max lines pods_log returns
+    pod_log_tail_lines: PositiveInt = 100  # max lines pods_log returns
     evidence_excerpt_chars: PositiveInt = 1500  # output shown per cited step in the result
     progress_summary_chars: PositiveInt = 200  # reasoning summary length in progress lines
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"  # structured JSON logs

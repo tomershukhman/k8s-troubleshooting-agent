@@ -446,7 +446,7 @@ kind = "Secret"
 - `read_only` alone doesn't stop reading Secrets. So `denied_resources` and the reader's permissions both block them.
 
 **Our middleware around every tool result** (LangChain's `wrap_tool_call` hook, confirmed in its docs 2026-11-08), in this order:
-1. **Strip noise:** remove fields that are often half an object's YAML (`AGENT_TOOL_OUTPUT_STRIP_FIELDS`, default `managedFields`). `spec` and `status` are never touched, and a `pods_log` result is never parsed (its tail is bounded by `AGENT_LOG_TAIL_LINES` instead).
+1. **Strip noise:** remove fields that are often half an object's YAML (`AGENT_TOOL_OUTPUT_STRIP_FIELDS`, default `managedFields`). `spec` and `status` are never touched, and a `pods_log` result is never parsed (its tail is bounded by `AGENT_POD_LOG_TAIL_LINES` instead).
 2. **Apply the safety cap** (`AGENT_TOOL_OUTPUT_MAX_CHARS`): normal outputs pass unchanged. Beyond the cap, a plain cut with a "[… N characters cut …]" marker.
 3. **Tag and record:** prefix a short evidence ID (`[E3]`), unique per run across rounds, and record the step. Only the investigator's tool calls get one.
 
@@ -563,7 +563,7 @@ sequenceDiagram
    - Not a merge patch: it would keep old selector keys, and could apply something other than what was approved.
    - If the Service changed meanwhile, the test fails and the outcome is `stale`. Nothing is applied. The API server answers a failed test with the same generic 422 as an invalid request, so the tool re-reads the version to tell `stale` from `invalid` (M6).
    - No answer from the API server (a timeout, a broken connection): `failed`; for the patch itself, the result says to check whether the selector changed.
-3. **Waits** until the Service has ready endpoints (up to `AGENT_VERIFY_WAIT_SECONDS`, polled every `AGENT_VERIFY_POLL_SECONDS`), and returns what it found. Once applied, the outcome stays `applied` whatever the wait meets.
+3. **Waits** until the Service has ready endpoints (up to `AGENT_FIX_ENDPOINTS_WAIT_SECONDS`, polled every `AGENT_FIX_ENDPOINTS_POLL_SECONDS`), and returns what it found. Once applied, the outcome stays `applied` whatever the wait meets.
 
 **Reject:** resume with `{"type": "reject", "message": "<the reason>"}`. Nothing is applied; the remediator is told why and finishes without the fix; there's no recheck.
 
@@ -1035,8 +1035,8 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 | `AGENT_TOKEN_TTL_HOURS` | 12 | Re-run `setup` to refresh |
 | `AGENT_READER_KUBECONFIG` / `AGENT_REMEDIATOR_KUBECONFIG` | `./.kube-agent/…` | Mounted into one container each |
 | `AGENT_CONTAINER_USER` | `65532:65532` | Native Linux Docker: your `id -u`:`id -g` |
-| `AGENT_VERIFY_WAIT_SECONDS` | 20 | Max wait for endpoints after a fix |
-| `AGENT_VERIFY_POLL_SECONDS` | 1 | How often the fix tool checks for them |
+| `AGENT_FIX_ENDPOINTS_WAIT_SECONDS` | 20 | Max wait for endpoints after a fix |
+| `AGENT_FIX_ENDPOINTS_POLL_SECONDS` | 1 | How often the fix tool checks for them |
 | `AGENT_REMEDIATOR_TIMEOUT_SECONDS` | 30 | Per Kubernetes API call as the remediator (its tools, and the facts read at the pause) |
 
 **MCP server and tools**
@@ -1045,7 +1045,7 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 |---|---|---|
 | `AGENT_MCP_PORT` / `AGENT_MCP_URL` | 8080 / `http://localhost:8080/mcp` | |
 | `AGENT_MCP_TIMEOUT_SECONDS` | 30 | Per MCP tool call |
-| `AGENT_LOG_TAIL_LINES` | 100 | The most lines `pods_log` returns, whatever the model asks for |
+| `AGENT_POD_LOG_TAIL_LINES` | 100 | The most lines `pods_log` returns, whatever the model asks for |
 | `AGENT_EVIDENCE_EXCERPT_CHARS` | 1500 | Output shown per cited step in the result JSON (the run record keeps it all) |
 
 **Logs, evals and tracing**
