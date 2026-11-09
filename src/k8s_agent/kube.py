@@ -1,5 +1,6 @@
 """Kubernetes clients built from the user's own (admin) kubeconfig, and the helpers `setup`,
-`scenario` and the remediator share."""
+`scenario` and the remediator share. Every admin API call has a time limit
+(AGENT_KUBE_TIMEOUT_SECONDS), so a stalled API server can't hang them."""
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -24,10 +25,27 @@ class KubeError(Exception):
 
 @dataclass(frozen=True)
 class AdminClients:
+    """Calls through `core` pass `_request_timeout=timeout`, as the remediator's do; `dynamic`
+    adds it to every request itself."""
+
     api: client.ApiClient
     core: client.CoreV1Api
     dynamic: DynamicClient
     context: str
+    timeout: float
+
+
+class TimedDynamicClient(DynamicClient):
+    """A DynamicClient whose every request has a time limit: its API discovery too, which takes
+    no per-call arguments (server_side_apply passes its own on to `request`)."""
+
+    def __init__(self, api: client.ApiClient, timeout: float) -> None:
+        self.timeout = timeout  # set first: the constructor runs discovery
+        super().__init__(api)
+
+    def request(self, method: str, path: str, body: Any = None, **params: Any) -> Any:
+        params.setdefault("_request_timeout", self.timeout)
+        return super().request(method, path, body=body, **params)
 
 
 def admin_clients(settings: Settings) -> AdminClients:
@@ -42,11 +60,14 @@ def admin_clients(settings: Settings) -> AdminClients:
         api = config.new_client_from_config(config_file=config_file, context=name)
     except ConfigException as e:
         raise KubeError(f"cannot load kubeconfig: {e}") from e
+    timeout = settings.kube_timeout_seconds
     try:
-        dynamic = DynamicClient(api)  # runs API discovery, so it also proves the API is reachable
+        # Runs API discovery, so it also proves the API is reachable.
+        dynamic = TimedDynamicClient(api, timeout)
     except Exception as e:
         raise KubeError(f"cannot reach the Kubernetes API (context {name!r}): {e}") from e
-    return AdminClients(api=api, core=client.CoreV1Api(api), dynamic=dynamic, context=name)
+    core = client.CoreV1Api(api)
+    return AdminClients(api=api, core=core, dynamic=dynamic, context=name, timeout=timeout)
 
 
 def load_yaml(*paths: Path) -> list[dict[str, Any]]:

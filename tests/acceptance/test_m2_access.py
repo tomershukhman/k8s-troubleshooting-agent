@@ -325,7 +325,7 @@ def test_mcp_picks_up_a_rotated_token_without_restart(cluster, request):
 
     def old_token_rejected():  # the API server caches token checks for ~10s
         try:
-            access.whoami(old)
+            access.whoami(old, get_settings().kube_timeout_seconds)
         except ApiException as e:
             assert e.status == 401
             return

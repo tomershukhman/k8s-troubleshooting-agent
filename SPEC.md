@@ -1030,6 +1030,7 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 | Variable | Default | Notes |
 |---|---|---|
 | `AGENT_KUBECONFIG` / `AGENT_KUBE_CONTEXT` | `$KUBECONFIG` or `~/.kube/config`, current context | Your admin access, for `setup`, `scenario` and `eval` only (the admin container); `investigate` never uses it |
+| `AGENT_KUBE_TIMEOUT_SECONDS` | 30 | Per Kubernetes API call with the admin kubeconfig (`setup`, `scenario`, `eval`'s scenario rebuilds), API discovery and server-side apply included, so a stalled API server can't hang them. (Helm, in `setup`, has its own limit: `AGENT_MLFLOW_INSTALL_TIMEOUT_SECONDS`.) |
 | `AGENT_REMEDIATION_NAMESPACES` | `shop-checkout` | Where fixes are allowed (routing and the tool's validation). The remediator's RoleBinding itself is YAML in the scenario folder. |
 | `AGENT_TOKEN_TTL_HOURS` | 12 | Re-run `setup` to refresh |
 | `AGENT_READER_KUBECONFIG` / `AGENT_REMEDIATOR_KUBECONFIG` | `./.kube-agent/…` | Mounted into one container each |

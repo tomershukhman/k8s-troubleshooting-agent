@@ -246,18 +246,23 @@ def pod(ready: bool = True, restarts: int = 0, deleting: bool = False) -> k.V1Po
 
 class FakeKube:
     """The parts of the core and dynamic APIs `setup` and `scenario` use. Records every
-    change in order, and keeps namespaces with their labels."""
+    change in order, keeps namespaces with their labels, and records each core call's time
+    limit (`timeouts`; the dynamic client adds its own)."""
+
+    TIMEOUT = 7.0
 
     def __init__(self, pods: list[k.V1Pod] | None = None) -> None:
         self.log: list[str] = []
+        self.timeouts: list[Any] = []
         self.namespaces: dict[str, dict[str, str]] = {}  # name -> labels
         self.applied: list[dict[str, Any]] = []
         self.pods = [pod()] if pods is None else pods
         self.resources = SimpleNamespace(get=lambda **kw: SimpleNamespace(**kw))
         conf = k.Configuration(host="https://127.0.0.1:6443")
         self.clients = AdminClients(
-            api=SimpleNamespace(configuration=conf), core=self, dynamic=self, context="fake"
-        )
+            api=SimpleNamespace(configuration=conf), core=self, dynamic=self, context="fake",
+            timeout=self.TIMEOUT,
+        )  # fmt: skip
 
     def server_side_apply(self, res, body, namespace, field_manager, force_conflicts):
         self.applied.append(body)
@@ -265,23 +270,28 @@ class FakeKube:
         if body["kind"] == "Namespace":
             self.namespaces[body["metadata"]["name"]] = body["metadata"].get("labels", {})
 
-    def read_namespace(self, name):
+    def read_namespace(self, name, _request_timeout=None):
+        self.timeouts.append(_request_timeout)
         if name not in self.namespaces:
             raise k.ApiException(status=404)
         return k.V1Namespace(metadata=k.V1ObjectMeta(name=name, labels=self.namespaces[name]))
 
-    def delete_namespace(self, name):
+    def delete_namespace(self, name, _request_timeout=None):
+        self.timeouts.append(_request_timeout)
         self.log.append(f"delete Namespace/{name}")
         del self.namespaces[name]
 
-    def read_namespaced_service_account(self, name, namespace):
+    def read_namespaced_service_account(self, name, namespace, _request_timeout=None):
+        self.timeouts.append(_request_timeout)
         self.log.append(f"wait ServiceAccount/{name}")
         return k.V1ServiceAccount()
 
-    def list_namespaced_pod(self, namespace):
+    def list_namespaced_pod(self, namespace, _request_timeout=None):
+        self.timeouts.append(_request_timeout)
         return k.V1PodList(items=self.pods)
 
-    def create_namespaced_service_account_token(self, name, namespace, body):
+    def create_namespaced_service_account_token(self, name, namespace, body, _request_timeout=None):
+        self.timeouts.append(_request_timeout)
         self.log.append(f"token {name} ttl={body.spec.expiration_seconds}")
         expires = datetime(2030, 1, 1, tzinfo=UTC)
         return SimpleNamespace(

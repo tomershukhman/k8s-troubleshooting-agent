@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     # and its current context.
     kubeconfig: Path | None = None
     kube_context: str | None = None
+    kube_timeout_seconds: PositiveFloat = 30  # per Kubernetes API call with the admin kubeconfig
 
     # Scenarios
     scenarios_dir: Path = Path("scenarios")

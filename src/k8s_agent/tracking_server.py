@@ -47,7 +47,9 @@ def install(settings: Settings, c: AdminClients, progress: Progress) -> int | No
     state = [ln for ln in done.stdout.splitlines() if ln.startswith(("STATUS:", "REVISION:"))]
     progress(f"MLflow tracking server ready ({', '.join(state)})")
     services = c.core.list_namespaced_service(
-        s.mlflow_namespace, label_selector=f"app.kubernetes.io/instance={s.mlflow_release}"
+        s.mlflow_namespace,
+        label_selector=f"app.kubernetes.io/instance={s.mlflow_release}",
+        _request_timeout=c.timeout,
     ).items
     lb = [spec for spec in (present(svc.spec) for svc in services) if spec.type == "LoadBalancer"]
     return present(lb[0].ports)[0].port if lb else None

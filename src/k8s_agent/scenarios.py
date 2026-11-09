@@ -132,7 +132,7 @@ def live_state(pods: list[client.V1Pod]) -> ReadyWhen:
 
 def fault_live(scn: Scenario, c: AdminClients) -> bool:
     """The scenario's `ready_when` holds: its fault can be observed."""
-    got = live_state(c.core.list_namespaced_pod(scn.namespace).items)
+    got = live_state(c.core.list_namespaced_pod(scn.namespace, _request_timeout=c.timeout).items)
     want = scn.spec.ready_when
     return all(getattr(got, f) >= getattr(want, f) for f in ReadyWhen.model_fields)
 
@@ -149,7 +149,11 @@ def down(
     scn: Scenario, c: AdminClients, *, timeout: float, poll: float, progress: Progress
 ) -> bool:
     """Delete the scenario namespace and wait until it's gone. False if it was absent."""
-    ns = read_or_none(lambda: c.core.read_namespace(scn.namespace))
+
+    def read() -> client.V1Namespace:
+        return c.core.read_namespace(scn.namespace, _request_timeout=c.timeout)
+
+    ns = read_or_none(read)
     if ns is None:
         return False
     meta = present(ns.metadata)
@@ -159,11 +163,11 @@ def down(
             f"(no {OWNER_LABEL}={OWNER_VALUE} label); refusing to touch it"
         )
     if meta.deletion_timestamp is None:
-        c.core.delete_namespace(scn.namespace)
+        c.core.delete_namespace(scn.namespace, _request_timeout=c.timeout)
         progress(f"deleting namespace {scn.namespace}")
 
     def gone() -> bool:
-        return read_or_none(lambda: c.core.read_namespace(scn.namespace)) is None
+        return read_or_none(read) is None
 
     wait(f"namespace {scn.namespace} still exists", gone, timeout=timeout, poll=poll)
     return True
@@ -186,7 +190,9 @@ def up(
     # Pods created before the namespace's default ServiceAccount exists are rejected, which
     # leaves FailedCreate warnings the agent would see.
     def has_default_sa() -> bool:
-        read = lambda: c.core.read_namespaced_service_account("default", scn.namespace)  # noqa: E731
+        read = lambda: c.core.read_namespaced_service_account(  # noqa: E731
+            "default", scn.namespace, _request_timeout=c.timeout
+        )
         return read_or_none(read) is not None
 
     wait("no default ServiceAccount", has_default_sa, timeout=ready_timeout, poll=poll)

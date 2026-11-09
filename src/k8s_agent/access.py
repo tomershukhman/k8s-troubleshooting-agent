@@ -61,16 +61,18 @@ def request_token(c: AdminClients, service_account: str, ttl_seconds: int) -> tu
     body = client.AuthenticationV1TokenRequest(
         spec=client.V1TokenRequestSpec(audiences=[], expiration_seconds=ttl_seconds)
     )
-    resp = c.core.create_namespaced_service_account_token(service_account, AGENT_NAMESPACE, body)
+    resp = c.core.create_namespaced_service_account_token(
+        service_account, AGENT_NAMESPACE, body, _request_timeout=c.timeout
+    )
     status = present(resp.status)
     return present(status.token), present(status.expiration_timestamp)
 
 
-def whoami(kubeconfig: dict) -> str:
+def whoami(kubeconfig: dict, timeout: float) -> str:
     """The username the API server sees for a kubeconfig (proves the token and CA work)."""
     with config.new_client_from_config_dict(kubeconfig) as api:  # closes its connections
         review = client.AuthenticationV1Api(api).create_self_subject_review(
-            client.V1SelfSubjectReview()
+            client.V1SelfSubjectReview(), _request_timeout=timeout
         )
     user = present(present(review.status).user_info)
     return present(user.username)
@@ -91,7 +93,7 @@ def setup(
     for sa, path in kubeconfigs.items():
         token, expires = request_token(c, sa, token_ttl_seconds)
         kubeconfig = kubeconfig_for(c.api.configuration, sa, token)
-        username = whoami(kubeconfig)
+        username = whoami(kubeconfig, c.timeout)
         write_private(path, yaml.safe_dump(kubeconfig, sort_keys=False))
         progress(f"wrote {path} ({username}, expires {expires.isoformat()})")
         creds.append(Credential(username, path, expires))

@@ -65,6 +65,7 @@ def test_up_recreates_the_namespace_then_its_access_then_the_app():
         "apply Deployment/checkout",
         "apply Service/checkout",
     ]
+    assert kube.timeouts and set(kube.timeouts) == {FakeKube.TIMEOUT}  # every call is limited
 
 
 def test_up_waits_until_the_fault_is_live():

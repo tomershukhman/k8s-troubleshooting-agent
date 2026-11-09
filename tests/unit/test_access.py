@@ -14,9 +14,11 @@ from tests.fakes import FakeKube
 
 
 def setup(kube: FakeKube, tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        access, "whoami", lambda kc: f"system:serviceaccount:{kc['users'][0]['user']['token']}"
-    )
+    def whoami(kc, timeout):
+        kube.timeouts.append(timeout)
+        return f"system:serviceaccount:{kc['users'][0]['user']['token']}"
+
+    monkeypatch.setattr(access, "whoami", whoami)
     paths = {access.READER: tmp_path / "r.kubeconfig", access.REMEDIATOR: tmp_path / "m.kubeconfig"}
     creds = access.setup(
         kube.clients, rbac_file=get_settings().rbac_file, token_ttl_seconds=3600,
@@ -49,6 +51,7 @@ def test_setup_applies_the_identities_then_writes_a_kubeconfig_each(tmp_path, mo
     creds, paths = setup(kube, tmp_path, monkeypatch)
     assert kube.log[:2] == ["apply Namespace/k8s-agent", "apply ServiceAccount/reader"]
     assert kube.log[-2:] == ["token reader ttl=3600", "token remediator ttl=3600"]
+    assert kube.timeouts == [FakeKube.TIMEOUT] * 4  # each token request and whoami
     assert [c.username for c in creds] == [
         "system:serviceaccount:tok-reader",
         "system:serviceaccount:tok-remediator",
@@ -107,10 +110,17 @@ def test_whoami_closes_its_client(monkeypatch):
     closed = []
     monkeypatch.setattr(client.ApiClient, "close", lambda api: closed.append(api))
     review = SimpleNamespace(status=SimpleNamespace(user_info=SimpleNamespace(username="u")))
-    api = SimpleNamespace(create_self_subject_review=lambda _body: review)
+    timeouts = []
+
+    def review_self(_body, _request_timeout):
+        timeouts.append(_request_timeout)
+        return review
+
+    api = SimpleNamespace(create_self_subject_review=review_self)
     monkeypatch.setattr(access.client, "AuthenticationV1Api", lambda _client: api)
     kubeconfig = access.kubeconfig_for(FakeKube().clients.api.configuration, "reader", "t")
-    assert access.whoami(kubeconfig) == "u" and len(closed) == 1
+    assert access.whoami(kubeconfig, 5) == "u" and len(closed) == 1
+    assert timeouts == [5]  # a time limit on its call too
 
 
 def test_an_existing_file_is_made_private_before_the_new_text_is_written(tmp_path, monkeypatch):
