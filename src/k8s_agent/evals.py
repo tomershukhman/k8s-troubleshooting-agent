@@ -20,7 +20,8 @@ Needs the full `mlflow` package (the `eval` extra); the agent itself uses only m
 import asyncio
 import contextvars
 import os
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
 import mlflow
@@ -283,19 +284,32 @@ def criteria_line(marks: dict[str, float]) -> str:
     return " AND ".join(f"`{metric}` >= {minimum!r}" for metric, minimum in marks.items())
 
 
-def missed(result: Any, marks: dict[str, float], runs: int) -> list[str]:
-    """The pass marks `result` (an EvaluationResult) misses; empty = the scenario passed.
-    Counted from each run's verdict, so a run with no readable verdict (a judge API error, an
-    answer MLflow couldn't parse) counts as failed: MLflow's own metrics leave it out."""
-    df, problems = result.result_df, []
+Verdicts = dict[str, list[bool | None]]  # per check, its verdict in each run
+
+
+def verdicts(result: Any, checks: Iterable[str]) -> Verdicts:
+    """Each check's verdict in each run that left a trace, from `result` (an EvaluationResult)
+    and its table of scores. None: no readable verdict (a judge API error, an answer MLflow
+    couldn't parse)."""
+    df = result.result_df
+    columns = set() if df is None else set(df.columns)
+    return {
+        name: [verdict_of(v) for v in df[f"{name}/value"]] if f"{name}/value" in columns else []
+        for name in checks
+    }
+
+
+def missed(found: Verdicts, marks: dict[str, float], runs: int) -> list[str]:
+    """The pass marks missed; empty = the scenario passed. Counted from each run's verdict, so a
+    run with no readable verdict, or no trace, counts as failed: MLflow's own metrics leave it
+    out."""
+    problems = []
     for metric, minimum in marks.items():
         name = metric.rsplit("/", 1)[0]
-        column = f"{name}/value"
-        values = [] if df is None or column not in df else list(df[column])
-        verdicts = [verdict_of(v) for v in values]
-        passes = verdicts.count(True)
+        got = found[name]
+        passes = got.count(True)
         if passes / runs < minimum:
-            unread = runs - passes - verdicts.count(False)
+            unread = runs - passes - got.count(False)
             note = f" ({unread} without a verdict)" if unread else ""
             problems.append(f"{name}: passed {passes} of {runs} runs{note}")
     return problems
@@ -387,16 +401,8 @@ class ScenarioResult:
     failures: list[str]
     planned: int  # runs asked for; `runs` has one entry per run that left a trace
     runs: list[dict[str, Any]]  # per run: its scores, what it took, its run record
+    passes: dict[str, int] = field(default_factory=dict)  # per check, the runs that passed it
     fix: ScenarioResult | None = None  # the scenario's fix run, if it has an expected fix
-
-    @property
-    def passes(self) -> dict[str, int]:
-        """Per check, the runs that passed it."""
-        names = {n for run in self.runs for n in run["scores"]}
-        return {
-            n: sum(verdict_of(run["scores"].get(n, {}).get("value")) is True for run in self.runs)
-            for n in names
-        }
 
     @property
     def passed(self) -> bool:
@@ -462,13 +468,15 @@ def _evaluate(
         raise agent.not_started
     ids = [] if result.result_df is None else list(result.result_df["trace_id"])
     traces = [mlflow.get_trace(trace_id) for trace_id in ids]  # with the scores logged on them
+    found = verdicts(result, [metric.rsplit("/", 1)[0] for metric in marks])
     return ScenarioResult(
         name=name,
         run_id=run.info.run_id,
         metrics={k: float(v) for k, v in result.metrics.items()},
-        failures=missed(result, marks, runs),  # a run without a trace has no verdicts: failed
+        failures=missed(found, marks, runs),  # a run without a trace has no verdicts: failed
         planned=runs,
         runs=[per_run(t, agent.records.get(t.info.trace_id)) for t in traces if t is not None],
+        passes={check: got.count(True) for check, got in found.items()},
     )
 
 

@@ -293,7 +293,8 @@ ALL_PASS = {n: [True, True, "yes"] for n in evals.MOST_RUNS + evals.EVERY_RUN}
 
 
 def missed(**values: list) -> list[str]:
-    return evals.missed(result(ALL_PASS | values), evals.criteria(get_settings()), 3)
+    found = evals.verdicts(result(ALL_PASS | values), ALL_PASS)
+    return evals.missed(found, evals.criteria(get_settings()), 3)
 
 
 def test_two_of_three_is_enough_for_most_checks_but_not_for_exact_ones():
