@@ -33,14 +33,14 @@ class Settings(BaseSettings):
     scenario_delete_timeout_seconds: PositiveFloat = 120
     scenario_poll_seconds: PositiveFloat = 2
 
-    # Agent identities (SPEC §3.5)
+    # Agent identities (DESIGN 3.5)
     rbac_file: Path = Path("deploy/rbac.yaml")
     token_ttl_hours: float = Field(default=12, ge=MIN_TOKEN_TTL_HOURS)
     remediator_kubeconfig: Path = Path(".kube-agent/remediator.kubeconfig")
     # Where the agent may propose a fix (the remediator's RoleBinding grants the same).
     remediation_namespaces: NameList = ["shop-checkout"]
 
-    # The fix (SPEC 3.4). The wait for a person's answer has its own clock: it isn't agent
+    # The fix (DESIGN 3.6). The wait for a person's answer has its own clock: it isn't agent
     # working time (AGENT_RUN_MAX_SECONDS), and when it runs out the fix is rejected.
     approval_timeout_seconds: PositiveFloat = 600
     # The Service's ready endpoints after a fix: the longest wait, and how often to check.
@@ -48,13 +48,13 @@ class Settings(BaseSettings):
     fix_endpoints_poll_seconds: PositiveFloat = 1
     remediator_timeout_seconds: PositiveFloat = 30  # per Kubernetes API call as the remediator
 
-    # MCP server. Host networking (SPEC §3.10): the same URL works from the host and from
+    # MCP server. Host networking (DESIGN 3.11): the same URL works from the host and from
     # containers. Unset AGENT_MCP_URL = http://localhost:<AGENT_MCP_PORT>/mcp.
     mcp_port: int = Field(default=8080, ge=1, le=65535)
     mcp_url: str = ""
     mcp_timeout_seconds: PositiveFloat = 30  # per MCP call
 
-    # The agents (SPEC §2.1 stopping rule, §4.6). The API key is read from ANTHROPIC_API_KEY
+    # The agents (DESIGN 3.3, run limits). The API key is read from ANTHROPIC_API_KEY
     # (no AGENT_ prefix); unset = the provider's own lookup.
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     user_id: str | None = None  # who is talking; unset = the OS user
@@ -81,7 +81,6 @@ class Settings(BaseSettings):
     tool_max_retries: int = Field(default=2, ge=0)  # failed MCP calls, except refused or not found
     tool_retry_delay_seconds: float = Field(default=1.0, ge=0)  # first wait; doubles each retry
     tool_output_max_chars: PositiveInt = 40000  # safety cap per tool result
-    tool_output_strip_fields: NameList = ["managedFields"]  # noise removed (never spec/status)
     pod_log_tail_lines: PositiveInt = 100  # max lines pods_log returns
     evidence_excerpt_chars: PositiveInt = 1500  # output shown per cited step in the result
     progress_summary_chars: PositiveInt = 200  # reasoning summary length in progress lines
@@ -90,7 +89,7 @@ class Settings(BaseSettings):
     # display shows the same events there).
     log_file: Path | None = None
 
-    # MLflow tracing (SPEC §3.7), under MLflow's own variable names. No tracking URI = no
+    # MLflow tracing (DESIGN 3.9), under MLflow's own variable names. No tracking URI = no
     # tracing. MLflow's own HTTP defaults retry for minutes, so a stopped server would hold up
     # exit: these fail fast instead (tracing never decides how a run ends).
     mlflow_tracking_uri: str | None = Field(default=None, validation_alias="MLFLOW_TRACKING_URI")
@@ -109,7 +108,7 @@ class Settings(BaseSettings):
     # working directory's .git; the image has none, so its build sets this.
     git_commit: str | None = None
 
-    # Evals (SPEC 2.3, 3.6): each scenario's question, asked this many times. One run checks
+    # Evals (DESIGN 3.8): each scenario's question, asked this many times. One run checks
     # nothing broke; more runs measure how reliable the agent is. The diagnosis and the two
     # judges must pass in at least this share of the runs (1 of 1, 2 of 3, 7 of 10); the exact
     # checks (evidence exists, the right tools, safe actions) in every run.
@@ -125,7 +124,7 @@ class Settings(BaseSettings):
     eval_mlflow_experiment_name: str = "k8s-agent-evals"
     eval_results_dir: Path = Path("eval-results")  # one JSON file per `agent eval`
 
-    @field_validator("remediation_namespaces", "tool_output_strip_fields", mode="before")
+    @field_validator("remediation_namespaces", mode="before")
     @classmethod
     def _comma_separated(cls, v: Any) -> Any:
         return [part.strip() for part in v.split(",") if part.strip()] if isinstance(v, str) else v

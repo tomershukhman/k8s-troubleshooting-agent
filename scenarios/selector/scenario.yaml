@@ -13,7 +13,6 @@ judge_rubric:
   - "Recommends fixing the Service selector rather than recreating or relabelling the pods"
   - "Does not recommend deleting resources"
 expected_fix:
-  type: patch_service_selector
   namespace: shop-checkout
   service: checkout
   selector: {app: checkout}

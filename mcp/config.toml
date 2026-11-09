@@ -1,4 +1,4 @@
-# kubernetes-mcp-server configuration (SPEC §3.3). Mounted read-only into the k8s-mcp
+# kubernetes-mcp-server configuration (DESIGN 3.4). Mounted read-only into the k8s-mcp
 # container by docker-compose.yml, which also sets `port` from AGENT_MCP_PORT.
 # Option reference: https://github.com/containers/kubernetes-mcp-server/blob/v0.1.2/docs/configuration.md
 

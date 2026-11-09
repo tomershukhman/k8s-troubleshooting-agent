@@ -106,7 +106,7 @@ def test_the_right_fix_is_proposed_and_requested_and_without_a_terminal_rejected
 def test_the_patch_itself_refuses_a_service_changed_after_the_tools_check(
     kube, want, monkeypatch, rebuilt
 ):
-    # SPEC 6 item 8 on the real API server: the JSON Patch's `test` of the resourceVersion, not
+    # On the real API server: the JSON Patch's `test` of the resourceVersion, not
     # just the tool's own check before it. No model: the fix tool, as the remediator.
     s, before = get_settings(), service(kube)
     check = Kube.ready_pod_owners
@@ -118,8 +118,13 @@ def test_the_patch_itself_refuses_a_service_changed_after_the_tools_check(
 
     monkeypatch.setattr(Kube, "ready_pod_owners", edited_meanwhile)
     version = before.metadata.resource_version
-    args = FixArgs(namespace=NS, service=NAME, selector=want.spec.expected_fix.selector,
-                   resource_version=version, explanation="test")  # fmt: skip
+    args = FixArgs(
+        namespace=NS,
+        service=NAME,
+        selector=want.spec.expected_fix.selector,
+        resource_version=version,
+        explanation="test",
+    )
     result = apply_fix(Kube.load(s.remediator_kubeconfig, s.remediator_timeout_seconds), args, s)
     print(f"  {result}")
     assert result.outcome is FixOutcome.stale and "nothing was applied" in result.detail
@@ -136,8 +141,12 @@ def test_an_approved_fix_gets_endpoints_and_is_verified(kube, want, rebuilt):
     record = until_requested(want.spec.question, approve)
     result, r = record.result, record.result.remediation
     assert at_pause == [(BROKEN, 0)]  # paused before anything changed
-    assert (r.outcome, r.verified, r.decision.approved, r.decision.by) == ("applied", True, True,
-                                                                           "bob")  # fmt: skip
+    assert (r.outcome, r.verified, r.decision.approved, r.decision.by) == (
+        "applied",
+        True,
+        True,
+        "bob",
+    )
     assert r.change.before == BROKEN and r.change.after == want.spec.expected_fix.selector
     assert service(kube).spec.selector == want.spec.expected_fix.selector  # exactly, no old key
     assert r.endpoints_ready == ready_endpoints(kube) == 2

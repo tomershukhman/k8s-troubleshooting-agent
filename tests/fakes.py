@@ -160,14 +160,8 @@ metadata:
   namespace: shop-checkout
   labels:
     app: checkout
-  managedFields:
-  - manager: kubectl
-    operation: Update
 spec:
   replicas: 2
-  template:
-    metadata:
-      managedFields: kept, under spec
 status:
   readyReplicas: 2
 """
@@ -260,9 +254,12 @@ class FakeKube:
         self.resources = SimpleNamespace(get=lambda **kw: SimpleNamespace(**kw))
         conf = k.Configuration(host="https://127.0.0.1:6443")
         self.clients = AdminClients(
-            api=SimpleNamespace(configuration=conf), core=self, dynamic=self, context="fake",
+            api=SimpleNamespace(configuration=conf),
+            core=self,
+            dynamic=self,
+            context="fake",
             timeout=self.TIMEOUT,
-        )  # fmt: skip
+        )
 
     def server_side_apply(self, res, body, namespace, field_manager, force_conflicts):
         self.applied.append(body)
@@ -329,20 +326,26 @@ class FakeServices:
 
     def list_namespaced_pod(self, namespace, label_selector=None, **_):
         want = dict(kv.split("=", 1) for kv in label_selector.split(",")) if label_selector else {}
-        return k.V1PodList(items=[
-            labelled_pod(name, labels, ready, owner=None if name in self.unowned else OWNER)
-            for name, (labels, ready) in self.pods.items() if want.items() <= labels.items()
-        ])  # fmt: skip
+        return k.V1PodList(
+            items=[
+                labelled_pod(name, labels, ready, owner=None if name in self.unowned else OWNER)
+                for name, (labels, ready) in self.pods.items()
+                if want.items() <= labels.items()
+            ]
+        )
 
     def list_namespaced_endpoint_slice(self, namespace, label_selector, **_):
         """One endpoint per ready pod the selector matches."""
         ready = k.V1EndpointConditions(ready=True)
         endpoints = [
-            k.V1Endpoint(addresses=[f"10.0.0.{i}"], conditions=ready,
-                         target_ref=k.V1ObjectReference(kind="Pod", name=name, uid=name))
+            k.V1Endpoint(
+                addresses=[f"10.0.0.{i}"],
+                conditions=ready,
+                target_ref=k.V1ObjectReference(kind="Pod", name=name, uid=name),
+            )
             for i, (name, (labels, is_ready)) in enumerate(self.pods.items(), 1)
             if is_ready and self.selector.items() <= labels.items()
-        ]  # fmt: skip
+        ]
         return k.V1EndpointSliceList(
             items=[k.V1EndpointSlice(address_type="IPv4", endpoints=endpoints)]
         )
@@ -364,11 +367,16 @@ OWNER = ("ReplicaSet", "checkout-69db948c9f")
 def labelled_pod(
     name: str, labels: dict[str, str], ready: bool, owner: tuple[str, str] | None = None
 ) -> k.V1Pod:
-    refs = [  # an owner that isn't the controller first: only the controller counts
-        k.V1OwnerReference(api_version="v1", kind="ConfigMap", name="other", uid="u0"),
-        k.V1OwnerReference(api_version="apps/v1", kind=owner[0], name=owner[1], uid="u1",
-                           controller=True),
-    ] if owner else None  # fmt: skip
+    refs = (
+        [  # an owner that isn't the controller first: only the controller counts
+            k.V1OwnerReference(api_version="v1", kind="ConfigMap", name="other", uid="u0"),
+            k.V1OwnerReference(
+                api_version="apps/v1", kind=owner[0], name=owner[1], uid="u1", controller=True
+            ),
+        ]
+        if owner
+        else None
+    )
     p = pod(ready=ready)
     p.metadata = k.V1ObjectMeta(name=name, labels=labels, owner_references=refs)
     return p

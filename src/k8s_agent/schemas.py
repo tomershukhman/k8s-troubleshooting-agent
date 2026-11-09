@@ -1,4 +1,4 @@
-"""The diagnosis vocabulary and the agents' answer schemas (SPEC §4.2).
+"""The diagnosis vocabulary and the agents' answer schemas (DESIGN 2, "What comes back").
 
 Only what Claude's structured output enforces lives here: types, enums, required fields. The
 consistency rules (no_fault ↔ category none, evidence required, ...) are code checks

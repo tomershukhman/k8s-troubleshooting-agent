@@ -1,4 +1,4 @@
-"""The remediator (SPEC 3.4): the agent that applies the one supported fix, a Service selector
+"""The remediator (DESIGN 3.6): the agent that applies the one supported fix, a Service selector
 change, as the `remediator` identity only.
 
 It takes the investigator's proposed fix, checks with its own read tools that the exact new
@@ -105,8 +105,10 @@ def apply_fix(kube: Kube, args: FixArgs, settings: Settings) -> FixResult:
 
 
 def stale(args: FixArgs, version: str | None, before: dict[str, str] | None) -> FixResult:
-    detail = (f"the Service changed after the remediator read it (version "
-              f"{args.resource_version} → {version}); nothing was applied")  # fmt: skip
+    detail = (
+        f"the Service changed after the remediator read it (version "
+        f"{args.resource_version} → {version}); nothing was applied"
+    )
     return FixResult(FixOutcome.stale, detail, before)
 
 
@@ -159,16 +161,20 @@ def tools(load_kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
         """Read a Service: its selector and its resourceVersion."""
         svc = read(lambda k: k.service(namespace, name))
         selector, version = present(svc.spec).selector, present(svc.metadata).resource_version
-        return capped(f"Service {namespace}/{name}: selector {labels(selector)}, "
-                      f"resourceVersion {version}")  # fmt: skip
+        return capped(
+            f"Service {namespace}/{name}: selector {labels(selector)}, resourceVersion {version}"
+        )
 
     def list_pods(namespace: str, selector: dict[str, str] | None = None) -> str:
         """List the pods in a namespace, or only those an exact label selector matches: each
         with whether it is ready, and its labels."""
         pods = read(lambda k: k.pods(namespace, selector))
         which = f"matching {labels(selector)}" if selector else "in total"
-        rows = [f"{present(p.metadata).name}  {'ready' if pod_ready(p) else 'not ready'}  "
-                f"labels {labels(present(p.metadata).labels)}" for p in pods]  # fmt: skip
+        rows = [
+            f"{present(p.metadata).name}  {'ready' if pod_ready(p) else 'not ready'}  "
+            f"labels {labels(present(p.metadata).labels)}"
+            for p in pods
+        ]
         summary = f"{sum(map(pod_ready, pods))} of {len(pods)} pods ready, {which}"
         return capped("\n".join([summary, *rows]))
 
@@ -189,12 +195,15 @@ def tools(load_kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
             result = FixResult(FixOutcome.failed, str(e))
         return f"{result.outcome}: {result.detail}", asdict(result)
 
-    reads = [StructuredTool.from_function(f) for f in (get_service, list_pods,
-                                                        list_endpoint_slices)]  # fmt: skip
+    reads = [
+        StructuredTool.from_function(f) for f in (get_service, list_pods, list_endpoint_slices)
+    ]
     fix = StructuredTool.from_function(
-        patch_service_selector, name=FIX_TOOL, args_schema=FixArgs,
+        patch_service_selector,
+        name=FIX_TOOL,
+        args_schema=FixArgs,
         response_format="content_and_artifact",
-    )  # fmt: skip
+    )
     return [*reads, fix]
 
 
@@ -221,7 +230,7 @@ def build_remediator(
         model,
         tools(load_kube, settings),
         system_prompt=PROMPT,
-        response_format=ProviderStrategy(RemediatorAnswer),  # native structured output (SPEC 3.2)
+        response_format=ProviderStrategy(RemediatorAnswer),  # native structured output
         middleware=middleware,
         name="remediator",
     )
@@ -270,8 +279,13 @@ def read_remediation(
     )
     if result is not None:  # the fix tool ran
         detail = result.detail + (f"; then the remediator stopped: {stopped}" if stopped else "")
-        return Remediation(change=change, outcome=result.outcome, detail=detail,
-                           endpoints_ready=result.endpoints_ready, steps=steps)  # fmt: skip
+        return Remediation(
+            change=change,
+            outcome=result.outcome,
+            detail=detail,
+            endpoints_ready=result.endpoints_ready,
+            steps=steps,
+        )
     if stopped:
         detail = f"the remediator stopped before the fix tool ran: {stopped}"
         return Remediation(change=change, outcome=FixOutcome.failed, detail=detail, steps=steps)

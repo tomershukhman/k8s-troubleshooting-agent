@@ -1,4 +1,4 @@
-# The pipeline, one stage after another (SPEC 1, CI):
+# The pipeline, one stage after another (DESIGN 3.11):
 #   lint → unit tests → build image → publish image → mlflow evals
 # The evals pull the image just published, so they grade the artifact that ships. Pull requests
 # to main run every stage; pushes to main and v* tags stop after publishing (latest on main); the

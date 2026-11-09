@@ -1,4 +1,4 @@
-"""The scenario folders and `scenario up|down` (SPEC 2.2, 4.4), with a fake API. No cluster."""
+"""The scenario folders and `scenario up|down` (DESIGN 3.7), with a fake API. No cluster."""
 
 import pytest
 
@@ -48,8 +48,11 @@ def test_live_state_counts_live_pods_only():
 
 @pytest.fixture(autouse=True)
 def quick(env):
-    env(scenario_ready_timeout_seconds="1", scenario_delete_timeout_seconds="1",
-        scenario_poll_seconds="0.01")  # fmt: skip
+    env(
+        scenario_ready_timeout_seconds="1",
+        scenario_delete_timeout_seconds="1",
+        scenario_poll_seconds="0.01",
+    )
 
 
 def up(kube: FakeKube, name: str = "selector") -> None:
@@ -80,7 +83,7 @@ def test_up_waits_until_the_fault_is_live(env):
     up(FakeKube(pods=[pod(ready=False, restarts=2)]), "crashloop")
 
 
-def test_up_and_down_refuse_a_namespace_that_is_not_ours():
+def test_a_namespace_that_is_not_ours_is_refused_and_left_untouched():
     kube = FakeKube()
     kube.namespaces["shop-checkout"] = {"team": "payments"}
     with pytest.raises(scenarios.ScenarioError, match="refusing to touch it"):

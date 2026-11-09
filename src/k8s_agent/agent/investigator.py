@@ -1,4 +1,4 @@
-"""The investigator (SPEC 3.2, 3.3): the agent that diagnoses, with the read-only MCP tools only.
+"""The investigator (DESIGN 3.1, 3.4): the agent that diagnoses, with the read-only MCP tools only.
 A LangChain agent (`create_agent`): the system prompt, native structured output (`Diagnosis`),
 and the middleware that tags each tool result as evidence, retries failed calls, and enforces
 the per-round and run-wide limits. The graph (graph.py) adds it as its `investigate` node."""
@@ -87,7 +87,7 @@ def build_investigator(
         tools,
         system_prompt=system_prompt(settings),
         # Native structured output, set explicitly: a bare schema lets LangChain fall back to a
-        # forced tool call, which Sonnet 5.5 rejects (SPEC §3.2).
+        # forced tool call, which Sonnet 5.5 rejects.
         response_format=ProviderStrategy(Diagnosis),
         middleware=middleware,
         context_schema=RunContext,

@@ -1,4 +1,4 @@
-"""The broken scenarios (SPEC §2.2, §4.4). Each `scenarios/<folder>/` holds plain Kubernetes
+"""The broken scenarios (DESIGN 3.7). Each `scenarios/<folder>/` holds plain Kubernetes
 YAML in `manifests/` (its Namespace, the agent's RoleBindings there, and the app) and a
 `scenario.yaml` with the question and the expected answers. The folder name describes the
 fault, so it never reaches the cluster."""
@@ -38,7 +38,7 @@ class ResourceName(Strict):
 
 
 class Expected(Strict):
-    """Accepted answer sets (SPEC §2.2)."""
+    """Accepted answer sets."""
 
     status: DiagnosisStatus
     fault_categories: list[FaultCategory]
@@ -46,9 +46,8 @@ class Expected(Strict):
 
 
 class ExpectedFix(Strict):
-    """The fix the scenario expects the agent to propose (SPEC §3.4)."""
+    """The fix the scenario expects the agent to propose (DESIGN 3.6)."""
 
-    type: str
     namespace: str
     service: str
     selector: dict[str, str]

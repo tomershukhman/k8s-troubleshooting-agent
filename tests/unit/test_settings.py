@@ -9,12 +9,8 @@ from k8s_agent.config import get_settings
 
 
 def test_lists_are_comma_separated(env):
-    env(remediation_namespaces=" shop-a, shop-b ,,", tool_output_strip_fields="a,b")
-    s = get_settings()
-    assert (s.remediation_namespaces, s.tool_output_strip_fields) == (
-        ["shop-a", "shop-b"],
-        ["a", "b"],
-    )
+    env(remediation_namespaces=" shop-a, shop-b ,,")
+    assert get_settings().remediation_namespaces == ["shop-a", "shop-b"]
 
 
 def test_mcp_endpoint_follows_port_unless_set(env):

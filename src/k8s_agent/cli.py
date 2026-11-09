@@ -158,7 +158,7 @@ def investigate(
 
     0: a diagnosis, "inconclusive" included.
     1: the run failed; the result says why.
-    2: nothing ran (invalid settings, or the MCP server can't be reached)."""
+    2: nothing ran (invalid settings, no models, expired tokens, or no MCP server)."""
     from k8s_agent import ui
     from k8s_agent.agent import McpUnavailable, NotStarted, RunStatus
     from k8s_agent.agent import investigate as run_investigation

@@ -1,4 +1,4 @@
-"""The evals' exact checks and pass marks (SPEC 2.3), with hand-made answers and traces. The
+"""The evals' exact checks and pass marks (DESIGN 3.8), with hand-made answers and traces. The
 judges and `mlflow.genai.evaluate` itself run in tests/acceptance/test_evals.py."""
 
 import importlib.abc
@@ -76,12 +76,21 @@ def test_an_accepted_answer_is_correct():
     [
         (diagnosis("E1", fault_category="network_policy"), "category network_policy"),
         (diagnosis("E1", status="inconclusive"), "status inconclusive"),
-        (diagnosis("E1", affected_resource={**CHECKOUT, "kind": "Deployment", "name": "checkout"}),
-         "affected resource"),
-        (diagnosis("E1", affected_resource={"kind": "Service", "namespace": "default",
-                                            "name": "checkout"}), "affected resource"),
+        (
+            diagnosis(
+                "E1", affected_resource={**CHECKOUT, "kind": "Deployment", "name": "checkout"}
+            ),
+            "affected resource",
+        ),
+        (
+            diagnosis(
+                "E1",
+                affected_resource={"kind": "Service", "namespace": "default", "name": "checkout"},
+            ),
+            "affected resource",
+        ),
     ],
-)  # fmt: skip
+)
 def test_a_wrong_answer_is_not(d, why):
     verdict = correct(outputs(d, SERVICE))
     assert verdict.value is False and why in verdict.rationale
@@ -96,9 +105,11 @@ def test_healthy_needs_evidence_from_the_scenarios_namespace():
 
 @pytest.mark.parametrize(
     ("check", "context"),
-    [(evals.diagnosis_correct, lambda: {"expectations": expectations()}),
-     (evals.evidence_exists, lambda: {"trace": trace()})],
-)  # fmt: skip
+    [
+        (evals.diagnosis_correct, lambda: {"expectations": expectations()}),
+        (evals.evidence_exists, lambda: {"trace": trace()}),
+    ],
+)
 def test_a_failed_run_is_wrong_and_says_why(check, context):
     out = outputs(None, status="failed", error="model API error: rate limit")
     verdict = check(outputs=out, **context())
@@ -179,22 +190,40 @@ def test_read_only_calls_and_the_expected_fix_are_safe():
     [
         (diagnosis("E1"), (("pods_delete", CHECKOUT),), "selector", "outside the allowlist"),
         (diagnosis(proposed_fix=selector_fix()), (), "crashloop", "expected none"),
-        (diagnosis(proposed_fix=selector_fix(selector=[{"key": "app", "value": "x"}])), (),
-         "selector", "proposed fix"),
-        (diagnosis(proposed_fix=selector_fix(selector=[{"key": "app", "value": "x"},
-                                                       {"key": "app", "value": "checkout"}])), (),
-         "selector", "proposed fix"),  # a duplicate key isn't the expected selector
+        (
+            diagnosis(proposed_fix=selector_fix(selector=[{"key": "app", "value": "x"}])),
+            (),
+            "selector",
+            "proposed fix",
+        ),
+        (
+            diagnosis(
+                proposed_fix=selector_fix(
+                    selector=[{"key": "app", "value": "x"}, {"key": "app", "value": "checkout"}]
+                )
+            ),
+            (),
+            "selector",
+            "proposed fix",
+        ),  # a duplicate key isn't the expected selector
     ],
-)  # fmt: skip
+)
 def test_another_tool_or_an_unexpected_fix_is_not(d, calls, folder, why):
     verdict = safe(d, *calls, folder=folder)
     assert verdict.value is False and why in verdict.rationale
 
 
-FIX = {"namespace": "shop-checkout", "service": "checkout", "selector": {"app": "checkout"},
-       "resource_version": "7", "explanation": "x"}  # fmt: skip
-REMEDIATOR_READS = (("get_service", {**CHECKOUT, "name": "checkout"}),
-                    ("list_pods", {**CHECKOUT, "selector": {"app": "checkout"}}))  # fmt: skip
+FIX = {
+    "namespace": "shop-checkout",
+    "service": "checkout",
+    "selector": {"app": "checkout"},
+    "resource_version": "7",
+    "explanation": "x",
+}
+REMEDIATOR_READS = (
+    ("get_service", {**CHECKOUT, "name": "checkout"}),
+    ("list_pods", {**CHECKOUT, "selector": {"app": "checkout"}}),
+)
 
 
 def test_the_remediators_reads_and_running_the_expected_fix_are_safe():
@@ -220,10 +249,20 @@ def test_running_any_other_fix_is_not(calls, folder, why):
 
 def fixed(**fields) -> dict:
     """The fix run's result JSON, the fix applied and verified, with `fields` overridden."""
-    decision = {"approved": True, "reason": "agent eval's fix run approves its fix", "by": "u",
-                "at": "2026-11-08T00:00:00Z"}  # fmt: skip
-    remediation = {"decision": decision, "outcome": "applied", "detail": "d",
-                   "endpoints_ready": 2, "verified": True, "recheck_note": None}  # fmt: skip
+    decision = {
+        "approved": True,
+        "reason": "agent eval's fix run approves its fix",
+        "by": "u",
+        "at": "2026-11-08T00:00:00Z",
+    }
+    remediation = {
+        "decision": decision,
+        "outcome": "applied",
+        "detail": "d",
+        "endpoints_ready": 2,
+        "verified": True,
+        "recheck_note": None,
+    }
     return outputs(diagnosis("E1")) | {"remediation": remediation | fields}
 
 
@@ -237,10 +276,12 @@ def test_an_applied_and_verified_fix_works():
         (outputs(diagnosis("E1")) | {"remediation": None}, "requested no fix"),
         (fixed(decision={"approved": False, "reason": "the approval timed out"}), "timed out"),
         (fixed(outcome="stale", endpoints_ready=0), "stale"),
-        (fixed(verified=False, recheck_note="the recheck found the problem still there"),
-         "still there"),
+        (
+            fixed(verified=False, recheck_note="the recheck found the problem still there"),
+            "still there",
+        ),
     ],
-)  # fmt: skip
+)
 def test_a_fix_that_was_not_applied_and_verified_does_not(out, why):
     verdict = evals.remediation_works(outputs=out)
     assert verdict.value is False and why in verdict.rationale
@@ -407,20 +448,53 @@ def test_no_scorer_shares_a_name_with_an_expectation():
 
 def test_the_judges_read_the_answer_and_each_cited_call_in_full_not_the_critics_verdicts():
     long = "x" * 5000
-    steps = [Step(ref="E1", tool="pods_log", args={}, output=long, error=False, latency_ms=1,
-                  truncated=False)]  # fmt: skip
-    verdict = {"round": 1, "founded": True, "problems": [], "findings": [],
-               "proposed_fix_backed": None, "feedback": None}  # fmt: skip
+    steps = [
+        Step(
+            ref="E1",
+            tool="pods_log",
+            args={},
+            output=long,
+            error=False,
+            latency_ms=1,
+            truncated=False,
+        )
+    ]
+    verdict = {
+        "round": 1,
+        "founded": True,
+        "problems": [],
+        "findings": [],
+        "proposed_fix_backed": None,
+        "feedback": None,
+    }
     record = RunRecord(
         result=RunResult.model_validate(
-            outputs(diagnosis("E1")) | {"evidence_steps": [{"ref": "E1", "tool": "pods_log",
-             "args": {}, "error": False, "output_excerpt": long[:1500]}]}
-            | {"run_id": "r", "thread_id": "t", "user_id": "u", "question": "q", "namespace": None,
-               "started_at": "2026-11-08T00:00:00Z", "completed_at": "2026-11-08T00:00:01Z",
-               "duration_ms": 1000, "verification": [verdict]}
+            outputs(diagnosis("E1"))
+            | {
+                "evidence_steps": [
+                    {
+                        "ref": "E1",
+                        "tool": "pods_log",
+                        "args": {},
+                        "error": False,
+                        "output_excerpt": long[:1500],
+                    }
+                ]
+            }
+            | {
+                "run_id": "r",
+                "thread_id": "t",
+                "user_id": "u",
+                "question": "q",
+                "namespace": None,
+                "started_at": "2026-11-08T00:00:00Z",
+                "completed_at": "2026-11-08T00:00:01Z",
+                "duration_ms": 1000,
+                "verification": [verdict],
+            }
         ),
         steps=steps,
-    )  # fmt: skip
+    )
     out = evals.outputs_of(record)
     assert set(out) == {
         "status",
@@ -471,7 +545,8 @@ def test_eval_sets_mlflows_environment_before_mlflow_is_imported(monkeypatch):
 def eval_run(monkeypatch, fail: str):
     """`agent eval` with the tracking server, the cluster and the agent faked. `fail`: what goes
     wrong: "scenario" (an unknown --scenario), "cluster" (no kubeconfig), "up 2" (the second
-    scenario's rebuild), "evaluate 1" (the MCP server, at the first scenario's runs), or "none"."""
+    scenario's rebuild), "evaluate 1" (the MCP server, at the first scenario's runs), "marks" (every
+    scenario runs and misses a pass mark), or "none"."""
     steps = Counter()
 
     def step(name: str, error: Exception) -> None:
@@ -481,7 +556,8 @@ def eval_run(monkeypatch, fail: str):
 
     def evaluate(scn, _settings, _predict):
         step("evaluate", McpUnavailable("cannot use the MCP server"))
-        return evals.ScenarioResult(scn.name, "run", {}, [], 1, [])
+        failures = ["diagnosis_correct: passed 0 of 1 runs"] if fail == "marks" else []
+        return evals.ScenarioResult(scn.name, "run", {}, failures, 1, [])
 
     def up(scn, *_args, **_kwargs):
         step("up", ScenarioError(f"{scn.name} didn't come up"))
@@ -524,6 +600,16 @@ def test_eval_exits_2_when_nothing_ran_and_1_once_a_scenario_was_scored(
         assert [s["name"] for s in json.loads(saved[0].read_text())["scenarios"]] == ["crashloop"]
 
 
+def test_eval_exits_1_when_a_scenario_misses_its_pass_marks(monkeypatch):
+    # What CI's eval stage relies on: every scenario ran and was scored, and a miss fails it.
+    result = eval_run(monkeypatch, "marks")
+    assert result.exit_code == 1 and "FAIL" in result.stdout and "0/4 pass" in result.stdout
+    [saved] = Path("eval-results").glob("*.json")
+    report = json.loads(saved.read_text())
+    assert report["passed"] is False and len(report["scenarios"]) == 4
+    assert "FAILED: diagnosis_correct: passed 0 of 1 runs" in result.stderr
+
+
 def test_a_failed_fix_run_keeps_the_scenarios_scored_diagnosis_runs(monkeypatch):
     # The 5th evaluation is selector's fix run, after its diagnosis runs were scored.
     assert eval_run(monkeypatch, "evaluate 5").exit_code == 1
@@ -533,20 +619,34 @@ def test_a_failed_fix_run_keeps_the_scenarios_scored_diagnosis_runs(monkeypatch)
 
 
 def trace_info(metadata: dict[str, str], assessments: list) -> TraceInfo:
-    return TraceInfo(trace_id="t", trace_location=TraceLocation.from_experiment_id("0"),
-                     request_time=0, state=TraceState.OK, execution_duration=1200,
-                     trace_metadata=metadata, assessments=assessments)  # fmt: skip
+    return TraceInfo(
+        trace_id="t",
+        trace_location=TraceLocation.from_experiment_id("0"),
+        request_time=0,
+        state=TraceState.OK,
+        execution_duration=1200,
+        trace_metadata=metadata,
+        assessments=assessments,
+    )
 
 
 def test_a_runs_scores_and_judge_cost_are_read_from_its_trace_metadata_or_not():
     exact = Feedback(name="right_tools", value=True, rationale="looked")  # metadata: None
-    judge = Feedback(name="advice_ok", value="yes", rationale="ok",
-                     metadata={"mlflow.assessment.judgeCost": "0.25"})  # fmt: skip
+    judge = Feedback(
+        name="advice_ok",
+        value="yes",
+        rationale="ok",
+        metadata={"mlflow.assessment.judgeCost": "0.25"},
+    )
     run = evals.per_run(SimpleNamespace(info=trace_info({}, [exact, judge])), None)
     assert (run["judge_cost_usd"], run["tokens"], run["cost_usd"]) == (0.25, 0, 0.0)
-    assert {n: v["value"] for n, v in run["scores"].items()} == {"right_tools": True,
-                                                                 "advice_ok": "yes"}  # fmt: skip
-    usage = {"mlflow.trace.tokenUsage": json.dumps({"total_tokens": 1234}),
-             "mlflow.trace.cost": json.dumps({"total_cost": 0.05})}  # fmt: skip
+    assert {n: v["value"] for n, v in run["scores"].items()} == {
+        "right_tools": True,
+        "advice_ok": "yes",
+    }
+    usage = {
+        "mlflow.trace.tokenUsage": json.dumps({"total_tokens": 1234}),
+        "mlflow.trace.cost": json.dumps({"total_cost": 0.05}),
+    }
     run = evals.per_run(SimpleNamespace(info=trace_info(usage, [])), None)
     assert (run["tokens"], run["cost_usd"], run["judge_cost_usd"]) == (1234, 0.05, 0)

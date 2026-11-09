@@ -22,10 +22,21 @@ def image() -> None:
 def in_agent(*command: str) -> subprocess.CompletedProcess:
     """`command` in the agent container, as compose runs it (no MCP server needed)."""
     return subprocess.run(
-        ["docker", "compose", "run", "--rm", "--no-deps", "-T", "--entrypoint", *command[:1],
-         "agent", *command[1:]],
-        capture_output=True, text=True,
-    )  # fmt: skip
+        [
+            "docker",
+            "compose",
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "--entrypoint",
+            *command[:1],
+            "agent",
+            *command[1:],
+        ],
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_the_agent_container_holds_only_the_remediator_kubeconfig_read_only():
@@ -42,10 +53,43 @@ def test_the_image_holds_no_secrets():
     # No settings, credentials or repository files anywhere in the image (the venv aside); as
     # root, to see every folder.
     found = subprocess.check_output(
-        ["docker", "run", "--rm", "--user", "0", "--entrypoint", "find", IMAGE, "/", "-xdev",
-         "-path", "/app/.venv", "-prune", "-o", "-path", "/proc", "-prune", "-o",
-         "(", "-name", ".env", "-o", "-name", "*.kubeconfig", "-o", "-name", ".kube-agent",
-         "-o", "-name", ".kube", "-o", "-name", ".git", ")", "-print"],
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "0",
+            "--entrypoint",
+            "find",
+            IMAGE,
+            "/",
+            "-xdev",
+            "-path",
+            "/app/.venv",
+            "-prune",
+            "-o",
+            "-path",
+            "/proc",
+            "-prune",
+            "-o",
+            "(",
+            "-name",
+            ".env",
+            "-o",
+            "-name",
+            "*.kubeconfig",
+            "-o",
+            "-name",
+            ".kube-agent",
+            "-o",
+            "-name",
+            ".kube",
+            "-o",
+            "-name",
+            ".git",
+            ")",
+            "-print",
+        ],
         text=True,
-    )  # fmt: skip
+    )
     assert found.split() == []

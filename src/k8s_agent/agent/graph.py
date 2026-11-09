@@ -23,9 +23,7 @@ import operator
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from langchain.agents.middleware import (
-    InputAgentState,
-)
+from langchain.agents.middleware import InputAgentState
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.structured_output import StructuredOutputValidationError
 from langchain_core.exceptions import ModelError, OutputParserException
@@ -44,9 +42,7 @@ from langgraph.types import Command
 from k8s_agent.agent import tool_output
 from k8s_agent.agent.critic import review
 from k8s_agent.agent.investigator import build_investigator
-from k8s_agent.agent.middleware import (
-    RunContext,
-)
+from k8s_agent.agent.middleware import RunContext
 from k8s_agent.agent.records import (
     Change,
     FixOutcome,
@@ -82,10 +78,22 @@ RERUN = "Re-run the investigation; the steps it took are in the run record."
 UNREADABLE = "The critic's verdict could not be read."
 # Our types in the checkpointed state: LangGraph's serializer wants them listed.
 CHECKPOINT_TYPES = [
-    Diagnosis, AffectedResource, Evidence, ProposedFix, SelectorLabel, DiagnosisStatus,
-    FaultCategory, FindingVerdict, PostFixCheck, RemediatorAnswer,
-    VerifyRound, Remediation, Change, FixStep, FixOutcome,
-]  # fmt: skip
+    Diagnosis,
+    AffectedResource,
+    Evidence,
+    ProposedFix,
+    SelectorLabel,
+    DiagnosisStatus,
+    FaultCategory,
+    FindingVerdict,
+    PostFixCheck,
+    RemediatorAnswer,
+    VerifyRound,
+    Remediation,
+    Change,
+    FixStep,
+    FixOutcome,
+]
 # How the remediator or the recheck can stop early. Neither undoes the verified diagnosis: the
 # stop is recorded with the fix. (A pause for approval isn't one of these: it propagates.)
 AGENT_STOPS = (
@@ -121,7 +129,8 @@ def intake(state: InvestigationState) -> dict[str, Any]:
 def code_checks(d: Diagnosis, steps: list[Step], settings: Settings) -> list[str]:
     """What structured output can't enforce. Each problem becomes feedback."""
     problems = []
-    if missing := [r for r in d.refs if r not in {s.ref for s in steps}]:
+    known = {s.ref for s in steps}
+    if missing := [r for r in d.refs if r not in known]:
         problems.append(f"Cited evidence that doesn't exist: {', '.join(missing)}.")
     if empty := [e.ref for e in d.evidence if not e.finding.strip()]:
         problems.append(f"Findings with no text: {', '.join(empty)}. Say what each result shows.")
@@ -365,7 +374,8 @@ def why_unverified(r: Remediation, check: PostFixCheck | None, fresh: list[Step]
     the recheck, citing only its own fresh calls, says resolved."""
     if check is None or not check.evidence:
         return "the recheck gave no post_fix_check with evidence"
-    if old := [e.ref for e in check.evidence if e.ref not in {s.ref for s in fresh}]:
+    fresh_refs = {s.ref for s in fresh}
+    if old := [e.ref for e in check.evidence if e.ref not in fresh_refs]:
         return f"post_fix_check cites evidence not from the recheck: {', '.join(old)}"
     if not check.resolved:
         return "the recheck found the problem still there"

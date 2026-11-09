@@ -52,8 +52,13 @@ def result(d: dict, steps: list[tuple[str, dict]]) -> dict:
     for i, (tool, args) in enumerate(steps, 1):
         output = mcp_call(tool, args)[1]
         cited.append({"ref": f"E{i}", "tool": tool, "args": args, "error": False, "output": output})
-    return {"status": "completed", "error": None, "forced_reason": None, "diagnosis": d,
-            "evidence_steps": cited}  # fmt: skip
+    return {
+        "status": "completed",
+        "error": None,
+        "forced_reason": None,
+        "diagnosis": d,
+        "evidence_steps": cited,
+    }
 
 
 def test_the_evidence_judge_fails_a_correct_conclusion_backed_by_irrelevant_citations(judges):
@@ -103,8 +108,9 @@ def test_a_fake_agent_that_always_answers_no_fault_fails(judges, env):
 def agent_eval() -> subprocess.CompletedProcess:
     """`agent eval` as a user runs it."""
     t0 = time.monotonic()
-    done = subprocess.run(["uv", "run", "agent", "eval"], cwd=ROOT, capture_output=True,
-                          text=True, timeout=3600)  # fmt: skip
+    done = subprocess.run(
+        ["uv", "run", "agent", "eval"], cwd=ROOT, capture_output=True, text=True, timeout=3600
+    )
     print(f"\n$ agent eval  ({time.monotonic() - t0:.0f} s, exit {done.returncode})")
     print(done.stdout, done.stderr[-4000:], sep="\n")
     return done
@@ -115,8 +121,12 @@ def test_a_full_eval_passes():
     [line] = [x for x in done.stderr.splitlines() if x.startswith("results: ")]
     report = json.loads((ROOT / line.removeprefix("results: ")).read_text())
     s = get_settings()
-    assert [sc["name"] for sc in report["scenarios"]] == ["crashloop", "healthy", "readiness",
-                                                           "selector"]  # fmt: skip
+    assert [sc["name"] for sc in report["scenarios"]] == [
+        "crashloop",
+        "healthy",
+        "readiness",
+        "selector",
+    ]
     for sc in report["scenarios"]:
         assert len(sc["runs"]) == s.eval_runs_per_scenario, sc["name"]
         checks = set(evals.MOST_RUNS + evals.EVERY_RUN)

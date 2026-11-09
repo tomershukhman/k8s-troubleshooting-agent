@@ -77,7 +77,7 @@ from k8s_agent.logs import run_log
 from k8s_agent.policy import READ_ONLY_TOOLS
 from k8s_agent.schemas import Diagnosis
 
-# langchain.mcp is beta and says so on import; it's the MCP client we chose (SPEC 3.2).
+# langchain.mcp is beta and says so on import; it's the MCP client we chose.
 with suppress_langchain_beta_warning():
     from langchain.mcp import MCPAdapter
 
@@ -128,7 +128,7 @@ async def _load_tools(
     stack: AsyncExitStack, target: Any, settings: Settings, log: logging.LoggerAdapter
 ) -> list[BaseTool]:
     """Connect (the connection stays open for the run: every call, parallel ones included,
-    shares it) and keep only the allowlisted read tools (SPEC §3.3)."""
+    shares it) and keep only the allowlisted read tools (DESIGN 3.4)."""
     where = f"cannot use the MCP server at {settings.mcp_endpoint}"
     try:
         adapter = await stack.enter_async_context(MCPAdapter(target))
@@ -311,8 +311,9 @@ def _complete_remediation(
         stopped and remediation is None and fix is not None
     ):  # in the remediator: it may have applied it
         maybe = "; it was approved, so check the Service" if asked and asked[-1][1].approved else ""
-        change = Change(namespace=fix.namespace, service=fix.service, before=None,
-                        after=fix.selector_dict())  # fmt: skip
+        change = Change(
+            namespace=fix.namespace, service=fix.service, before=None, after=fix.selector_dict()
+        )
         detail = f"the run stopped before the fix finished: {stopped}{maybe}"
         remediation = Remediation(change=change, outcome=FixOutcome.failed, detail=detail)
     elif stopped and remediation is not None and not remediation.verified:  # in the recheck

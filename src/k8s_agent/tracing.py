@@ -1,4 +1,4 @@
-"""MLflow tracing of agent runs (SPEC §3.7). Off unless MLFLOW_TRACKING_URI is set; mlflow is
+"""MLflow tracing of agent runs (DESIGN 3.9). Off unless MLFLOW_TRACKING_URI is set; mlflow is
 imported only when it's on.
 
 - `enable()`: one check that the tracking server answers (it also creates the experiment), then

@@ -1,5 +1,5 @@
 # Settings come from .env (see .env.example). Each container holds only the credentials it needs
-# (SPEC §3.5). Host networking (SPEC §3.10): the kubeconfig's 127.0.0.1 address works unchanged.
+# (DESIGN 3.5). Host networking (DESIGN 3.11): the kubeconfig's 127.0.0.1 address works unchanged.
 
 name: k8s-agent
 
