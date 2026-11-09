@@ -1,7 +1,9 @@
 """What every tool result goes through before the model sees it (SPEC §3.3): strip noise
 fields, apply the safety cap, prefix the evidence ID. And how to read a failed call: the MCP
 server gives no error code, only the Kubernetes API server's message (kubernetes-mcp-server
-v0.1.2; tests/acceptance checks these against the real server)."""
+v0.1.2; tests/acceptance checks these against the real server). And how to quote untrusted
+text (tool output, or a model's words that may repeat it) to another model: inside tags it can't
+close."""
 
 import re
 from typing import Any
@@ -78,3 +80,14 @@ def tag(ref: str, text: str) -> str:
 
 def untag(ref: str, text: str) -> str:
     return text.removeprefix(f"[{ref}] ")
+
+
+def inert(text: str, tag: str) -> str:
+    """`text` with every `<tag>` or `</tag>` in it (any case or spacing) made inert, so text
+    quoted inside a `<tag>` block can't close it early and add text of its own."""
+    return re.sub(rf"<(\s*/?\s*{re.escape(tag)}\b)", r"&lt;\1", text, flags=re.IGNORECASE)
+
+
+def quoted(tag: str, text: str) -> str:
+    """`text` as a `<tag>` block it can't break out of."""
+    return f"<{tag}>\n{inert(text, tag)}\n</{tag}>"

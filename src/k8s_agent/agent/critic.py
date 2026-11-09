@@ -2,7 +2,6 @@
 tool outputs the draft cites, and returns a structured `CriticVerdict`."""
 
 import json
-import re
 from importlib import resources
 from typing import cast
 
@@ -10,19 +9,20 @@ from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 
+from k8s_agent.agent import tool_output
 from k8s_agent.agent.records import Step
 from k8s_agent.schemas import CriticVerdict, Diagnosis
 
 PROMPT = resources.files("k8s_agent.agent").joinpath("critic.md").read_text()
 # The tag around each cited output. Inside untrusted text (a log line, the model's words) it is
 # made inert, so that text can't close a block early and add evidence of its own.
-TAG = re.compile(r"<(\s*/?\s*tool_output\b)", re.IGNORECASE)
+TAG = "tool_output"
 
 type Critic = Runnable[LanguageModelInput, CriticVerdict]
 
 
 def inert(text: str) -> str:
-    return TAG.sub(r"&lt;\1", text)
+    return tool_output.inert(text, TAG)
 
 
 def with_verdict(model: BaseChatModel) -> Critic:
@@ -51,7 +51,7 @@ def critic_input(question: str, draft: Diagnosis, steps: list[Step]) -> str:
             "",
             inert(f"{i}. [{e.ref}] {e.finding}"),
             inert(f"Cited: {step.tool} {json.dumps(step.args, sort_keys=True)}{error}"),
-            f"<tool_output>\n{inert(step.output)}\n</tool_output>",
+            tool_output.quoted(TAG, step.output),
         ]
     return "\n".join(lines)
 
