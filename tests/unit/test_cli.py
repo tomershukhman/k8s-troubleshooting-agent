@@ -2,8 +2,13 @@
 isolated by conftest.py (the kubeconfig doesn't exist, so no command reaches a cluster). Under
 the test runner stdout and stderr aren't terminals: the result is JSON, progress plain text."""
 
+import asyncio
 import json
+import os
 import re
+import sys
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.exceptions import ModelRateLimitError
@@ -11,9 +16,9 @@ from langchain_core.messages import AIMessage
 from rich.console import Console
 from typer.testing import CliRunner
 
-from k8s_agent import ui
-from k8s_agent.agent import core
-from k8s_agent.agent.records import RunResult, Step
+from k8s_agent import cli, ui
+from k8s_agent.agent import Answer, ApprovalRequest, core
+from k8s_agent.agent.records import Facts, RunResult, Step
 from k8s_agent.cli import app
 from k8s_agent.config import get_settings
 from tests.fakes import (
@@ -24,6 +29,8 @@ from tests.fakes import (
     call,
     critic,
     diagnosis,
+    fix_call,
+    remediator,
     selector_fix,
     verdict,
 )
@@ -37,7 +44,8 @@ def agent(*args: str):
 @pytest.fixture
 def fake(monkeypatch):
     def use(model: ScriptedModel, judge: ScriptedModel | None = None) -> None:
-        models = iter([model, judge or critic()])  # the investigator, then the critic
+        # the investigator, the critic, then the remediator: it requests the selector fix
+        models = iter([model, judge or critic(), remediator(fix_call())])
         monkeypatch.setattr(core, "make_model", lambda _settings, _name: next(models))
         monkeypatch.setattr(core, "mcp_client", lambda _settings: FakeCluster().server)
 
@@ -119,7 +127,10 @@ def test_the_summary_says_what_is_wrong_the_evidence_and_what_to_do(fake):
     assert (
         "Proposed fix: set the selector of Service shop-checkout/checkout to app=checkout." in text
     )
-    assert "Nothing has been changed." in text
+    # no terminal on stdin here: the fix the remediator requested was rejected
+    flat = " ".join(text.replace("│", " ").split())  # the panel wraps lines
+    assert "Fix: rejected: no interactive approval available (by k8s-agent," in flat
+    assert "Nothing was changed." in flat
 
 
 READER = 'User "system:serviceaccount:k8s-agent:reader"'
@@ -204,3 +215,109 @@ def test_scenario_list_shows_each_scenario_with_its_neutral_namespace():
 def test_cluster_commands_fail_with_a_clean_error(args, error):
     result = agent(*args)
     assert result.exit_code == 1 and result.stderr.startswith(error)
+
+
+# --- the fix ------------------------------------------------------------------------------
+
+
+def test_without_a_terminal_on_stdin_a_fix_is_rejected_and_the_run_says_so(fake):
+    proposed = diagnosis("E1", proposed_fix=selector_fix())
+    fake(ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(proposed)]))
+    result = agent("investigate", "q", "--user", "bob")
+    assert result.exit_code == 0, result.stderr
+    r = json.loads(result.stdout)["remediation"]
+    assert r["request"]["args"]["selector"] == {"app": "checkout"}
+    assert (r["decision"]["approved"], r["decision"]["reason"], r["decision"]["by"]) == (
+        False,
+        "no interactive approval available",
+        "k8s-agent",
+    )
+    assert r["outcome"] == "not_applied" and r["verified"] is False
+    assert "cannot load the remediator kubeconfig" in r["request"]["facts"]["error"]  # none here
+    lines = [line for line in result.stderr.splitlines() if line[:1] != "{"]
+    assert lines[-6:] == [
+        "node     remediate",
+        "  agent    remediator · claude-sonnet-5-5",
+        "  approval Service/checkout -n shop-checkout: app=checkout",
+        "    ✗ rejected: no interactive approval available (by k8s-agent)",
+        "node     remediate · resumed",
+        "  → not_applied: the request was rejected, so nothing was applied",
+    ]
+
+
+def test_with_no_terminal_on_stdin_there_is_no_prompt(monkeypatch):
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    assert cli._approver(Console(), None) is None  # the agent then rejects the fix
+
+
+@pytest.fixture
+def terminal(monkeypatch):
+    """stdin as a real terminal (a pty); returns its other end, where the person types."""
+    person, tty = os.openpty()
+    monkeypatch.setattr(sys, "stdin", os.fdopen(tty, "rb", buffering=0))
+    yield person
+    os.close(person)
+
+
+def request(**args) -> ApprovalRequest:
+    facts = Facts(current_selector={"app": "check-out"}, resource_version="100",
+                  ready_pods=["checkout-a", "checkout-b"])  # fmt: skip
+    call = fix_call().tool_calls[0]["args"] | args
+    return ApprovalRequest(tool="patch_service_selector", args=call, facts=facts)
+
+
+class Spinner:
+    """Records when the progress display is paused, and what happened meanwhile."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    @contextmanager
+    def paused(self):
+        self.events.append("paused")
+        yield
+        self.events.append("resumed")
+
+
+@pytest.mark.parametrize(
+    ("typed", "approved"), [(b"y\n", True), (b"yes\n", True), (b"\n", False), (b"no\n", False)]
+)
+def test_in_a_terminal_the_change_is_shown_and_only_an_answer_typed_after_it_counts(
+    typed, approved, terminal
+):
+    os.write(terminal, b"y\n")  # typed while the agent worked: dropped, never an answer
+    err, spinner = Console(record=True, width=120), Spinner()
+
+    async def ask():
+        def answer():  # the person reads the change, then answers
+            spinner.events.append("answered")
+            os.write(terminal, typed)
+
+        asyncio.get_running_loop().call_later(0.2, answer)
+        return await cli._approver(err, spinner)(request(explanation="[/] Selects [app=x]."))
+
+    how = f"answered {'yes' if approved else 'no'} in the terminal"
+    assert asyncio.run(ask()) == Answer(approved, how)
+    assert spinner.events == ["paused", "answered", "resumed"]  # no spinner over the prompt
+    shown = err.export_text()
+    assert "Service          shop-checkout/checkout" in shown
+    assert "app=check-out  →  app=checkout  (replaces the whole selector)" in shown
+    assert "[/] Selects [app=x]." in shown  # the remediator's words, as written: not markup
+    assert "2 ready pods match app=checkout: checkout-a, checkout-b" in shown
+    assert "the Service is still at version 100" in shown and "Apply this change? [y/N]" in shown
+
+
+def test_a_prompt_nobody_answers_is_given_up_cleanly(terminal):
+    async def unanswered():
+        with pytest.raises(TimeoutError):  # the approval's own time limit (approval.py)
+            await asyncio.wait_for(cli._approver(Console(), None)(request()), 0.2)
+        return asyncio.get_running_loop().remove_reader(sys.stdin.fileno())
+
+    assert asyncio.run(unanswered()) is False  # it stopped watching the terminal
+
+
+def test_the_prompt_warns_when_approving_would_be_refused():
+    changed = Facts(current_selector={"app": "x"}, resource_version="101", ready_pods=["p"])
+    console = Console(record=True, width=200)
+    console.print(ui.approval(request().model_copy(update={"facts": changed})))
+    assert "changed since the remediator read it (version 101)" in console.export_text()

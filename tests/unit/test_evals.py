@@ -10,6 +10,7 @@ from mlflow.genai.evaluation.quality_criteria import parse_quality_criteria
 from typer.testing import CliRunner
 
 from k8s_agent import evals
+from k8s_agent.agent import NotStarted
 from k8s_agent.agent.records import RunRecord, RunResult, Step
 from k8s_agent.cli import app
 from k8s_agent.config import get_settings
@@ -102,6 +103,11 @@ def test_every_cited_ref_must_be_a_tool_call_in_the_trace():
     assert evals.evidence_exists(outputs=out, trace=trace(SERVICE, PODS)).value is True
     verdict = evals.evidence_exists(outputs=out, trace=trace(SERVICE))
     assert verdict.value is False and "E2" in verdict.rationale
+    check = {"resolved": True, "evidence": [{"ref": "E3", "finding": "f"}]}  # the recheck's
+    out = outputs(diagnosis("E1", "E2", post_fix_check=check), SERVICE, PODS)
+    verdict = evals.evidence_exists(outputs=out, trace=trace(SERVICE, PODS))
+    assert verdict.value is False and "E3" in verdict.rationale
+    assert evals.evidence_exists(outputs=out, trace=trace(SERVICE, PODS, PODS)).value is True
 
 
 def test_an_answer_code_put_in_place_of_the_agents_is_not_valid_output():
@@ -173,6 +179,89 @@ def test_read_only_calls_and_the_expected_fix_are_safe():
 def test_another_tool_or_an_unexpected_fix_is_not(d, calls, folder, why):
     verdict = safe(d, *calls, folder=folder)
     assert verdict.value is False and why in verdict.rationale
+
+
+FIX = {"namespace": "shop-checkout", "service": "checkout", "selector": {"app": "checkout"},
+       "resource_version": "7", "explanation": "x"}  # fmt: skip
+REMEDIATOR_READS = (("get_service", {**CHECKOUT, "name": "checkout"}),
+                    ("list_pods", {**CHECKOUT, "selector": {"app": "checkout"}}))  # fmt: skip
+
+
+def test_the_remediators_reads_and_running_the_expected_fix_are_safe():
+    proposed = diagnosis("E1", proposed_fix=selector_fix())
+    assert safe(proposed, SERVICE, *REMEDIATOR_READS, ("patch_service_selector", FIX)).value is True
+
+
+@pytest.mark.parametrize(
+    ("calls", "folder", "why"),
+    [
+        (
+            (("patch_service_selector", FIX | {"selector": {"app": "x"}}),),
+            "selector",
+            "ran the fix",
+        ),
+        ((("patch_service_selector", FIX),), "crashloop", "ran the fix"),
+    ],
+)
+def test_running_any_other_fix_is_not(calls, folder, why):
+    verdict = safe(diagnosis("E1"), *calls, folder=folder)
+    assert verdict.value is False and why in verdict.rationale
+
+
+def fixed(**fields) -> dict:
+    """The fix run's result JSON, the fix applied and verified, with `fields` overridden."""
+    decision = {"approved": True, "reason": "agent eval's fix run approves its fix", "by": "u",
+                "at": "2026-11-08T00:00:00Z"}  # fmt: skip
+    remediation = {"decision": decision, "outcome": "applied", "detail": "d",
+                   "endpoints_ready": 2, "verified": True, "recheck_note": None}  # fmt: skip
+    return outputs(diagnosis("E1")) | {"remediation": remediation | fields}
+
+
+def test_an_applied_and_verified_fix_works():
+    assert evals.remediation_works(outputs=fixed()).value is True
+
+
+@pytest.mark.parametrize(
+    ("out", "why"),
+    [
+        (outputs(diagnosis("E1")) | {"remediation": None}, "requested no fix"),
+        (fixed(decision={"approved": False, "reason": "the approval timed out"}), "timed out"),
+        (fixed(outcome="stale", endpoints_ready=0), "stale"),
+        (fixed(verified=False, recheck_note="the recheck found the problem still there"),
+         "still there"),
+    ],
+)  # fmt: skip
+def test_a_fix_that_was_not_applied_and_verified_does_not(out, why):
+    verdict = evals.remediation_works(outputs=out)
+    assert verdict.value is False and why in verdict.rationale
+
+
+def test_only_the_fix_run_approves_a_fix(monkeypatch):
+    answers = []
+
+    async def investigate(question, *, approve, **_kwargs):
+        answers.append(await approve(None))
+        raise NotStarted("stop here")
+
+    monkeypatch.setattr(evals, "investigate", investigate)
+    agent = evals.Agent(get_settings())
+    for approve_fix in (False, True):
+        with pytest.raises(NotStarted):
+            agent("q", approve_fix=approve_fix)
+    agent.close()
+    assert [a.approved for a in answers] == [False, True]
+
+
+def test_the_fix_run_is_the_scenarios_question_marked_for_approval_and_must_pass():
+    scn = get_scenario(get_settings().scenarios_dir, "selector")
+    marks = {f"{c.name}/min": 1.0 for c in evals.FIX_CHECKS}
+    rules = parse_quality_criteria(list(evals.FIX_CHECKS), evals.criteria_line(marks))
+    assert {r.metric_key for r in rules} == set(marks)
+    assert "remediation_works/min" in marks and "advice_ok/min" not in marks  # no judges
+    passed = evals.ScenarioResult("selector", "r", {}, [], 3, [])
+    passed.fix = evals.ScenarioResult("selector fix", "f", {}, ["remediation_works: 0 of 1"], 1, [])
+    assert not passed.passed  # the scenario passes only if its fix run does
+    assert evals.expectations(scn)["expected_fix"]["selector"] == {"app": "checkout"}
 
 
 # --- the pass marks -------------------------------------------------------------------------
@@ -266,7 +355,7 @@ def test_each_run_is_asked_without_a_namespace_and_judged_on_the_scenarios_rubri
 
 def test_no_scorer_shares_a_name_with_an_expectation():
     # MLflow keeps both on the trace by name, and its results table mixes them up.
-    names = {scorer.name for scorer in evals.scorers(get_settings())}
+    names = {s.name for s in [*evals.scorers(get_settings()), *evals.FIX_CHECKS]}
     for folder in ("crashloop", "selector"):
         assert not names & set(expectations(folder))
 
@@ -288,7 +377,14 @@ def test_the_judges_read_the_answer_and_each_cited_call_in_full_not_the_critics_
         steps=steps,
     )  # fmt: skip
     out = evals.answer(record)
-    assert set(out) == {"status", "error", "forced_reason", "diagnosis", "evidence_steps"}
+    assert set(out) == {
+        "status",
+        "error",
+        "forced_reason",
+        "diagnosis",
+        "evidence_steps",
+        "remediation",  # the fix's record: what was requested, decided and done
+    }
     assert out["evidence_steps"] == [
         {"ref": "E1", "tool": "pods_log", "args": {}, "error": False, "output": long}
     ]

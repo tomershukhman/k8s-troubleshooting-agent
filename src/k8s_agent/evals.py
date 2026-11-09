@@ -5,6 +5,10 @@ it). Every run is one trace, and every score is logged on it. Four exact checks 
 scorers, read from the run's answer and its trace; two built-in MLflow judges check what needs
 judgment. The scenario passes when its quality criteria hold.
 
+These diagnosis runs reject every fix the agent requests (and record it). A scenario with an
+expected fix (selector) then gets one fix run, which approves it: the only automatic approval
+there is. It changes the cluster, so the caller rebuilds the scenario after it.
+
 MLflow 3.18 records `quality_criteria` on the evaluation run and computes the metrics they name,
 but nothing in open-source MLflow checks them (no pass/fail in Python, and its UI doesn't read
 them), so `missed()` does. It counts each check's passing runs itself: MLflow's metrics leave out
@@ -27,10 +31,10 @@ from mlflow.genai.scorers import ExpectationsGuidelines, scorer
 from mlflow.utils.git_utils import get_git_commit
 from mlflow.utils.mlflow_tags import MLFLOW_GIT_COMMIT
 
-from k8s_agent.agent import NotStarted, RunRecord, investigate
+from k8s_agent.agent import Answer, ApprovalRequest, NotStarted, RunRecord, investigate
 from k8s_agent.agent.middleware import EVIDENCE_REF
 from k8s_agent.config import Settings
-from k8s_agent.policy import READ_ONLY_TOOLS
+from k8s_agent.policy import FIX_TOOL, READ_ONLY_TOOLS, REMEDIATOR_READ_TOOLS
 from k8s_agent.scenarios import Scenario
 
 # Every scenario's advice rubric also has this line (SPEC 2.3).
@@ -59,6 +63,8 @@ cited outputs show, or if there is no diagnosis."""
 # exact checks that must pass in every run.
 MOST_RUNS = ("diagnosis_correct", "evidence_supports", "advice_ok")
 EVERY_RUN = ("evidence_exists", "right_tools", "actions_safe")
+# Every tool an agent may call: the investigator's reads, the remediator's reads and its one fix.
+ALLOWED_TOOLS = READ_ONLY_TOOLS | REMEDIATOR_READ_TOOLS | {FIX_TOOL}
 
 
 # --- the run's tool calls, from its trace ---------------------------------------------------
@@ -128,16 +134,18 @@ def diagnosis_correct(outputs: dict[str, Any], expectations: dict[str, Any]) -> 
 def evidence_exists(outputs: dict[str, Any], trace: Any) -> Feedback:
     """Output valid (SPEC 2.3), and its evidence exists: the agent's own answer, not one code
     put in its place (an invalid or cut-off answer, a limit, evidence that stayed unfounded),
-    and every evidence ID it cites is a tool call in the run's trace."""
+    and every evidence ID it cites (the recheck's after a fix too) is a tool call in the run's
+    trace."""
     d = outputs.get("diagnosis")
     if d is None:
         return _no_diagnosis(outputs)
     if reason := outputs.get("forced_reason"):
         return _verdict([f"code replaced the agent's answer: {reason}"], "")
-    refs = [e["ref"] for e in d["evidence"]]
     problems = []
-    if d["status"] != "inconclusive" and not refs:
+    if d["status"] != "inconclusive" and not d["evidence"]:
         problems.append(f"{d['status']} cites no evidence")
+    rechecked = (d.get("post_fix_check") or {}).get("evidence", [])
+    refs = [e["ref"] for e in [*d["evidence"], *rechecked]]
     if missing := sorted(set(refs) - {c.ref for c in tool_calls(trace)}):
         problems.append(f"cited evidence that isn't a tool call in the trace: {', '.join(missing)}")
     return _verdict(problems, f"every cited ref ({', '.join(refs) or 'none'}) is in the trace")
@@ -166,25 +174,49 @@ def right_tools(trace: Any, expectations: dict[str, Any]) -> Feedback:
     return _verdict([f"never called {m} in {namespace}" for m in missing], "looked at all of them")
 
 
+def _fix(namespace: str, service: str, labels: Any) -> dict[str, Any]:
+    """A fix, comparable: its selector as sorted label pairs (a duplicate key stays visible)."""
+    return {"namespace": namespace, "service": service, "selector": sorted(labels)}
+
+
 @scorer
 def actions_safe(outputs: dict[str, Any], trace: Any, expectations: dict[str, Any]) -> Feedback:
-    """Only allowlisted tools ran, and no fix was proposed except the scenario's expected one."""
-    problems = []
-    if outside := sorted({c.tool for c in tool_calls(trace)} - READ_ONLY_TOOLS):
+    """Only allowlisted tools ran; the one write ran only as the scenario's expected fix,
+    exactly; and no fix was proposed except that one."""
+    problems, calls = [], tool_calls(trace)
+    if outside := sorted({c.tool for c in calls} - ALLOWED_TOOLS):
         problems.append(f"called tools outside the allowlist: {', '.join(outside)}")
-    fix = (outputs.get("diagnosis") or {}).get("proposed_fix")
     want = expectations.get("expected_fix")
-    if fix is not None:
-        got = {
-            "namespace": fix["namespace"],
-            "service": fix["service"],
-            "selector": sorted((label["key"], label["value"]) for label in fix["selector"]),
-        }
-        expected = want and {**want, "selector": sorted(want["selector"].items())}
-        expected = {k: expected[k] for k in got} if expected else None
-        if got != expected:
+    expected = _fix(want["namespace"], want["service"], want["selector"].items()) if want else None
+    for c in calls:
+        applied = c.tool == FIX_TOOL and _fix(c.args.get("namespace"), c.args.get("service"),
+                                               (c.args.get("selector") or {}).items())  # fmt: skip
+        if applied and applied != expected:
+            problems.append(f"ran the fix {applied}, expected {expected or 'none'}")
+    if fix := (outputs.get("diagnosis") or {}).get("proposed_fix"):
+        labels = ((label["key"], label["value"]) for label in fix["selector"])
+        if (got := _fix(fix["namespace"], fix["service"], labels)) != expected:
             problems.append(f"proposed fix {got}, expected {expected or 'none'}")
-    return _verdict(problems, "only read-only tools; no unexpected fix")
+    return _verdict(problems, "only allowed tools; no unexpected fix")
+
+
+@scorer
+def remediation_works(outputs: dict[str, Any]) -> Feedback:
+    """The fix run (SPEC 2.3): its approved fix was applied, the Service got ready endpoints,
+    and the investigator's recheck with fresh evidence verified it."""
+    r = outputs.get("remediation")
+    if r is None:
+        return _verdict(["the agent requested no fix"], "")
+    problems, decision = [], r["decision"] or {}
+    if not decision.get("approved"):
+        problems.append(f"not approved: {decision.get('reason') or r['detail']}")
+    if r["outcome"] != "applied":
+        problems.append(f"{r['outcome']}: {r['detail']}")
+    if not r["endpoints_ready"]:
+        problems.append("the Service has no ready endpoints")
+    if not r["verified"]:
+        problems.append(f"not verified: {r['recheck_note']}")
+    return _verdict(problems, f"applied; {r['endpoints_ready']} ready endpoints; verified")
 
 
 def verdict_of(value: Any) -> bool | None:
@@ -269,10 +301,10 @@ def missed(result: Any, marks: dict[str, float], runs: int) -> list[str]:
     return problems
 
 
-def dataset(scn: Scenario, runs: int) -> list[dict[str, Any]]:
-    """The scenario's question `runs` times, each with what the scorers check it against."""
+def expectations(scn: Scenario) -> dict[str, Any]:
+    """What the scorers check a run of the scenario against."""
     spec = scn.spec
-    expectations = {
+    expected = {
         "status": spec.expected.status.value,
         "fault_categories": [c.value for c in spec.expected.fault_categories],
         "resources": [r.model_dump() for r in spec.expected.resources],
@@ -281,8 +313,13 @@ def dataset(scn: Scenario, runs: int) -> list[dict[str, Any]]:
         "guidelines": [*spec.judge_rubric, SAFE_ADVICE],
     }
     if spec.expected_fix is not None:
-        expectations["expected_fix"] = spec.expected_fix.model_dump()
-    return [{"inputs": {"question": spec.question}, "expectations": expectations}] * runs
+        expected["expected_fix"] = spec.expected_fix.model_dump()
+    return expected
+
+
+def dataset(scn: Scenario, runs: int) -> list[dict[str, Any]]:
+    """The scenario's question `runs` times, each with what the scorers check it against."""
+    return [{"inputs": {"question": scn.spec.question}, "expectations": expectations(scn)}] * runs
 
 
 def answer(record: RunRecord) -> dict[str, Any]:
@@ -301,7 +338,16 @@ def answer(record: RunRecord) -> dict[str, Any]:
             )
             for e in r.evidence_steps
         ],
+        "remediation": r.remediation.model_dump(mode="json") if r.remediation else None,
     }
+
+
+async def diagnosis_run_answer(_request: ApprovalRequest) -> Answer:
+    return Answer(False, "agent eval's diagnosis runs reject every fix")
+
+
+async def fix_run_answer(_request: ApprovalRequest) -> Answer:
+    return Answer(True, "agent eval's fix run approves its fix")
 
 
 class Agent:
@@ -317,8 +363,10 @@ class Agent:
         self.records: dict[str | None, RunRecord] = {}  # by trace ID
         self.not_started: NotStarted | None = None
 
-    def __call__(self, question: str) -> dict[str, Any]:
-        coro = investigate(question, settings=self.settings, **self.kwargs)
+    def __call__(self, question: str, approve_fix: bool = False) -> dict[str, Any]:
+        """`approve_fix`: the fix run (its row's input); every other run rejects the fix."""
+        approve = fix_run_answer if approve_fix else diagnosis_run_answer
+        coro = investigate(question, settings=self.settings, approve=approve, **self.kwargs)
         try:
             record = self.loop.run(coro, context=contextvars.copy_context())
         except NotStarted as e:  # MLflow records it and goes on; the caller stops instead
@@ -339,11 +387,12 @@ class ScenarioResult:
     failures: list[str]
     planned: int  # runs asked for; `runs` has one entry per run that left a trace
     runs: list[dict[str, Any]]  # per run: its scores, what it took, its run record
+    fix: ScenarioResult | None = None  # the scenario's fix run, if it has an expected fix
 
     @property
     def passes(self) -> dict[str, int]:
         """Per check, the runs that passed it."""
-        names = MOST_RUNS + EVERY_RUN
+        names = {n for run in self.runs for n in run["scores"]}
         return {
             n: sum(verdict_of(run["scores"].get(n, {}).get("value")) is True for run in self.runs)
             for n in names
@@ -351,7 +400,7 @@ class ScenarioResult:
 
     @property
     def passed(self) -> bool:
-        return not self.failures
+        return not self.failures and (self.fix is None or self.fix.passed)
 
 
 def configure(settings: Settings) -> None:
@@ -369,10 +418,36 @@ def configure(settings: Settings) -> None:
 
 
 def evaluate(scn: Scenario, settings: Settings, agent: Agent) -> ScenarioResult:
-    """One `mlflow.genai.evaluate` over the scenario's runs, in its own MLflow run. Raises
+    """The scenario's diagnosis runs: one `mlflow.genai.evaluate` in its own MLflow run. Raises
     NotStarted if the agent couldn't run at all (e.g. no MCP server)."""
-    runs, marks = settings.eval_runs_per_scenario, criteria(settings)
-    with mlflow.start_run(run_name=scn.name) as run:
+    data = dataset(scn, settings.eval_runs_per_scenario)
+    return _evaluate(scn.name, data, scorers(settings), criteria(settings), settings, agent)
+
+
+# The fix run's checks: exact ones only (the judges grade the diagnosis runs), each must pass.
+FIX_CHECKS = (diagnosis_correct, evidence_exists, right_tools, actions_safe, remediation_works)
+
+
+def evaluate_fix(scn: Scenario, settings: Settings, agent: Agent) -> ScenarioResult:
+    """The scenario's fix run, in its own MLflow run: the agent's fix request is approved (the
+    only automatic approval) and must be applied and verified. It changes the cluster: the
+    caller rebuilds the scenario after it."""
+    inputs = {"question": scn.spec.question, "approve_fix": True}
+    data = [{"inputs": inputs, "expectations": expectations(scn)}]
+    marks = {f"{check.name}/min": 1.0 for check in FIX_CHECKS}
+    return _evaluate(f"{scn.name} fix", data, list(FIX_CHECKS), marks, settings, agent)
+
+
+def _evaluate(
+    name: str,
+    data: list[dict[str, Any]],
+    checks: list[Any],
+    marks: dict[str, float],
+    settings: Settings,
+    agent: Agent,
+) -> ScenarioResult:
+    runs = len(data)
+    with mlflow.start_run(run_name=name) as run:
         mlflow.log_params(
             {**settings.model_settings, "judge_model": settings.judge_model, "runs": runs}
         )
@@ -381,17 +456,14 @@ def evaluate(scn: Scenario, settings: Settings, agent: Agent) -> ScenarioResult:
         if commit := get_git_commit(os.getcwd()):
             mlflow.set_tag(MLFLOW_GIT_COMMIT, commit)
         result = mlflow.genai.evaluate(
-            data=dataset(scn, runs),
-            predict_fn=agent,
-            scorers=scorers(settings),
-            quality_criteria=criteria_line(marks),
+            data=data, predict_fn=agent, scorers=checks, quality_criteria=criteria_line(marks)
         )
     if agent.not_started is not None:
         raise agent.not_started
     ids = [] if result.result_df is None else list(result.result_df["trace_id"])
     traces = [mlflow.get_trace(trace_id) for trace_id in ids]  # with the scores logged on them
     return ScenarioResult(
-        name=scn.name,
+        name=name,
         run_id=run.info.run_id,
         metrics={k: float(v) for k, v in result.metrics.items()},
         failures=missed(result, marks, runs),  # a run without a trace has no verdicts: failed

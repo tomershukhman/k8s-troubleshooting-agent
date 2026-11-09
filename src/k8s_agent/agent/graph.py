@@ -1,19 +1,27 @@
 """The investigation workflow, an explicit LangGraph graph:
 
-    intake -> investigate -> verify_evidence -> result
-                   ^               |
-                   +-- feedback ---+   (not founded, verify rounds left)
+    intake -> investigate -> verify_evidence -> result -> remediate -> investigate -> recheck
+                   ^               |               |          |        (a round that
+                   +-- feedback ---+               +-> end    +-> end   rechecks the fix)
 
 - investigate: the investigator agent (`create_agent`), added directly as a node. It shares
   `messages` and `structured_response` with this graph and is compiled with per-thread
-  persistence, so a feedback round continues its own conversation and its call-limit counters
-  carry over (their `thread_limit` is the run-wide budget).
+  persistence, so a feedback round, and the recheck round after a fix, continue its own
+  conversation and its call-limit counters carry over (their `thread_limit` is the run-wide
+  budget).
 - verify_evidence: code checks, then the critic (no tools) on the cited outputs only.
-- result: the final diagnosis, or a forced inconclusive with the reason.
+- result: the final diagnosis, or a forced inconclusive with the reason; then the routing (code):
+  only a proposed fix of the supported type, in an allowed namespace, goes on.
+- remediate: the remediator agent (remediator.py) on that fix. Its fix tool pauses the whole
+  graph for a person's approval; the caller resumes it on the same thread. An applied fix sends
+  the investigator a recheck request.
+- recheck: code, no critic: the recheck round's `post_fix_check` must cite only its own fresh
+  tool calls, and decides with the fix tool's endpoint count whether the fix is verified.
 """
 
 import operator
 import textwrap
+from collections.abc import Callable
 from importlib import resources
 from typing import Annotated, Any, NotRequired, TypedDict
 
@@ -24,12 +32,15 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
     ToolRetryMiddleware,
 )
-from langchain.agents.structured_output import ProviderStrategy
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain.agents.structured_output import ProviderStrategy, StructuredOutputValidationError
+from langchain_core.exceptions import ModelError
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.runtime import Runtime
@@ -44,17 +55,42 @@ from k8s_agent.agent.middleware import (
     retries_exhausted,
     worth_retrying,
 )
-from k8s_agent.agent.records import Step, VerifyRound, steps_from_messages
+from k8s_agent.agent.records import (
+    FixOutcome,
+    Remediation,
+    Step,
+    VerifyRound,
+    steps_from_messages,
+)
+from k8s_agent.agent.remediator import Kube, build_remediator, fix_request, labels, remediation
 from k8s_agent.config import Settings
-from k8s_agent.schemas import CATEGORY_HELP, Diagnosis, DiagnosisStatus, FaultCategory
+from k8s_agent.schemas import (
+    CATEGORY_HELP,
+    Diagnosis,
+    DiagnosisStatus,
+    FaultCategory,
+    PostFixCheck,
+)
 
 RERUN = "Re-run the investigation; the steps it took are in the run record."
 # Our types in the checkpointed state: LangGraph's serializer wants them listed.
 CHECKPOINT_TYPES = [
     ("k8s_agent.schemas", name)
     for name in ("Diagnosis", "AffectedResource", "Evidence", "ProposedFix", "SelectorLabel",
-                 "DiagnosisStatus", "FaultCategory", "FindingVerdict")
-] + [("k8s_agent.agent.records", "VerifyRound")]  # fmt: skip
+                 "DiagnosisStatus", "FaultCategory", "FindingVerdict", "PostFixCheck",
+                 "RemediatorAnswer")
+] + [
+    ("k8s_agent.agent.records", name)
+    for name in ("VerifyRound", "Remediation", "Change", "FixStep", "FixOutcome")
+]  # fmt: skip
+# How the remediator or the recheck can stop early. Neither undoes the verified diagnosis: the
+# stop is recorded with the fix. (A pause for approval isn't one of these: it propagates.)
+AGENT_STOPS = (
+    ModelError,
+    ModelCallLimitExceededError,
+    StructuredOutputValidationError,
+    GraphRecursionError,
+)
 
 
 class InvestigationState(TypedDict):
@@ -65,6 +101,7 @@ class InvestigationState(TypedDict):
     rounds: Annotated[list[VerifyRound], operator.add]
     forced_reason: NotRequired[str | None]
     final: NotRequired[Diagnosis]
+    remediation: NotRequired[Remediation]  # the fix, once the remediator is done
 
 
 def system_prompt(settings: Settings) -> str:
@@ -154,9 +191,11 @@ def code_checks(d: Diagnosis, steps: list[Step], settings: Settings) -> list[str
         if fix.namespace not in settings.remediation_namespaces:
             allowed = ", ".join(settings.remediation_namespaces)
             problems.append(f"Fixes are allowed only in {allowed}; set proposed_fix to null.")
-        labels = [(lb.key.strip(), lb.value.strip()) for lb in fix.selector]
-        if not all(k and v for k, v in labels) or len({k for k, _ in labels}) < len(labels):
+        pairs = [(lb.key.strip(), lb.value.strip()) for lb in fix.selector]
+        if not all(k and v for k, v in pairs) or len({k for k, _ in pairs}) < len(pairs):
             problems.append("The proposed selector needs unique, non-empty keys and values.")
+    if d.post_fix_check is not None:
+        problems.append("post_fix_check is only for a recheck after a fix; set it to null.")
     return problems
 
 
@@ -217,12 +256,13 @@ def forced(reason: str) -> Diagnosis:
         evidence=[],
         recommended_action=RERUN,
         proposed_fix=None,
+        post_fix_check=None,
     )
 
 
-def result(state: InvestigationState) -> dict[str, Any]:
+def final_diagnosis(state: InvestigationState) -> Diagnosis:
     if reason := state.get("forced_reason"):
-        return {"final": forced(reason)}
+        return forced(reason)
     draft = state["structured_response"]
     steps = steps_from_messages(state["messages"])
     if draft.status is DiagnosisStatus.inconclusive and any(
@@ -233,18 +273,128 @@ def result(state: InvestigationState) -> dict[str, Any]:
             "README); add one to investigate this namespace."
         )
         draft = draft.model_copy(update={"root_cause": draft.root_cause.rstrip() + note})
-    return {"final": draft}
+    return draft
 
 
-def build_graph(model: BaseChatModel, tools: list[BaseTool], settings: Settings):
+def result(state: InvestigationState, runtime: Runtime[RunContext]) -> Command:
+    """The final diagnosis, and the routing: on to the remediator only for a fix it may take.
+    (Routed here rather than by a conditional edge: MLflow's autolog records an edge's lambda
+    as a span with no name, and that loses the spans exported with it.)"""
+    final = final_diagnosis(state)
+    goto = "remediate" if fixable(final, runtime.context.settings) else END
+    return Command(goto=goto, update={"final": final})
+
+
+def fixable(d: Diagnosis, settings: Settings) -> bool:
+    """Routing (code): only a proposed fix of the supported type (a selector mismatch on the
+    affected Service), in an allowed namespace, reaches the remediator. Anything else stays
+    advice. verify_evidence already sent back a fix proposed elsewhere; this is the gate."""
+    fix = d.proposed_fix
+    return (
+        fix is not None
+        and d.status is DiagnosisStatus.fault_found
+        and d.fault_category is FaultCategory.selector_mismatch
+        and fix.namespace in settings.remediation_namespaces
+    )
+
+
+async def run_to_end(agent: Any, inputs: dict[str, Any], **kwargs: Any) -> tuple[dict, str | None]:
+    """Run an agent to its end: its last state, and why it stopped early if it did (kept: what
+    it did before the stop still counts). A pause for approval propagates: LangGraph's rules
+    forbid catching it."""
+    values: dict[str, Any] = {}
+    try:
+        async for chunk in agent.astream(inputs, stream_mode="values", **kwargs):
+            values = chunk
+    except AGENT_STOPS as e:
+        return values, f"{type(e).__name__}: {e}"
+    return values, None
+
+
+def remediate_node(remediator: Any) -> Callable:
+    async def remediate(state: InvestigationState) -> Command:
+        """The remediator on the proposed fix. On resume after the approval pause this node
+        runs again from its start and the remediator resumes from its checkpoint, so nothing
+        here may have a side effect before that call (LangGraph's interrupt rules). An applied
+        fix goes back to the investigator for one more round, the recheck: it continues its
+        own conversation, so its evidence IDs and its run-wide budget (`thread_limit`) carry
+        on."""
+        fix = state["final"].proposed_fix
+        values, stopped = await run_to_end(remediator, {"messages": [fix_request(fix)]})
+        done = remediation(
+            fix, values.get("messages", []), values.get("structured_response"), stopped
+        )
+        if done.outcome is not FixOutcome.applied:
+            return Command(goto=END, update={"remediation": done})
+        ask = {"messages": [recheck_request(done)], "structured_response": None}
+        return Command(goto="investigate", update={"remediation": done, **ask})
+
+    return remediate
+
+
+def recheck_request(r: Remediation) -> HumanMessage:
+    c = r.change
+    return HumanMessage(
+        f"A fix was just applied: Service {c.namespace}/{c.service} now selects "
+        f"{labels(c.after)} (before: {labels(c.before)}), and the fix tool counted "
+        f"{r.endpoints_ready} ready endpoints. Check again with fresh tool calls whether the "
+        "problem is gone: your earlier results are from before the fix. Then answer as before, "
+        "with post_fix_check filled in: resolved, and findings that cite only the tool calls "
+        "you make now."
+    )
+
+
+def after_investigate(state: InvestigationState) -> str:
+    """A round after a fix is the recheck, checked by code; any other goes to the critic."""
+    return "recheck" if state.get("remediation") else "verify_evidence"
+
+
+def unverified(r: Remediation, check: PostFixCheck | None, fresh: list[Step]) -> str | None:
+    """Why the fix isn't verified; None when it is: the fix tool counted ready endpoints and
+    the recheck, citing only its own fresh calls, says resolved."""
+    if check is None or not check.evidence:
+        return "the recheck gave no post_fix_check with evidence"
+    if old := [e.ref for e in check.evidence if e.ref not in {s.ref for s in fresh}]:
+        return f"post_fix_check cites evidence not from the recheck: {', '.join(old)}"
+    if not check.resolved:
+        return "the recheck found the problem still there"
+    if r.endpoints_ready == 0:
+        return "the fix tool counted no ready endpoints"
+    return None
+
+
+def recheck(state: InvestigationState) -> dict[str, Any]:
+    """The recheck round's answer: its post_fix_check, citing only the tool calls made since the
+    recheck was asked (the last message the investigator was sent). No critic round."""
+    fix, messages = state["remediation"], state["messages"]
+    asked = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
+    answer = state.get("structured_response")
+    check = answer.post_fix_check if answer else None
+    note = unverified(fix, check, steps_from_messages(messages[asked:]))
+    return {
+        "final": state["final"].model_copy(update={"post_fix_check": check}),
+        "remediation": fix.model_copy(update={"verified": note is None, "recheck_note": note}),
+    }
+
+
+def build_graph(
+    model: BaseChatModel,
+    tools: list[BaseTool],
+    settings: Settings,
+    remediator_model: BaseChatModel,
+    kube: Callable[[], Kube],
+):
     builder = StateGraph(InvestigationState, context_schema=RunContext)
     builder.add_node("intake", intake)
     builder.add_node("investigate", build_investigator(model, tools, settings))
     builder.add_node("verify_evidence", verify_evidence, destinations=("investigate", "result"))
-    builder.add_node("result", result)
+    builder.add_node("result", result, destinations=("remediate", END))
+    remediator = build_remediator(remediator_model, kube, settings)
+    builder.add_node("remediate", remediate_node(remediator), destinations=("investigate", END))
+    builder.add_node("recheck", recheck)
     builder.add_edge(START, "intake")
     builder.add_edge("intake", "investigate")
-    builder.add_edge("investigate", "verify_evidence")
-    builder.add_edge("result", END)
+    builder.add_conditional_edges("investigate", after_investigate, ["verify_evidence", "recheck"])
+    builder.add_edge("recheck", END)
     serde = JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_TYPES)
     return builder.compile(checkpointer=InMemorySaver(serde=serde))

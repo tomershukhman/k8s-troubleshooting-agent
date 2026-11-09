@@ -97,6 +97,7 @@ def diagnosis(*refs: str, **fields: Any) -> dict[str, Any]:
         "evidence": [{"ref": r, "finding": f"finding {r}"} for r in refs],
         "recommended_action": "Set the Service selector to app=checkout.",
         "proposed_fix": None,
+        "post_fix_check": None,
     } | fields
 
 
@@ -282,3 +283,86 @@ class FakeKube:
         return SimpleNamespace(
             status=SimpleNamespace(token=f"tok-{name}", expiration_timestamp=expires)
         )
+
+
+class FakeServices:
+    """The Kubernetes API as the remediator sees it (the core and discovery calls it makes): the
+    checkout Service, its resourceVersion and the pods. A JSON Patch is applied as the API server
+    does: all or nothing, and a failed `test` is a 422."""
+
+    def __init__(self, selector: dict[str, str] | None = None) -> None:
+        self.selector = selector or {"app": "check-out"}
+        self.version = 100
+        self.pods = {
+            "checkout-a": ({"app": "checkout"}, True),
+            "checkout-b": ({"app": "checkout"}, True),
+        }
+        self.patches: list[tuple[str, str, Any, str]] = []
+
+    def kube(self) -> Any:
+        from k8s_agent.agent.remediator import Kube
+
+        return Kube(self, self, timeout=1)
+
+    def edit(self) -> None:
+        """Someone changes the Service (any field): a new resourceVersion."""
+        self.version += 1
+
+    def read_namespaced_service(self, name, namespace, **_):  # noqa: ANN001
+        if (namespace, name) != ("shop-checkout", "checkout"):
+            raise k.ApiException(status=404, reason="Not Found")
+        meta = k.V1ObjectMeta(name=name, namespace=namespace, resource_version=str(self.version))
+        return k.V1Service(metadata=meta, spec=k.V1ServiceSpec(selector=dict(self.selector)))
+
+    def list_namespaced_pod(self, namespace, label_selector=None, **_):  # noqa: ANN001
+        want = dict(kv.split("=", 1) for kv in label_selector.split(",")) if label_selector else {}
+        return k.V1PodList(items=[
+            labelled_pod(name, labels, ready)
+            for name, (labels, ready) in self.pods.items() if want.items() <= labels.items()
+        ])  # fmt: skip
+
+    def list_namespaced_endpoint_slice(self, namespace, label_selector, **_):  # noqa: ANN001
+        """One endpoint per ready pod the selector matches."""
+        ready = k.V1EndpointConditions(ready=True)
+        endpoints = [
+            k.V1Endpoint(addresses=["10.0.0.1"], conditions=ready)
+            for labels, is_ready in self.pods.values()
+            if is_ready and self.selector.items() <= labels.items()
+        ]
+        return k.V1EndpointSliceList(
+            items=[k.V1EndpointSlice(address_type="IPv4", endpoints=endpoints)]
+        )
+
+    def patch_namespaced_service(self, name, namespace, body, _content_type, **_):  # noqa: ANN001
+        self.patches.append((namespace, name, body, _content_type))
+        for op in body:
+            if op["op"] == "test" and op["value"] != str(self.version):
+                raise k.ApiException(status=422, reason="Unprocessable Entity")
+        for op in body:
+            if (op["op"], op["path"]) == ("replace", "/spec/selector"):
+                self.selector = dict(op["value"])
+        self.version += 1
+
+
+def labelled_pod(name: str, labels: dict[str, str], ready: bool) -> k.V1Pod:
+    p = pod(ready=ready)
+    p.metadata = k.V1ObjectMeta(name=name, labels=labels)
+    return p
+
+
+def fix_call(**args: Any) -> AIMessage:
+    """The remediator requests the fix: the expected change at the fake Service's version."""
+    base = {
+        "namespace": "shop-checkout",
+        "service": "checkout",
+        "selector": {"app": "checkout"},
+        "resource_version": "100",
+        "explanation": "Select the two ready checkout pods.",
+    }
+    return call(("patch_service_selector", base | args))
+
+
+def remediator(*turns: Any, reason: str = "done") -> ScriptedModel:
+    """A remediator that takes `turns` (tool-call turns), then answers."""
+    final = AIMessage(content=json.dumps({"reason": reason}))
+    return ScriptedModel(script=[*turns, final])

@@ -153,6 +153,22 @@ def cluster(kube: AdminClients, request):
     return kube
 
 
+def stored(trace_id: str) -> Any:
+    """The trace as the tracking server holds it (an mlflow Trace). Spans are sent one by one,
+    so wait until the root span is there and the count stops changing."""
+    import mlflow
+
+    seen = None
+    for _ in range(30):
+        trace = mlflow.get_trace(trace_id)
+        spans = len(trace.data.spans) if trace else 0
+        if trace and spans == seen and any(s.parent_id is None for s in trace.data.spans):
+            return trace
+        seen = spans
+        time.sleep(1)
+    pytest.fail(f"trace {trace_id} not complete on the server ({seen} spans)")
+
+
 def mlflow_deployment(kube: AdminClients) -> tuple[client.AppsV1Api, client.V1Deployment]:
     s, apps = get_settings(), client.AppsV1Api(kube.api)
     selector = f"app.kubernetes.io/instance={s.mlflow_release}"

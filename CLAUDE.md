@@ -62,3 +62,9 @@ Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
   After the pod restarts, OrbStack's localhost route answers ~1 s after the Deployment is ready.
 - `make accept M=4` needs `MLFLOW_TRACKING_URI`; it restarts and stops the MLflow pod (restored by
   `agent setup`). Acceptance runs trace to `k8s-agent-tests` (tests/acceptance/conftest.py), not `k8s-agent`. Read traces with `mlflow.get_trace` + `Trace.search_spans`; spans arrive one by one.
+- A LangGraph conditional edge given a lambda makes MLflow's autolog record a nameless span, and the
+  upload batch it sits in is lost (the trace then won't load: "not fully exported"). Route with a
+  named function or `Command(goto=...)`; a unit test traces a fix run and fails if it recurs.
+- `make accept M=6` changes the selector Service and rebuilds the scenario (~20 s per test that does).
+- The y/N approval prompt needs a real terminal (stdin a TTY): drive demos through a pty. Tests that
+  run `agent investigate` as a subprocess need `stdin=DEVNULL`, or a terminal makes them wait for y/N.

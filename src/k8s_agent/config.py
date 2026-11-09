@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     # Where the agent may propose a fix (the remediator's RoleBinding grants the same).
     remediation_namespaces: NameList = ["shop-checkout"]
 
+    # The fix (SPEC 3.4). The wait for a person's answer has its own clock: it isn't agent
+    # working time (AGENT_RUN_MAX_SECONDS), and when it runs out the fix is rejected.
+    approval_timeout_seconds: PositiveFloat = 600
+    verify_wait_seconds: PositiveFloat = 20  # max wait for the Service's endpoints after a fix
+    verify_poll_seconds: PositiveFloat = 1
+    remediator_timeout_seconds: PositiveFloat = 30  # per Kubernetes API call as the remediator
+
     # MCP server. Host networking (SPEC §3.10): the same URL works from the host and from
     # containers. Unset AGENT_MCP_URL = http://localhost:<AGENT_MCP_PORT>/mcp.
     mcp_port: int = Field(8080, ge=1, le=65535)
@@ -49,6 +56,7 @@ class Settings(BaseSettings):
     user_id: str | None = None  # who is talking; unset = the OS user
     model: str = "anthropic:claude-sonnet-5-5"  # the investigator; LangChain model string
     critic_model: str | None = None  # the evidence critic; unset = AGENT_MODEL
+    remediator_model: str | None = None  # the remediator (the one fix); unset = AGENT_MODEL
     # high: at medium, Sonnet 5.5 often skips thinking, so traces get no reasoning summaries.
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     # Per investigate round: tool calls beyond the limit are refused and the model concludes;
@@ -151,6 +159,10 @@ class Settings(BaseSettings):
         return self.critic_model or self.model
 
     @property
+    def effective_remediator_model(self) -> str:
+        return self.remediator_model or self.model
+
+    @property
     def effective_user_id(self) -> str:
         return self.user_id or getpass.getuser()
 
@@ -160,6 +172,7 @@ class Settings(BaseSettings):
         return {
             "model": self.model,
             "critic_model": self.effective_critic_model,
+            "remediator_model": self.effective_remediator_model,
             "effort": self.effort,
             "max_output_tokens": str(self.max_output_tokens),
         }

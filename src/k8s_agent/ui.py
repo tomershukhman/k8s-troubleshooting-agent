@@ -2,6 +2,8 @@
 it happens, then the result as a readable summary. Scripts get the result JSON (cli.py)."""
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import TracebackType
 from typing import Any
 
@@ -11,21 +13,31 @@ from rich.table import Table
 from rich.text import Text
 
 from k8s_agent.agent import (
+    ApprovalRequest,
+    Decided,
     Drafted,
+    FixCalled,
     ProgressEvent,
     Reasoning,
+    Rechecked,
+    Remediated,
     Stage,
     ToolCalled,
     Verified,
     tool_output,
 )
-from k8s_agent.agent.records import RunResult, Step, VerifyRound
+from k8s_agent.agent.records import FixArgs, FixStep, Remediation, RunResult, Step, VerifyRound
+from k8s_agent.agent.remediator import labels
+from k8s_agent.policy import FIX_TOOL
+from k8s_agent.schemas import PostFixCheck
 
 ACTIVITY = {
     "intake": "Starting…",
     "investigate": "Investigator working…",
     "verify_evidence": "Checking the cited evidence…",
     "result": "Writing up the result…",
+    "remediate": "Remediator checking the fix…",
+    "recheck": "Checking the recheck's evidence…",
 }
 # The label in front of each progress line: what kind of thing it is, at its depth.
 LABELS = {
@@ -35,6 +47,7 @@ LABELS = {
     "thinking": ("thinking", "italic dim", 4),
     "draft": ("draft", "bold", 4),
     "check": ("check", "bold magenta", 2),
+    "approval": ("approval", "bold magenta", 2),
     "verdict": ("", "", 4),
     "next": ("", "", 2),
 }
@@ -57,6 +70,14 @@ def refused(step: Step) -> str | None:
     return f"no access: can't {verb} {resource} " + (
         f"in namespace {namespace}" if namespace else "cluster-wide"
     )
+
+
+def describe_fix_call(step: FixStep) -> str:
+    """A remediator read, like describe_call, with a selector as `kubectl` writes it."""
+    a = step.args
+    if isinstance(a.get("selector"), dict):
+        a = {**a, "selector": labels(a["selector"])}
+    return describe_call(a)
 
 
 def preview(step: Step) -> str:
@@ -96,6 +117,15 @@ class Progress:
     def __exit__(self, *_: type[BaseException] | BaseException | TracebackType | None) -> None:
         self.status.stop()
 
+    @contextmanager
+    def paused(self) -> Iterator[None]:
+        """No spinner while a prompt is up."""
+        self.status.stop()
+        try:
+            yield
+        finally:
+            self.status.start()
+
     def line(self, kind: str, *parts: str | tuple[str, str]) -> None:
         label, style, depth = LABELS[kind]
         text = Text.assemble(" " * depth, (f"{label:<9}" if label else "", style), *parts)
@@ -104,11 +134,17 @@ class Progress:
 
     def __call__(self, event: ProgressEvent) -> None:
         match event:
-            case Stage(name=name, round=n):
-                self.status.update(ACTIVITY[name])
-                self.line("node", (name, "bold"), (f" · round {n}" if n > 1 else "", "dim"))
-                if name == "investigate":
-                    self.line("agent", "investigator", (f" · {self.models['investigator']}", "dim"))
+            case Stage(name=name, round=n, recheck=again):
+                self.status.update(
+                    "Investigator checking that the fix worked…" if again else ACTIVITY[name]
+                )
+                # remediate starts again only to resume after the approval
+                which = "resumed" if name == "remediate" else f"round {n}"
+                which = "recheck after the fix" if again else which
+                self.line("node", (name, "bold"), (f" · {which}" if n > 1 else "", "dim"))
+                if name == "investigate" or (name == "remediate" and n == 1):
+                    agent = "remediator" if name == "remediate" else "investigator"
+                    self.line("agent", agent, (f" · {self.models[agent]}", "dim"))
             case ToolCalled(step=s):
                 call = f"({describe_call(s.args)})  "
                 self.line("tool", (s.tool, "bold"), call, (f"{s.ref} · {s.latency_ms} ms", "dim"))
@@ -124,6 +160,28 @@ class Progress:
                 self.line("draft", what, (f" · cites {' '.join(d.refs) or 'nothing'}", "dim"))
             case Verified(round=r):
                 self.verdict(r)
+            case FixCalled(step=s) if s.tool != FIX_TOOL:  # the fix: the approval lines below
+                self.line("tool", (s.tool, "bold"), f"({describe_fix_call(s)})")
+                first = (s.output.strip().splitlines() or ["(empty)"])[0]
+                self.line("verdict", " " * 9, (first, "red" if s.error else "dim"))
+            case Decided(request=q, decision=d):
+                a, now = q.args, q.facts.current_selector
+                change = f"{labels(now)} → " if now is not None else ""
+                wanted = a.get("selector") if isinstance(a.get("selector"), dict) else None
+                self.line("approval", f"Service/{a.get('service')} -n {a.get('namespace')}: ",
+                          (f"{change}{labels(wanted)}", "bold"))  # fmt: skip
+                mark = ("✓ ", "green") if d.approved else ("✗ ", "red")
+                verdict = ("approved", "bold green") if d.approved else ("rejected", "bold red")
+                self.line("verdict", mark, verdict, f": {d.reason}", (f" (by {d.by})", "dim"))
+            case Remediated(remediation=r):
+                style = "bold green" if r.outcome == "applied" else "bold yellow"
+                self.line("next", (f"→ {r.outcome}: ", style), r.detail)
+            case Rechecked(remediation=r):
+                if r.verified:
+                    self.line("next", ("→ verified: ", "bold green"),
+                              "ready endpoints, and the recheck says resolved")  # fmt: skip
+                else:
+                    self.line("next", ("→ not verified: ", "bold yellow"), r.recheck_note or "")
 
     def verdict(self, r: VerifyRound) -> None:
         for problem in r.problems:
@@ -180,18 +238,73 @@ def summary(result: RunResult) -> RenderableType:
             table.add_row(e.ref, e.finding, f"{s.tool} {describe_call(s.args)}" if s else "")
         parts += [Text(), table]
     parts += [Text(), Text.assemble(("Next step: ", "bold"), d.recommended_action)]
+    rem = result.remediation
     if fix := d.proposed_fix:
-        selector = ", ".join(f"{k}={v}" for k, v in fix.selector_dict().items())
+        unchanged = "" if rem else " Nothing has been changed."  # else: the fix line says
         parts.append(
             Text.assemble(
                 ("Proposed fix: ", "bold"),
-                f"set the selector of Service {fix.namespace}/{fix.service} to {selector}. ",
-                (f"{fix.explanation} Nothing has been changed.", "dim"),
+                f"set the selector of Service {fix.namespace}/{fix.service} to "
+                f"{labels(fix.selector_dict())}. ",
+                (f"{fix.explanation}{unchanged}", "dim"),
             )
         )
+    if rem:
+        parts.append(fix_summary(rem, d.post_fix_check))
     return Panel(
         Group(*parts), title=title, title_align="left", subtitle=footer, border_style=color
     )
+
+
+def fix_summary(r: Remediation, check: PostFixCheck | None) -> Text:
+    """What happened to the fix: the decision, the outcome, and whether a recheck verified it."""
+    text = Text.assemble(("Fix: ", "bold"))
+    if d := r.decision:
+        verdict = ("approved", "green") if d.approved else ("rejected", "red")
+        text.append_text(Text.assemble(verdict, f": {d.reason} (by {d.by}, {d.at:%H:%M:%S} UTC). "))
+    if r.outcome == "applied":
+        text.append(f"Applied: {r.detail}. ")
+        if r.verified and check:  # verified implies the recheck's own evidence
+            refs = ", ".join(e.ref for e in check.evidence)
+            text.append(f"Verified by a recheck with fresh evidence ({refs}).", "green")
+        else:
+            text.append(f"Not verified: {r.recheck_note}.", "yellow")
+    elif r.outcome == "not_applied":
+        text.append("Nothing was changed." if d else f"The remediator declined: {r.detail}.")
+    else:
+        text.append(f"{r.outcome.capitalize()}: {r.detail}.")
+    return text
+
+
+def approval(request: ApprovalRequest) -> RenderableType:
+    """The fix a person is asked to approve: the change, the remediator's explanation, and
+    facts code just read as the remediator."""
+    a, f = FixArgs.model_validate(request.args), request.facts  # the gate checked it
+    rows = Table.grid(padding=(0, 2))
+    rows.add_column(style="bold")
+    rows.add_column()
+    now = labels(f.current_selector) if f.error is None else "?"
+    # Text, not markup: these come from the cluster and the model, and may hold "[...]".
+    rows.add_row("Service", Text(f"{a.namespace}/{a.service}"))
+    rows.add_row("Selector", Text(f"{now}  →  {labels(a.selector)}  (replaces the whole selector)"))
+    rows.add_row("Remediator", Text(a.explanation))
+    if f.error is None:
+        pods = ", ".join(f.ready_pods) or "none"
+        match = f"{len(f.ready_pods)} ready pods match {labels(a.selector)}: {pods}"
+        rows.add_row("Checked now", Text(match))
+    rows.add_row("Applies only if", Text(f"the Service is still at version {a.resource_version}"))
+    warnings = []
+    if f.error is not None:
+        warnings.append(f"Couldn't check the Service as the remediator: {f.error}")
+    elif f.resource_version != a.resource_version:
+        warnings.append(
+            f"The Service changed since the remediator read it (version {f.resource_version}): "
+            "approving will be refused as stale."
+        )
+    elif not f.ready_pods:
+        warnings.append("No ready pod matches the new selector: approving will be refused.")
+    body = Group(rows, *(Text(w, "bold yellow") for w in warnings))
+    return Panel(body, title="[bold]Approve this fix?", title_align="left", border_style="yellow")
 
 
 # The eval checks, in the results table's order: (MLflow scorer, column header).
@@ -206,27 +319,31 @@ EVAL_COLUMNS = (
 
 
 def eval_table(results: list[Any]) -> Table:
-    """`agent eval`'s results (evals.ScenarioResult): runs passed per check, then speed and
-    cost per investigation (from the traces) and the judges' cost."""
+    """`agent eval`'s results (evals.ScenarioResult): runs passed per check, the fix run, then
+    speed and cost per investigation (from the traces; the total includes the fix runs) and
+    the judges' cost."""
     table = Table(title="Eval results", header_style="bold")
     table.add_column("Scenario")
     table.add_column("Result")
     for _, header in EVAL_COLUMNS:
         table.add_column(header, justify="right")
+    table.add_column("Fix\nrun", justify="right")
     for header in ("Avg time", "Avg tokens", "Avg cost", "Judges"):
         table.add_column(header, justify="right")
-    every = [run for r in results for run in r.runs]
+    every = [run for r in results for run in r.runs + (r.fix.runs if r.fix else [])]
     for r in results:
         passed = [f"{r.passes.get(name, 0)}/{r.planned}" for name, _ in EVAL_COLUMNS]
+        fix = "" if r.fix is None else "[green]pass[/]" if r.fix.passed else "[red]FAIL[/]"
         table.add_row(
             r.name,
             "[green]pass[/]" if r.passed else "[red]FAIL[/]",
             *passed,
+            fix,
             *_costs(r.runs),
         )
     table.add_section()
     table.add_row("All", f"{sum(r.passed for r in results)}/{len(results)} pass",
-                  *[""] * len(EVAL_COLUMNS), *_costs(every, total=True))  # fmt: skip
+                  *[""] * (len(EVAL_COLUMNS) + 1), *_costs(every, total=True))  # fmt: skip
     return table
 
 

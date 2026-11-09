@@ -4,11 +4,13 @@ import asyncio
 import json
 import logging
 import math
+import os
 import sys
+import termios
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext, redirect_stdout
 from datetime import UTC, datetime
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 from kubernetes.client.exceptions import ApiException
@@ -18,7 +20,14 @@ from rich.text import Text
 from urllib3.exceptions import HTTPError
 
 from k8s_agent import access, scenarios, tracing, tracking_server, ui
-from k8s_agent.agent import McpUnavailable, NotStarted, RunStatus
+from k8s_agent.agent import (
+    Answer,
+    ApprovalRequest,
+    Approver,
+    McpUnavailable,
+    NotStarted,
+    RunStatus,
+)
 from k8s_agent.agent import investigate as run_investigation
 from k8s_agent.config import Settings, get_settings
 from k8s_agent.kube import KubeError, admin_clients
@@ -67,6 +76,48 @@ def _tracing(s: Settings) -> tracing.Tracing | None:
         return None
 
 
+async def _read_line(fd: int) -> str:
+    """A line typed in the terminal, read without blocking the event loop, so the approval's
+    own time limit can cancel the wait (a blocking input() in a thread can't be)."""
+    loop = asyncio.get_running_loop()
+    line: asyncio.Future[str] = loop.create_future()
+
+    def ready() -> None:
+        if not line.done():
+            line.set_result(os.read(fd, 4096).decode(errors="replace"))
+
+    loop.add_reader(fd, ready)
+    try:
+        return await line
+    finally:
+        loop.remove_reader(fd)
+
+
+def _approver(err: Console, progress: ui.Progress | None) -> Approver | None:
+    """The y/N prompt, when stdin is a terminal: the prompt goes to stderr, so `--json | jq`
+    still asks. None otherwise (piped, scripted, CI): the agent then rejects the fix, "no
+    interactive approval available". There is no --yes."""
+    if not sys.stdin.isatty():
+        return None
+
+    async def ask(request: ApprovalRequest) -> Answer:
+        with progress.paused() if progress else nullcontext():
+            # Drop anything typed while the agent worked: only an answer typed after seeing
+            # the change counts.
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            err.print(ui.approval(request))
+            err.print(Text("Apply this change? [y/N] ", "bold"), end="")
+            try:
+                reply = await _read_line(sys.stdin.fileno())
+            except asyncio.CancelledError:  # the approval timed out
+                err.print()
+                raise
+        yes = reply.strip().lower() in ("y", "yes")
+        return Answer(yes, f"answered {'yes' if yes else 'no'} in the terminal")
+
+    return ask
+
+
 @contextmanager
 def _clean_errors() -> Iterator[None]:
     """A cluster or scenario problem is one error line and exit 1, not a traceback."""
@@ -94,7 +145,9 @@ def investigate(
     """Investigate a problem with read-only tools and report the diagnosis.
 
     In a terminal: live progress, then a summary. Piped or with --json: the result JSON on
-    stdout. Exit codes:
+    stdout. For a broken Service selector (in AGENT_REMEDIATION_NAMESPACES) the agent can fix it:
+    it shows you the exact change and asks y/N; it runs only if you approve. Without a terminal
+    on stdin the fix is rejected. Exit codes:
 
     0: a diagnosis, "inconclusive" included.
     1: the run failed; the result says why.
@@ -109,15 +162,22 @@ def investigate(
         err.print(
             Text.assemble(("Investigating: ", "bold"), question, (f"  (as {user_id})", "dim"))
         )
-    models = {"investigator": s.model, "critic": s.effective_critic_model}
-    progress = (
-        nullcontext(lambda _: None) if quiet else ui.Progress(err, models, s.progress_summary_chars)
-    )
+    models = {
+        "investigator": s.model,
+        "critic": s.effective_critic_model,
+        "remediator": s.effective_remediator_model,
+    }
+    progress = None if quiet else ui.Progress(err, models, s.progress_summary_chars)
     try:
-        with progress as on_event:
+        with progress or nullcontext():
             record = asyncio.run(
                 run_investigation(
-                    question, settings=s, namespace=namespace, user_id=user_id, on_event=on_event
+                    question,
+                    settings=s,
+                    namespace=namespace,
+                    user_id=user_id,
+                    on_event=progress or (lambda _: None),
+                    approve=_approver(err, progress),
                 )
             )
     except McpUnavailable as e:
@@ -187,39 +247,53 @@ def eval_(
     path = s.eval_results_dir / f"{started:%Y%m%dT%H%M%SZ}.json"
     agent, results = evals.Agent(s), []
 
+    def scored(r: evals.ScenarioResult) -> dict[str, Any]:
+        return {"name": r.name, "passed": r.passed, "failures": r.failures, "metrics": r.metrics,
+                "mlflow_run": trace.run_url(r.run_id), "runs": r.runs}  # fmt: skip
+
     def save() -> None:  # after each scenario, so a later failure keeps what was scored
         report = {
             "started_at": started.isoformat(),
             "passed": all(r.passed for r in results),
             "settings": {**s.model_settings, "judge_model": s.judge_model,
                          "runs": s.eval_runs_per_scenario, "pass_min_runs": s.eval_pass_min_runs},
-            "scenarios": [
-                {"name": r.name, "passed": r.passed, "failures": r.failures, "metrics": r.metrics,
-                 "mlflow_run": trace.run_url(r.run_id), "runs": r.runs}
-                for r in results
-            ],
+            "scenarios": [scored(r) | {"fix": r.fix and scored(r.fix)} for r in results],
         }  # fmt: skip
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report, indent=2, default=str))
 
+    def up(scn: scenarios.Scenario) -> None:
+        with _clean_errors():
+            scenarios.up(
+                scn,
+                c,
+                ready_timeout=s.scenario_ready_timeout_seconds,
+                delete_timeout=s.scenario_delete_timeout_seconds,
+                poll=s.scenario_poll_seconds,
+                progress=lambda msg: _say(f"{scn.name}: {msg}"),
+            )
+
+    def say_verdict(r: evals.ScenarioResult) -> None:
+        verdict = "passed" if not r.failures else "FAILED: " + "; ".join(r.failures)
+        _say(f"{r.name}: {verdict}\n  {trace.run_url(r.run_id)}")
+
     try:
         for scn in found.values():
-            with _clean_errors():
-                scenarios.up(
-                    scn,
-                    c,
-                    ready_timeout=s.scenario_ready_timeout_seconds,
-                    delete_timeout=s.scenario_delete_timeout_seconds,
-                    poll=s.scenario_poll_seconds,
-                    progress=lambda msg, name=scn.name: _say(f"{name}: {msg}"),
-                )
+            up(scn)
             _say(f"{scn.name}: {s.eval_runs_per_scenario} runs, then scoring")
             with redirect_stdout(sys.stderr):  # MLflow prints its own summary; stdout: the table
                 result = evals.evaluate(scn, s, agent)
+            say_verdict(result)
+            if scn.spec.expected_fix is not None:
+                _say(f"{scn.name}: the fix run (it approves the fix), then a rebuild")
+                try:
+                    with redirect_stdout(sys.stderr):
+                        result.fix = evals.evaluate_fix(scn, s, agent)
+                finally:
+                    up(scn)  # the fix changed the cluster: broken again, as the scenario is
+                say_verdict(result.fix)
             results.append(result)
             save()
-            verdict = "passed" if result.passed else "FAILED: " + "; ".join(result.failures)
-            _say(f"{scn.name}: {verdict}\n  {trace.run_url(result.run_id)}")
     except McpUnavailable as e:
         _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", EXIT_NOT_STARTED)
     except NotStarted as e:

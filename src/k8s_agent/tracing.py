@@ -99,6 +99,20 @@ def run(
             raise
 
 
+@contextmanager
+def span(name: str, inputs: Any, span_type: str) -> Iterator[Any]:
+    """A span of our own inside the current trace (an MLflow `LiveSpan`), or None when tracing
+    is off. `span_type`: an MLflow span type, e.g. "GUARDRAIL"."""
+    if _on is None:
+        yield None
+        return
+    import mlflow
+
+    with mlflow.start_span(name, span_type=span_type) as live:
+        live.set_inputs(inputs)
+        yield live
+
+
 def finish(span: Any, outputs: Any, error: str | None) -> None:
     """Record the run's result on its root span; a failed run marks the trace as an error."""
     if span is None:

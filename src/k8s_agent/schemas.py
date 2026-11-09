@@ -78,8 +78,9 @@ class SelectorLabel(Strict):
 
 
 class ProposedFix(Strict):
-    """A change for a human to approve later (M6); nothing acts on it during investigation.
-    The selector is a list of labels: structured output can't express a free-form map."""
+    """The one executable fix: the remediator requests it after the diagnosis, and it runs only
+    if a person approves. The selector is a list of labels: structured output can't express a
+    free-form map."""
 
     namespace: str
     service: str
@@ -90,6 +91,15 @@ class ProposedFix(Strict):
 
     def selector_dict(self) -> dict[str, str]:
         return {label.key: label.value for label in self.selector}
+
+
+class PostFixCheck(Strict):
+    """The recheck after a fix, from fresh tool calls."""
+
+    resolved: bool = Field(description="Does the fresh evidence show the problem is gone?")
+    evidence: list[Evidence] = Field(
+        description="Findings citing only the tool calls made in this recheck"
+    )
 
 
 class Diagnosis(Strict):
@@ -109,6 +119,9 @@ class Diagnosis(Strict):
         description="Only for a Service selector that doesn't match its pods, in a namespace "
         "where fixes are allowed; otherwise null"
     )
+    post_fix_check: PostFixCheck | None = Field(
+        description="Only when asked to check again after a fix; otherwise null"
+    )
 
     @field_validator("status", "fault_category", mode="before")
     @classmethod
@@ -118,7 +131,9 @@ class Diagnosis(Strict):
 
     @property
     def refs(self) -> list[str]:
-        return [e.ref for e in self.evidence]
+        """Every evidence ID the answer cites, the recheck's included."""
+        rechecked = self.post_fix_check.evidence if self.post_fix_check else []
+        return [e.ref for e in [*self.evidence, *rechecked]]
 
 
 class FindingVerdict(Strict):
@@ -148,3 +163,10 @@ class CriticVerdict(Strict):
         description="When not founded: what is wrong and what evidence would settle it. "
         "When founded: empty"
     )
+
+
+class RemediatorAnswer(Strict):
+    """The remediator's final answer: after its fix request, or instead of one. Whether it
+    requested the fix is in its tool calls; this says why it didn't, or what happened."""
+
+    reason: str = Field(description="Why you declined; otherwise what the fix tool reported")

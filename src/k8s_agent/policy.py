@@ -14,5 +14,10 @@ READ_ONLY_TOOLS = frozenset(
     }
 )
 
+# The remediator's tools (SPEC 3.4), all as the `remediator` identity: three reads, and the one
+# tool that changes anything, which runs only after a person approves its exact arguments.
+REMEDIATOR_READ_TOOLS = frozenset({"get_service", "list_pods", "list_endpoint_slices"})
+FIX_TOOL = "patch_service_selector"
+
 # Namespace holding the agent's ServiceAccounts (deploy/rbac.yaml). Never deleted by scenarios.
 AGENT_NAMESPACE = "k8s-agent"

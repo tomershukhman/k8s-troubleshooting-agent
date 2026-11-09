@@ -22,7 +22,7 @@ STOPPED = "http://127.0.0.1:9"  # nothing listens: every connection is refused
 
 def investigate(monkeypatch):
     models = iter([ScriptedModel(script=[call(("namespaces_list", {})), answer(diagnosis("E1"))]),
-                   critic()])  # fmt: skip
+                   critic(), ScriptedModel()])  # fmt: skip
     monkeypatch.setattr(core, "make_model", lambda _settings, _name: next(models))
     monkeypatch.setattr(core, "mcp_client", lambda _settings: FakeCluster().server)
     get_settings.cache_clear()

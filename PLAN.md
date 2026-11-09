@@ -318,6 +318,8 @@ The remediator agent, the routing, the approval-gated fix tool and the recheck. 
 4. the tool applies exactly that change
 5. the investigator checks again and confirms the problem is gone
 
+**Built** (2026-11-09) as below; where the build differs from the plan, the step says so (**Built:**). Details and reasons: [SPEC 3.4](SPEC.md#34-remediation-a-remediator-agent-behind-human-approval).
+
 **Why**
 The assignment requires one approved fix through a narrowly scoped tool, verified with fresh evidence.
 
@@ -326,21 +328,25 @@ The assignment requires one approved fix through a narrowly scoped tool, verifie
    - the JSON Patch with a version test is atomic, and rejected when the Service changed
    - the `HumanInTheLoopMiddleware` pause inside the remediator (a subgraph of the main graph) pauses and resumes the whole graph through the parent checkpointer; fallback: run the remediator as a plain node sharing the graph state
    - the middleware works with the structured final answer
-2. **Routing (code):** only a `proposed_fix` of the supported type, in an allowed namespace, reaches the remediator.
+   - **Built:** all three confirmed, so the fallback wasn't needed ([SPEC 6](SPEC.md#6-to-verify-at-build-time)). Found: `interrupt_mode="per_call"` has LangGraph refuse anything but approve or reject before saving it; MLflow marks the paused spans as errors.
+2. **Routing (code):** only a `proposed_fix` of the supported type, in an allowed namespace, reaches the remediator. **Built:** in the `result` node, with `Command(goto=…)`: a conditional edge given a lambda made MLflow lose spans.
 3. **The remediator agent:** `create_agent` with its own prompt and model setting, and the `remediator` identity.
    - Its tools: small read functions (get the Service; list pods and EndpointSlices in the fix namespace) and `patch_service_selector`, all using only the `remediator` kubeconfig. Not the MCP server. They fail rather than falling back to any other kubeconfig.
    - It checks the exact new selector matches ready pods, writes the explanation and expected effect, then calls the tool. If its check fails, it declines with a reason.
-4. **The gate:** LangChain's `HumanInTheLoopMiddleware` pauses the run before the tool executes. Only approve or reject; no edit, so what you approve is exactly what executes. The pause and the resume happen inside the one core call (e.g. an approval callback the CLI passes in), so the whole run, fix included, stays one trace ([SPEC 3.7](SPEC.md#37-observability)).
-5. **At the pause, the CLI shows** the change, the remediator's explanation, and facts checked by code: "selector app=check-out → app=checkout; 2 ready pods will match".
-6. **Two clocks:** the approval wait has its own limit, `AGENT_APPROVAL_TIMEOUT_SECONDS` (600). Expired → reject; the result says the approval timed out.
-7. **No unattended approval:** without an interactive terminal (piped, scripted, CI), the fix is rejected with "no interactive approval available". No `--yes` flag.
+   - **Built:** called inside the `remediate` node (its own input, not the investigator's messages); structured answer `{reason}`; the per-round limits as `thread_limit`, and one fix request per run; the tool also takes the `resource_version` the remediator read, so the version check is part of the call you approve.
+4. **The gate:** LangChain's `HumanInTheLoopMiddleware` pauses the run before the tool executes. Only approve or reject; no edit, so what you approve is exactly what executes. The pause and the resume happen inside the one core call (e.g. an approval callback the CLI passes in), so the whole run, fix included, stays one trace ([SPEC 3.7](SPEC.md#37-observability)). **Built:** `interrupt_mode="per_call"`; code rejects a malformed request, or one that differs from the proposed fix, without asking; the decision is an `approval` span on the trace.
+5. **At the pause, the CLI shows** the change, the remediator's explanation, and facts checked by code: "selector app=check-out → app=checkout; 2 ready pods will match". **Built:** also the version the fix is pinned to, and a warning when approving would be refused.
+6. **Two clocks:** the approval wait has its own limit, `AGENT_APPROVAL_TIMEOUT_SECONDS` (600). Expired → reject; the result says the approval timed out. **Built:** the graph runs in segments; each gets what's left of `AGENT_RUN_MAX_SECONDS`.
+7. **No unattended approval:** without an interactive terminal (piped, scripted, CI), the fix is rejected with "no interactive approval available". No `--yes` flag. **Built:** interactive = stdin is a terminal; the prompt goes to stderr, so `--json | jq` still asks; input typed before the prompt is discarded; the progress display pauses meanwhile.
 8. **Approve:**
    - the tool re-validates
    - it applies a JSON Patch that checks the Service's version and replaces the selector exactly
    - it waits for endpoints
-9. **Recheck:** the investigator, not the remediator, checks again with fresh evidence and fills `post_fix_check`. No critic round on the recheck. "Verified" needs both the endpoints and the recheck.
+   - **Built:** a failed version test is a generic 422, so the tool re-reads the version to tell `stale` from `invalid`; once applied, the outcome stays `applied`; no answer from the API server is `failed`.
+9. **Recheck:** the investigator, not the remediator, checks again with fresh evidence and fills `post_fix_check`. No critic round on the recheck. "Verified" needs both the endpoints and the recheck. **Built:** one more round of the investigator in its own `investigate` node (so its run-wide budget and evidence IDs carry on), then a code node `recheck`; `post_fix_check` must cite only that round's fresh tool calls.
 10. **Reject:** nothing changes; the run finishes without the fix.
-11. **Evals:** diagnosis runs reject any fix request and record it; a separate remediation run approves. That is the only automatic approval, in eval code.
+11. **Evals:** diagnosis runs reject any fix request and record it; a separate remediation run approves. That is the only automatic approval, in eval code. **Built:** the fix run is its own `mlflow.genai.evaluate` in its own MLflow run (`selector fix`), scored by the four exact checks and `remediation_works` (all must pass, no judges); the scenario is rebuilt after it.
+12. **Built (not planned):** a stop after the diagnosis was verified (a limit, a budget, a model API error, a bug, in the fix or the recheck) keeps the diagnosis and is recorded on the fix.
 
 **What we test**
 - **`make check`, with a fake model:**
@@ -354,12 +360,51 @@ The assignment requires one approved fix through a narrowly scoped tool, verifie
   - the exact selector is applied; extra old keys don't survive
   - a version change after the pause gives "stale", and nothing is applied
   - the tool never uses any kubeconfig but the remediator's
+  - added in the build and its review:
+    - a malformed request, or one other than the proposed fix, is rejected without asking anyone; at most one request per run
+    - the wait for approval doesn't count toward the run's time budget, and the agents' time after the resume uses only what was left
+    - an approval that doesn't come in time is a reject
+    - every decision (approve, reject, timed out, no terminal, malformed) is on the trace with who and when, and the whole run is one complete trace (a local MLflow store)
+    - on a real pseudo-terminal: only an answer typed after the change is shown counts; the progress display is paused; the remediator's text is shown verbatim, not as markup; a prompt that times out stops reading the terminal
+    - no terminal on stdin: no prompt, and the fix is rejected
+    - the recheck counts toward the run-wide budget, and must cite fresh evidence
+    - a stop in the fix or the recheck keeps the diagnosis
+    - no answer from the API server: before the patch, nothing applied; once applied, it stays applied
 - **`make accept M=6`:**
   - the investigator proposes, and the remediator requests, exactly the right change
   - after approval, the Service gets endpoints and the result is "verified", recording who approved
   - after a reject, the Service is unchanged
   - editing the Service during the pause makes the fix refuse
-- **Evals:** the selector score now includes the fix.
+  - added: the CLI with no terminal on stdin rejects the fix (the Service unchanged); an edit between the fix tool's own check and its patch is refused by the API server's version test; the approved run is one trace with the approval on it
+- **Evals:** the selector score now includes the fix (the fix run, `remediation_works`).
+
+---
+
+## Code review (between M6 and M7)
+
+**What we do**
+A deep review of the whole codebase once the agent is complete, on its own branch, `review`, cut from `main` after M6.
+
+**Why**
+The code should be minimal, idiomatic and well documented before M7 packages it and CI starts checking it.
+
+**How**
+1. **Fresh reviewers,** none of them the sessions that built the code, each on one angle:
+   - over-engineering, and library built-ins we could use instead
+   - idiomatic Python, LangGraph, LangChain and MLflow
+   - documentation and readability
+   - test quality
+   - security and the safety boundary
+   - whether the code matches SPEC
+   They also run a type checker and a dead-code finder. The type checker joins `make check` for good.
+2. **Every finding is verified** before anything changes. False alarms are dropped.
+3. **Refactor without changing behaviour:** no new features. Findings that would change behaviour, a design decision in SPEC, a prompt (prompts move the eval scores), a dependency or the CLI/config interface are only listed, for the user to decide.
+4. Commits go to `review` only. It is merged into `main` (not pushed before then) once the user approves.
+
+**What we test**
+The full suite at the end, every milestone, since a refactor can touch anything:
+- `make check`
+- `make accept` (M1–M6), including the full eval and the selector fix run
 
 ---
 

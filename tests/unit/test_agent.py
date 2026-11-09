@@ -20,12 +20,14 @@ from k8s_agent.schemas import CATEGORY_DEFINITIONS, CriticVerdict
 from tests.fakes import (
     SERVICE_ARGS,
     FakeCluster,
+    FakeServices,
     ScriptedModel,
     answer,
     call,
     critic,
     diagnosis,
     healthy,
+    remediator,
     selector_fix,
     unsure,
     verdict,
@@ -39,6 +41,8 @@ LOG = {"name": "p", "namespace": "shop-checkout"}
 
 
 def run(model, cluster=None, judge=None, *, target=None, **kwargs):
+    kwargs.setdefault("remediator_model", remediator())
+    kwargs.setdefault("remediator_kube", FakeServices().kube)
     return asyncio.run(
         investigate(
             "Why is checkout down?",
@@ -105,11 +109,13 @@ def test_the_models_come_from_the_settings(env, monkeypatch):
     env(
         model="anthropic:investigator",
         critic_model="anthropic:critic",
+        remediator_model="anthropic:remediator",
         max_output_tokens="1234",
         effort="low",
     )
     names = []
-    models = iter([ScriptedModel(script=[call(LIST), answer(healthy("E1"))]), critic()])
+    investigator = ScriptedModel(script=[call(LIST), answer(healthy("E1"))])
+    models = iter([investigator, critic(), ScriptedModel()])
     real = core.make_model
 
     def make(settings, name):
@@ -122,7 +128,7 @@ def test_the_models_come_from_the_settings(env, monkeypatch):
 
     monkeypatch.setattr(core, "make_model", make)
     asyncio.run(investigate("q", settings=get_settings(), mcp_target=FakeCluster().server))
-    assert names == ["anthropic:investigator", "anthropic:critic"]
+    assert names == ["anthropic:investigator", "anthropic:critic", "anthropic:remediator"]
 
 
 def test_system_prompt_has_every_category_the_tool_limit_and_fix_namespaces(env):

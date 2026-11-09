@@ -8,10 +8,10 @@ from enum import StrEnum
 from typing import Any
 
 from langchain_core.messages import BaseMessage, ToolMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from k8s_agent.agent.tool_output import untag
-from k8s_agent.schemas import Diagnosis, FindingVerdict
+from k8s_agent.schemas import Diagnosis, FindingVerdict, PostFixCheck
 
 EVIDENCE = "evidence"  # the key of our record in a ToolMessage's artifact
 
@@ -54,6 +54,98 @@ class EvidenceStep(BaseModel):
     output_excerpt: str
 
 
+# --- the fix (SPEC 3.4) ----------------------------------------------------------------------
+
+
+class FixArgs(BaseModel):
+    """patch_service_selector's arguments: exactly what runs once a person approves."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str
+    service: str
+    selector: dict[str, str] = Field(description="The Service's complete new selector")
+    resource_version: str = Field(
+        description="The Service's metadata.resourceVersion as you read it; the fix is refused "
+        "if the Service changed since"
+    )
+    explanation: str = Field(
+        description="For the person who approves: what changes, and the effect you expect"
+    )
+
+
+class Facts(BaseModel):
+    """Read by code, as the remediator, while the run waits for approval."""
+
+    current_selector: dict[str, str] | None = None
+    resource_version: str | None = None
+    ready_pods: list[str] = []  # ready pods the exact new selector matches
+    error: str | None = None  # why they couldn't be read
+
+
+class ApprovalRequest(BaseModel):
+    """What the person is shown before deciding: the call exactly as it would run (FixArgs, once
+    the gate has checked it), and facts read at the pause."""
+
+    tool: str
+    args: dict[str, Any]
+    facts: Facts
+
+
+@dataclass(frozen=True)
+class Answer:
+    """An approver's answer, and how it was given (recorded with the decision)."""
+
+    approved: bool
+    how: str  # e.g. "answered yes in the terminal"
+
+
+class Decision(BaseModel):
+    approved: bool
+    reason: str  # how: in the terminal, timed out, no interactive approval available, ...
+    by: str  # the user who answered, or the agent when code decided
+    at: datetime
+
+
+class FixOutcome(StrEnum):
+    applied = "applied"
+    stale = "stale"  # the Service changed after the remediator read it: nothing applied
+    invalid = "invalid"  # validation failed: nothing applied
+    failed = "failed"  # an API error, or the run stopped mid-fix: see `detail`
+    not_applied = "not_applied"  # the remediator declined, or the request was rejected
+
+
+class Change(BaseModel):
+    namespace: str
+    service: str
+    before: dict[str, str] | None  # the selector the fix found; None if it never read it
+    after: dict[str, str]  # the selector requested (or proposed, if it never was)
+
+
+class FixStep(BaseModel):
+    """One remediator tool call."""
+
+    tool: str
+    args: dict[str, Any]
+    output: str
+    error: bool
+
+
+class Remediation(BaseModel):
+    """The fix: the change, what the person was shown and decided, what happened, and whether
+    a recheck with fresh evidence confirmed it."""
+
+    change: Change
+    request: ApprovalRequest | None = None  # None: nobody was asked
+    decision: Decision | None = None
+    outcome: FixOutcome
+    detail: str  # the fix tool's report, or why the remediator declined or stopped
+    endpoints_ready: int = 0  # counted by the fix tool after applying
+    verified: bool = False  # applied, endpoints ready, and the recheck says resolved
+    recheck_note: str | None = None  # why the recheck couldn't confirm it
+    steps: list[FixStep] = []
+
+
 class RunResult(BaseModel):
     run_id: str
     thread_id: str
@@ -69,6 +161,7 @@ class RunResult(BaseModel):
     error: str | None
     evidence_steps: list[EvidenceStep]
     verification: list[VerifyRound]
+    remediation: Remediation | None = None
 
 
 class RunRecord(BaseModel):
@@ -114,8 +207,9 @@ def thinking_of(message: BaseMessage) -> list[str]:
 
 @dataclass(frozen=True)
 class Stage:
-    name: str  # a graph node: intake | investigate | verify_evidence | result
+    name: str  # a graph node: intake | investigate | verify_evidence | result | remediate | recheck
     round: int
+    recheck: bool = False  # investigate: the round that rechecks a fix
 
 
 @dataclass(frozen=True)
@@ -140,4 +234,35 @@ class Verified:
     round: VerifyRound
 
 
-ProgressEvent = Stage | ToolCalled | Reasoning | Drafted | Verified
+@dataclass(frozen=True)
+class FixCalled:
+    """A remediator tool call, with its result."""
+
+    step: FixStep
+
+
+@dataclass(frozen=True)
+class Decided:
+    request: ApprovalRequest
+    decision: Decision
+
+
+@dataclass(frozen=True)
+class Remediated:
+    """The remediator is done: the fix's outcome."""
+
+    remediation: Remediation
+
+
+@dataclass(frozen=True)
+class Rechecked:
+    """The recheck is done: what it found, and whether the fix is verified."""
+
+    check: PostFixCheck | None
+    remediation: Remediation
+
+
+ProgressEvent = (
+    Stage | ToolCalled | Reasoning | Drafted | Verified | FixCalled | Decided | Remediated
+    | Rechecked
+)  # fmt: skip

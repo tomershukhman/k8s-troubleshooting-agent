@@ -19,7 +19,7 @@ from k8s_agent.config import get_settings
 from k8s_agent.policy import READ_ONLY_TOOLS
 from k8s_agent.scenarios import get_scenario
 
-from .conftest import ROOT, agent, eventually, mlflow_deployment
+from .conftest import ROOT, agent, eventually, mlflow_deployment, stored
 
 pytestmark = pytest.mark.usefixtures("cluster")
 ATTEMPTS = 2
@@ -35,30 +35,18 @@ def uri() -> str:
 
 
 def investigate(question: str, *args: str) -> tuple[dict[str, Any], str, float]:
-    """`agent investigate --json` as a user runs it: (result, stderr, seconds until exit)."""
+    """`agent investigate --json` as a user runs it: (result, stderr, seconds until exit). No
+    terminal on stdin, so a fix it requests (selector) is rejected instead of waiting for y/N."""
     t0 = time.monotonic()
     done = subprocess.run(
         ["uv", "run", "agent", "investigate", question, "--json", *args],
-        cwd=ROOT, env=dict(os.environ), capture_output=True, text=True, timeout=600,
+        cwd=ROOT, env=dict(os.environ), stdin=subprocess.DEVNULL, capture_output=True,
+        text=True, timeout=600,
     )  # fmt: skip
     seconds = time.monotonic() - t0
     print(f"\n$ agent investigate {question!r} {' '.join(args)}  ({seconds:.1f} s)\n{done.stderr}")
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout), done.stderr, seconds
-
-
-def stored(trace_id: str) -> mlflow.entities.Trace:
-    """The trace as the server holds it. Spans are sent one by one, so wait until the root span
-    is there and the count stops changing."""
-    seen = None
-    for _ in range(30):
-        trace = mlflow.get_trace(trace_id)
-        spans = len(trace.data.spans) if trace else 0
-        if trace and spans == seen and any(s.parent_id is None for s in trace.data.spans):
-            return trace
-        seen = spans
-        time.sleep(1)
-    pytest.fail(f"trace {trace_id} not complete on the server ({seen} spans)")
 
 
 def children(trace, span) -> list:
@@ -87,8 +75,18 @@ def model_calls(trace) -> list:
     return trace.search_spans(span_type=SpanType.CHAT_MODEL)
 
 
+def inside(trace, span, name: str) -> bool:
+    """Whether `span` is somewhere under a span called `name`."""
+    while (span := parent(trace, span)) is not None:
+        if span.name == name:
+            return True
+    return False
+
+
 def tool_calls(trace) -> list:
-    return sorted(trace.search_spans(span_type=SpanType.TOOL), key=ref_number)
+    """The investigator's tool calls, in evidence-ID order (a fix's remediator calls: M6)."""
+    calls = trace.search_spans(span_type=SpanType.TOOL)
+    return sorted((s for s in calls if inside(trace, s, "investigator")), key=ref_number)
 
 
 def ref_of(span) -> str | None:
@@ -123,22 +121,21 @@ def test_the_flow_request_agent_model_tool_calls_response(selector):
     assert top.name == "investigation" and top.span_type == "AGENT"
     assert top.inputs["question"] == selector_question()  # the request
     assert top.outputs["diagnosis"] == result["diagnosis"]  # the response: the result itself
-    [graph] = children(trace, top)
-    stages = [s.name for s in children(trace, graph)]  # the graph's stages, in order
+    # the graph's stages, in order; a second graph span resumes it after a fix's approval pause
+    graphs = [s for s in children(trace, top) if s.name == "graph"]
+    stages = [s.name for graph in graphs for s in children(trace, graph)]
     rounds = len(result["verification"])
-    assert stages == ["intake", *["investigate", "verify_evidence"] * rounds, "result"]
+    investigation = ["intake", *["investigate", "verify_evidence"] * rounds, "result"]
+    assert stages[: len(investigation)] == investigation
+    assert set(stages[len(investigation) :]) <= {"remediate", "investigate", "recheck"}  # M6
     for stage in trace.search_spans(name="investigate"):
-        [investigator] = children(trace, stage)  # the agent, inside its stage
-        assert investigator.name == "investigator"
-
-    def under_investigator(span) -> bool:
-        while (span := parent(trace, span)) is not None:
-            if span.name == "investigator":
-                return True
-        return False
-
+        # the agent, inside its stage (then `after_investigate`: where the graph goes next)
+        assert [s.name for s in children(trace, stage)][0] == "investigator"
     assert model_calls(trace) and tool_calls(trace)
-    assert all(under_investigator(s) for s in tool_calls(trace))
+    every_call = trace.search_spans(span_type=SpanType.TOOL)  # each inside the agent that made it
+    assert all(
+        inside(trace, s, "investigator") or inside(trace, s, "remediator") for s in every_call
+    )
 
 
 def test_every_tool_call_is_named_with_its_evidence_id(selector):
