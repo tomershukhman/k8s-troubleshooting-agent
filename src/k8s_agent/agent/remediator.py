@@ -11,7 +11,7 @@ Nothing here uses the MCP server, or any kubeconfig but the remediator's.
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
@@ -22,8 +22,12 @@ from kubernetes.client.exceptions import ApiException
 from kubernetes.config.config_exception import ConfigException
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
     HumanInTheLoopMiddleware,
+    InputAgentState,
     ModelCallLimitMiddleware,
+    OutputAgentState,
     ToolCallLimitMiddleware,
     ToolErrorMiddleware,
 )
@@ -31,6 +35,7 @@ from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
+from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 from urllib3.exceptions import HTTPError
 
@@ -53,6 +58,10 @@ SERVICE_NAME_LABEL = "kubernetes.io/service-name"  # on each of a Service's Endp
 # What a call through the Kubernetes client can raise: the API server's error, or no answer at
 # all (urllib3: a timeout, a refused or broken connection; only SSL errors become ApiException).
 KUBE_ERRORS = (ApiException, HTTPError)
+
+type Remediator = CompiledStateGraph[
+    AgentState[RemediatorAnswer], None, InputAgentState, OutputAgentState[RemediatorAnswer]
+]
 
 
 def labels(selector: dict[str, str] | None) -> str:
@@ -274,26 +283,31 @@ def tools(load_kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
     return [*reads, fix]
 
 
-def build_remediator(model: BaseChatModel, load_kube: Callable[[], Kube], settings: Settings):
+def build_remediator(
+    model: BaseChatModel, load_kube: Callable[[], Kube], settings: Settings
+) -> Remediator:
     """The limits count per remediation (`thread_limit`: kept across the approval pause, which
     resets run counts): the per-round limits, and one fix request."""
+    # Each middleware has its own state and context types, which create_agent merges; its
+    # signature wants one of each for the whole list.
+    middleware: list[AgentMiddleware[Any, Any]] = [
+        # The pause before the fix tool runs. per_call: LangGraph accepts only approve or
+        # reject, before saving the answer. First, so it wraps the error handling below
+        # (LangChain's docs: otherwise a retried call asks again).
+        HumanInTheLoopMiddleware(
+            {FIX_TOOL: {"allowed_decisions": ["approve", "reject"]}}, interrupt_mode="per_call"
+        ),
+        ToolErrorMiddleware(on_error=tool_error_text),
+        ModelCallLimitMiddleware(thread_limit=settings.max_model_calls, exit_behavior="error"),
+        ToolCallLimitMiddleware(thread_limit=settings.max_tool_calls, exit_behavior="continue"),
+        ToolCallLimitMiddleware(tool_name=FIX_TOOL, thread_limit=1, exit_behavior="continue"),
+    ]
     return create_agent(
         model,
         tools(load_kube, settings),
         system_prompt=PROMPT,
         response_format=ProviderStrategy(RemediatorAnswer),  # native structured output (SPEC 3.2)
-        middleware=[
-            # The pause before the fix tool runs. per_call: LangGraph accepts only approve or
-            # reject, before saving the answer. First, so it wraps the error handling below
-            # (LangChain's docs: otherwise a retried call asks again).
-            HumanInTheLoopMiddleware(
-                {FIX_TOOL: {"allowed_decisions": ["approve", "reject"]}}, interrupt_mode="per_call"
-            ),
-            ToolErrorMiddleware(on_error=tool_error_text),
-            ModelCallLimitMiddleware(thread_limit=settings.max_model_calls, exit_behavior="error"),
-            ToolCallLimitMiddleware(thread_limit=settings.max_tool_calls, exit_behavior="continue"),
-            ToolCallLimitMiddleware(tool_name=FIX_TOOL, thread_limit=1, exit_behavior="continue"),
-        ],
+        middleware=middleware,
         name="remediator",
     )
 
@@ -308,7 +322,7 @@ def fix_request(fix: ProposedFix) -> HumanMessage:
 
 def read_remediation(
     fix: ProposedFix,
-    messages: list[BaseMessage],
+    messages: Sequence[BaseMessage],
     answer: RemediatorAnswer | None,
     stopped: str | None = None,
 ) -> Remediation:
@@ -316,7 +330,10 @@ def read_remediation(
     tool's result (or the reject in its place), and every tool call. `stopped`: why it ended
     early; what it did before still stands (an applied fix stays applied)."""
     calls = {c["id"]: c for m in messages if isinstance(m, AIMessage) for c in m.tool_calls}
-    results = {m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)}
+    # Keyed like `calls`: LangChain types a tool call's id as optional.
+    results: dict[str | None, ToolMessage] = {
+        m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)
+    }
     steps = [FixStep.of(calls[i], m) for i, m in results.items() if i in calls]
     request = next((c for c in calls.values() if c["name"] == FIX_TOOL), None)
     reply = results.get(request["id"]) if request else None

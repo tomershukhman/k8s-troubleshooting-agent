@@ -31,11 +31,11 @@ from langchain.chat_models import init_chat_model
 from langchain_core._api import suppress_langchain_beta_warning
 from langchain_core.exceptions import ModelError, ModelRefusalError
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolCall, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 from langgraph.graph.message import add_messages
-from langgraph.types import Command
+from langgraph.types import Command, TasksStreamPart, UpdatesStreamPart
 
 from k8s_agent import tracing
 from k8s_agent.agent import approval
@@ -154,19 +154,20 @@ class _Stream:
     is in the recheck round after a fix."""
 
     started: Counter = field(default_factory=Counter)
-    calls: dict[str, Any] = field(default_factory=dict)
+    calls: dict[str | None, ToolCall] = field(default_factory=dict)  # by id (LangChain: optional)
     rechecking: bool = False
 
-    def events(self, part: dict[str, Any]) -> Iterator[ProgressEvent]:
-        data, inner = part["data"], bool(part["ns"])
-        if part["type"] == "tasks" and not inner and "input" in data and data["name"] in STAGES:
-            name = data["name"]  # a node starts (a task's result has no "input")
-            self.started[name] += 1
-            self.rechecking = name == "investigate" and bool(data["input"].get("remediation"))
-            yield Stage(name, self.started[name], recheck=self.rechecking)
-        if part["type"] != "updates":
+    def events(self, part: TasksStreamPart | UpdatesStreamPart) -> Iterator[ProgressEvent]:
+        inner = bool(part["ns"])
+        if part["type"] == "tasks":
+            data = part["data"]
+            if not inner and "input" in data and data["name"] in STAGES:
+                name = data["name"]  # a node starts (a task's result has no "input")
+                self.started[name] += 1
+                self.rechecking = name == "investigate" and bool(data["input"].get("remediation"))
+                yield Stage(name, self.started[name], recheck=self.rechecking)
             return
-        for node, update in data.items():
+        for node, update in part["data"].items():
             if not isinstance(update, dict):
                 continue
             if inner:

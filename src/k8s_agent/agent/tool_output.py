@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import yaml
+from yaml.composer import ComposerError
 
 PROTECTED = frozenset({"spec", "status"})  # never stripped, never looked inside
 
@@ -28,7 +29,7 @@ class _NoAliases(yaml.SafeLoader):
     def compose_node(self, parent: Any, index: Any) -> Any:
         if self.check_event(yaml.AliasEvent):
             mark = self.peek_event().start_mark
-            raise yaml.composer.ComposerError(None, None, "aliases are not allowed", mark)
+            raise ComposerError(None, None, "aliases are not allowed", mark)
         return super().compose_node(parent, index)
 
 

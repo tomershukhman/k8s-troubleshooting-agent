@@ -2,6 +2,7 @@
 full record in memory; the CLI prints `RunRecord.result`, which carries only the cited steps.
 Steps are read back from the agent's messages, never tracked separately."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -183,7 +184,7 @@ def evidence_of(message: BaseMessage) -> dict[str, Any] | None:
     return None
 
 
-def steps_from_messages(messages: list[BaseMessage]) -> list[Step]:
+def steps_from_messages(messages: Sequence[BaseMessage]) -> list[Step]:
     """Every tool call the investigator made, in evidence-ID order."""
     steps = [
         Step(
@@ -196,7 +197,7 @@ def steps_from_messages(messages: list[BaseMessage]) -> list[Step]:
             truncated=ev["truncated"],
         )
         for m in messages
-        if (ev := evidence_of(m)) is not None
+        if isinstance(m, ToolMessage) and (ev := evidence_of(m)) is not None
     ]
     return sorted(steps, key=lambda s: int(s.ref[1:]))
 
@@ -204,9 +205,7 @@ def steps_from_messages(messages: list[BaseMessage]) -> list[Step]:
 def thinking_of(message: BaseMessage) -> list[str]:
     """The model's reasoning summaries in a reply, when it thought and returned them."""
     blocks = message.content_blocks
-    return [
-        b["reasoning"].strip() for b in blocks if b["type"] == "reasoning" and b.get("reasoning")
-    ]
+    return [r.strip() for b in blocks if b["type"] == "reasoning" and (r := b.get("reasoning"))]
 
 
 # --- live progress (core -> CLI) ---------------------------------------------------------

@@ -19,8 +19,12 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 
+from langchain.agents.middleware.human_in_the_loop import (
+    ApproveDecision,
+    RejectDecision,
+    ToolApprovalRequest,
+)
 from pydantic import ValidationError
 
 from k8s_agent import tracing
@@ -71,7 +75,7 @@ def why_differs(args: FixArgs, fix: ProposedFix) -> str | None:
     )
 
 
-def resume(decision: Decision) -> dict[str, str]:
+def resume(decision: Decision) -> ApproveDecision | RejectDecision:
     """The answer for HumanInTheLoopMiddleware: approve, or reject with the reason (the
     remediator reads it)."""
     if decision.approved:
@@ -88,7 +92,7 @@ class Gate:
     log: logging.LoggerAdapter
 
     async def decide(
-        self, pause: dict[str, Any], final: Diagnosis, evidence: list[EvidenceStep]
+        self, pause: ToolApprovalRequest, final: Diagnosis, evidence: list[EvidenceStep]
     ) -> tuple[ApprovalRequest, Decision]:
         """`pause`: the middleware's interrupt value, with the tool call exactly as it would
         run. `final`: the verified diagnosis that proposed the fix; `evidence`: the tool calls

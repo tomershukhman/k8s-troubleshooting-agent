@@ -4,10 +4,11 @@ tool outputs the draft cites, and returns a structured `CriticVerdict`."""
 import json
 import re
 from importlib import resources
-from typing import Any
+from typing import cast
 
-from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
 
 from k8s_agent.agent.records import Step
 from k8s_agent.schemas import CriticVerdict, Diagnosis
@@ -17,15 +18,20 @@ PROMPT = resources.files("k8s_agent.agent").joinpath("critic.md").read_text()
 # made inert, so that text can't close a block early and add evidence of its own.
 TAG = re.compile(r"<(\s*/?\s*tool_output\b)", re.IGNORECASE)
 
+type Critic = Runnable[LanguageModelInput, CriticVerdict]
+
 
 def inert(text: str) -> str:
     return TAG.sub(r"&lt;\1", text)
 
 
-def with_verdict(model: BaseChatModel) -> Any:
+def with_verdict(model: BaseChatModel) -> Critic:
     """The critic model, answering with a `CriticVerdict`. `json_schema` = native structured
     output; the default (`function_calling`) forces a tool call, which Sonnet 5.5 rejects."""
-    return model.with_structured_output(CriticVerdict, method="json_schema")
+    structured = model.with_structured_output(CriticVerdict, method="json_schema")
+    # Given a Pydantic class, it answers with an instance of it; the signature says only "a
+    # BaseModel or a dict", for any schema.
+    return cast(Critic, structured)
 
 
 def critic_input(question: str, draft: Diagnosis, steps: list[Step]) -> str:
@@ -50,6 +56,8 @@ def critic_input(question: str, draft: Diagnosis, steps: list[Step]) -> str:
     return "\n".join(lines)
 
 
-async def review(critic: Any, question: str, draft: Diagnosis, steps: list[Step]) -> CriticVerdict:
+async def review(
+    critic: Critic, question: str, draft: Diagnosis, steps: list[Step]
+) -> CriticVerdict:
     messages = [SystemMessage(PROMPT), HumanMessage(critic_input(question, draft, steps))]
     return await critic.ainvoke(messages, config={"run_name": "critic"})  # the trace span's name

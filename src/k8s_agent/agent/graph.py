@@ -21,14 +21,18 @@
 
 import operator
 import textwrap
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from importlib import resources
 from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
+    InputAgentState,
     ModelCallLimitMiddleware,
     ModelRefusalMiddleware,
+    OutputAgentState,
     ToolCallLimitMiddleware,
     ToolErrorMiddleware,
     ToolRetryMiddleware,
@@ -44,6 +48,7 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
@@ -63,7 +68,14 @@ from k8s_agent.agent.records import (
     VerifyRound,
     steps_from_messages,
 )
-from k8s_agent.agent.remediator import Kube, build_remediator, fix_request, labels, read_remediation
+from k8s_agent.agent.remediator import (
+    Kube,
+    Remediator,
+    build_remediator,
+    fix_request,
+    labels,
+    read_remediation,
+)
 from k8s_agent.config import Settings
 from k8s_agent.schemas import (
     CATEGORY_HELP,
@@ -105,6 +117,14 @@ class InvestigationState(TypedDict):
     remediation: NotRequired[Remediation]  # the fix, once the remediator is done
 
 
+type Investigator = CompiledStateGraph[
+    AgentState[Diagnosis], RunContext, InputAgentState, OutputAgentState[Diagnosis]
+]
+type InvestigationGraph = CompiledStateGraph[
+    InvestigationState, RunContext, InvestigationState, InvestigationState
+]
+
+
 def system_prompt(settings: Settings) -> str:
     return (
         resources.files("k8s_agent.agent")
@@ -118,9 +138,36 @@ def system_prompt(settings: Settings) -> str:
     )
 
 
-def build_investigator(model: BaseChatModel, tools: list[BaseTool], settings: Settings):
+def build_investigator(
+    model: BaseChatModel, tools: list[BaseTool], settings: Settings
+) -> Investigator:
     # run_limit: per investigate round; thread_limit: the whole run, one thread per run. A
     # thread reused across questions would need this budget reset per question.
+    # Each middleware has its own state and context types, which create_agent merges; its
+    # signature wants one of each for the whole list.
+    middleware: list[AgentMiddleware[Any, Any]] = [
+        EvidenceMiddleware(),
+        # A failed call raises: it is retried with backoff unless a retry can't fix it,
+        # then comes back to the model as a tool error with the server's text.
+        ToolErrorMiddleware(on_error=tool_error_text),
+        ToolRetryMiddleware(
+            max_retries=settings.tool_max_retries,
+            initial_delay=settings.tool_retry_delay_seconds,
+            retry_on=worth_retrying,
+            on_failure=retries_exhausted(settings.tool_max_retries + 1),
+        ),
+        ModelRefusalMiddleware(),
+        ModelCallLimitMiddleware(  # "error": the run stops, and the core says which limit
+            run_limit=settings.max_model_calls,
+            thread_limit=settings.run_max_model_calls,
+            exit_behavior="error",
+        ),
+        ToolCallLimitMiddleware(  # "continue": further calls refused, the model concludes
+            run_limit=settings.max_tool_calls,
+            thread_limit=settings.run_max_tool_calls,
+            exit_behavior="continue",
+        ),
+    ]
     return create_agent(
         model,
         tools,
@@ -128,29 +175,7 @@ def build_investigator(model: BaseChatModel, tools: list[BaseTool], settings: Se
         # Native structured output, set explicitly: a bare schema lets LangChain fall back to a
         # forced tool call, which Sonnet 5.5 rejects (SPEC §3.2).
         response_format=ProviderStrategy(Diagnosis),
-        middleware=[
-            EvidenceMiddleware(),
-            # A failed call raises: it is retried with backoff unless a retry can't fix it,
-            # then comes back to the model as a tool error with the server's text.
-            ToolErrorMiddleware(on_error=tool_error_text),
-            ToolRetryMiddleware(
-                max_retries=settings.tool_max_retries,
-                initial_delay=settings.tool_retry_delay_seconds,
-                retry_on=worth_retrying,
-                on_failure=retries_exhausted(settings.tool_max_retries + 1),
-            ),
-            ModelRefusalMiddleware(),
-            ModelCallLimitMiddleware(  # "error": the run stops, and the core says which limit
-                run_limit=settings.max_model_calls,
-                thread_limit=settings.run_max_model_calls,
-                exit_behavior="error",
-            ),
-            ToolCallLimitMiddleware(  # "continue": further calls refused, the model concludes
-                run_limit=settings.max_tool_calls,
-                thread_limit=settings.run_max_tool_calls,
-                exit_behavior="continue",
-            ),
-        ],
+        middleware=middleware,
         context_schema=RunContext,
         checkpointer=True,
         name="investigator",
@@ -312,7 +337,7 @@ async def run_to_end(agent: Any, inputs: dict[str, Any], **kwargs: Any) -> tuple
     return values, None
 
 
-def remediate_node(remediator: Any) -> Callable:
+def remediate_node(remediator: Remediator) -> Callable[..., Awaitable[Command]]:
     async def remediate(state: InvestigationState) -> Command:
         """The remediator on the proposed fix. On resume after the approval pause this node
         runs again from its start and the remediator resumes from its checkpoint, so nothing
@@ -384,7 +409,7 @@ def build_graph(
     settings: Settings,
     remediator_model: BaseChatModel,
     load_kube: Callable[[], Kube],
-):
+) -> InvestigationGraph:
     builder = StateGraph(InvestigationState, context_schema=RunContext)
     builder.add_node("intake", intake)
     builder.add_node("investigate", build_investigator(model, tools, settings))

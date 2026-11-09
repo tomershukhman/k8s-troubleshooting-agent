@@ -8,7 +8,7 @@
 
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +18,7 @@ from langchain_core.tools import ToolException
 from langgraph.types import Command
 
 from k8s_agent.agent import tool_output
+from k8s_agent.agent.critic import Critic
 from k8s_agent.agent.records import EVIDENCE, evidence_of
 from k8s_agent.config import Settings
 
@@ -31,10 +32,10 @@ class RunContext:
 
     settings: Settings
     log: logging.LoggerAdapter
-    critic: Any  # the critic model with structured output (critic.with_verdict)
+    critic: Critic  # the critic model with structured output (critic.with_verdict)
 
 
-def next_ref(messages: list[BaseMessage], call_id: str) -> str:
+def next_ref(messages: Sequence[BaseMessage], call_id: str | None) -> str:
     """The evidence ID for tool call `call_id`: one counter per run (tagged results so far).
     Parallel calls from one model turn all see the same messages, so each adds its position
     among that turn's calls still waiting for a result."""
@@ -94,7 +95,8 @@ class EvidenceMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        ctx: RunContext = request.runtime.context
+        # ToolCallRequest's runtime isn't typed with the agent's context, so it says None.
+        ctx: RunContext = request.runtime.context  # pyright: ignore[reportAssignmentType]
         call = request.tool_call
         ref = next_ref(request.state["messages"], call["id"])
         args = bounded_args(ctx.settings, call["name"], call["args"])
