@@ -39,7 +39,7 @@ from langchain.agents.middleware import (
 )
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.structured_output import ProviderStrategy, StructuredOutputValidationError
-from langchain_core.exceptions import ModelError
+from langchain_core.exceptions import ModelError, OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, HumanMessage
 from langchain_core.tools import BaseTool
@@ -79,6 +79,7 @@ from k8s_agent.agent.remediator import (
 from k8s_agent.config import Settings
 from k8s_agent.schemas import (
     CATEGORY_HELP,
+    CriticVerdict,
     Diagnosis,
     DiagnosisStatus,
     FaultCategory,
@@ -86,6 +87,7 @@ from k8s_agent.schemas import (
 )
 
 RERUN = "Re-run the investigation; the steps it took are in the run record."
+UNREADABLE = "The critic's verdict could not be read."
 # Our types in the checkpointed state: LangGraph's serializer wants them listed.
 CHECKPOINT_TYPES = [
     ("k8s_agent.schemas", name)
@@ -235,6 +237,26 @@ def feedback_message(feedback: str) -> HumanMessage:
     )
 
 
+def unread_message() -> HumanMessage:
+    return HumanMessage(
+        "A reviewer was to check your answer against the tool outputs you cited, but its "
+        "verdict could not be read. Answer again (the same answer, if it stands). Your earlier "
+        "evidence IDs stay valid."
+    )
+
+
+async def read_verdict(
+    ctx: RunContext, question: str, draft: Diagnosis, steps: list[Step]
+) -> CriticVerdict | None:
+    """The critic's verdict; None if it can't be read (a garbled answer: like an investigator's,
+    it ends the round unfounded, not the run)."""
+    try:
+        return await review(ctx.critic, question, draft, steps)
+    except OutputParserException as e:
+        ctx.log.warning("critic_unreadable", extra={"error": f"{type(e).__name__}: {e}"})
+        return None
+
+
 async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext]) -> Command:
     ctx, draft = runtime.context, state.get("structured_response")  # unset: no answer yet
     if draft is None:
@@ -243,13 +265,14 @@ async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext
     steps = steps_from_messages(state["messages"])
     number = len(state["rounds"]) + 1
     problems = code_checks(draft, steps, ctx.settings)
-    findings, fix_backed = [], None
+    findings, fix_backed, unread = [], None, False
     if problems:
         founded, feedback = False, " ".join(problems)
     elif not draft.evidence:  # an inconclusive that cites nothing: nothing to check
         founded, feedback = True, None
+    elif (verdict := await read_verdict(ctx, state["question"], draft, steps)) is None:
+        founded, feedback, unread = False, UNREADABLE, True
     else:
-        verdict = await review(ctx.critic, state["question"], draft, steps)
         findings = verdict.findings
         if draft.proposed_fix is not None:  # a fix verdict on a draft without a fix is noise
             fix_backed = verdict.proposed_fix is not None and verdict.proposed_fix.backed
@@ -269,9 +292,18 @@ async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext
     if feedback is None:  # founded (an unfounded round always says why)
         return Command(goto="result", update={"rounds": [round_]})
     if number < ctx.settings.max_verify_rounds:
-        update = {"messages": [feedback_message(feedback)], "structured_response": None}
+        ask = unread_message() if unread else feedback_message(feedback)
+        update = {"messages": [ask], "structured_response": None}
         return Command(goto="investigate", update={"rounds": [round_], **update})
-    reason = f"The evidence didn't support the conclusion after {number} verify rounds: {feedback}"
+    if unread:
+        reason = (
+            f"The critic's verdict could not be read in the last verify round ({number}): the "
+            "answer is unverified."
+        )
+    else:
+        reason = (
+            f"The evidence didn't support the conclusion after {number} verify rounds: {feedback}"
+        )
     return Command(goto="result", update={"rounds": [round_], "forced_reason": reason})
 
 

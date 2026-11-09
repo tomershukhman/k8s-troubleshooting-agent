@@ -176,6 +176,7 @@ The M8 extra adds two more containers beside the cluster: `api` and `postgres` (
 | Model refusal | `inconclusive`. |
 | Run ended by the model-call limit without a final answer | `inconclusive`, partial steps kept. |
 | Evidence still not founded after the last verify round | `inconclusive`, never a guess. |
+| The critic's verdict can't be read (garbled structured output) | Treated as an unfounded round: the investigator answers again if rounds remain; after the last round, `inconclusive` ("the critic's verdict could not be read"). Like a garbled investigator answer, it never fails the run. |
 | Run-wide model-call or time budget exhausted | `inconclusive`, with what was gathered. (The run-wide tool budget makes the model conclude instead.) |
 | Access to a namespace refused | `inconclusive`. The reason says the agent has no access there; the README explains how to add a namespace (add a RoleBinding for `reader`). |
 | No interactive terminal when a fix needs approval (piped, scripted, CI) | The fix is rejected with "no interactive approval available". |

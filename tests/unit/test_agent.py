@@ -482,16 +482,30 @@ def test_a_verdict_founded_with_a_finding_not_supported_is_not_founded(env):
     assert "Not every finding held up" in forced_reason(record)
 
 
-def test_a_critic_verdict_that_cannot_be_parsed_fails_the_run():
-    # Today's behaviour, pinned: a garbled verdict fails the run, as a bug would. Whether it
-    # should end inconclusive instead, as a garbled investigator answer does, is an open
-    # decision for the project owner; change this test with it.
-    judge = critic(OutputParserException('Invalid json output: {"findings": ['))
-    record, _ = one_round(diagnosis("E1"), judge)
-    result = record.result
-    assert (result.status, result.diagnosis) == (RunStatus.failed, None)
-    assert result.error.startswith("unexpected error: OutputParserException: Invalid json output")
-    assert [s.ref for s in record.steps] == ["E1"]  # what was gathered is kept
+GARBLED = OutputParserException('Invalid json output: {"findings": [')
+
+
+def test_a_critic_verdict_that_cannot_be_read_is_an_unfounded_round_and_the_agent_retries():
+    # As for a garbled investigator answer: not a failed run (the project owner's decision).
+    judge = critic(GARBLED)
+    record, model = one_round(diagnosis("E1"), judge)
+    first, second = record.result.verification
+    assert (first.founded, first.feedback, first.findings) == (
+        False,
+        "The critic's verdict could not be read.",
+        [],
+    )
+    assert "its verdict could not be read" in model.received[2][-1].content
+    assert second.founded and record.result.diagnosis.status == "fault_found"
+
+
+def test_a_critic_verdict_unreadable_in_the_last_round_ends_inconclusive(env):
+    record, _ = one_round(diagnosis("E1"), critic(GARBLED), rounds=1, env=env)
+    assert forced_reason(record) == (
+        "The critic's verdict could not be read in the last verify round (1): the answer is "
+        "unverified."
+    )
+    assert record.result.error is None and [s.ref for s in record.steps] == ["E1"]
 
 
 def test_a_backed_fix_comes_through_in_the_result():
