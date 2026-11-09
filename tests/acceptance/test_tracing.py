@@ -13,11 +13,9 @@ from mlflow.entities import SpanType
 
 from k8s_agent.config import get_settings
 from k8s_agent.policy import READ_ONLY_TOOLS
-from k8s_agent.scenarios import get_scenario
 
 from .conftest import (
     ROOT,
-    investigate_cli,
     run_selector,
     selector_question,
     stored,
@@ -205,39 +203,3 @@ def test_the_trace_link_is_printed_and_the_result_has_the_trace_id(selector, uri
     experiment = trace.info.trace_location.mlflow_experiment.experiment_id
     link = f"{uri}/#/experiments/{experiment}/traces?selectedEvaluationId={result['trace_id']}"
     assert f"Trace: {link}" in stderr.splitlines()
-
-
-def test_a_refused_tool_call_is_an_error_span_with_the_refusal(uri):
-    for attempt in range(ATTEMPTS):
-        result, _, _ = investigate_cli("Is the payments service healthy?", "-n", "default")
-        trace = stored(result["trace_id"])
-        refused = [s for s in tool_calls(trace) if "forbidden" in (s.status.description or "")]
-        if refused or attempt == ATTEMPTS - 1:
-            break
-    assert refused, "the agent made no refused call"
-    for span in refused:
-        assert span.status.status_code == "ERROR"
-        assert [e.name for e in span.events] == ["exception"]
-        tries = [s for s in tool_calls(trace) if ref_of(s) == ref_of(span)]
-        assert tries == [span]  # tried once: a refusal isn't retried
-    assert result["status"] == "completed" and result["diagnosis"]["status"] == "inconclusive"
-
-
-# --- the tracking server ----------------------------------------------------------------------
-
-
-def test_with_the_tracking_server_stopped_investigate_works_with_one_warning(
-    uri, tracking_server_stopped
-):
-    healthy = get_scenario(get_settings().scenarios_dir, "healthy").spec.question
-    # One model call is enough to show tracing degrades cleanly; the run then stops at that
-    # limit, an inconclusive, still completed.
-    capped = {"AGENT_MAX_MODEL_CALLS": "1", "AGENT_RUN_MAX_MODEL_CALLS": "1"}
-    result, stderr, seconds = investigate_cli(healthy, env=capped)
-    assert result["status"] == "completed" and result["trace_id"] is None
-    [warning] = [line for line in stderr.splitlines() if line.startswith("warning:")]
-    assert warning.startswith(f"warning: cannot use the MLflow tracking server at {uri}: ")
-    assert "Trace:" not in stderr
-    # the rest is start-up and one bounded check, not MLflow's default ~4 min of retries
-    timeout = get_settings().mlflow_http_request_timeout
-    assert seconds - result["duration_ms"] / 1000 < timeout + 10

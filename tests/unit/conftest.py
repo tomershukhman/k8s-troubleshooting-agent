@@ -21,9 +21,7 @@ REPO = Path(__file__).resolve().parents[2]
 @pytest.fixture(autouse=True)
 def isolated_settings(monkeypatch, tmp_path):
     for key in list(os.environ):
-        if key.startswith(
-            ("AGENT_", "MLFLOW_", "LANGSMITH_", "LANGCHAIN_", "LANGFUSE_")
-        ) or key in (
+        if key.startswith(("AGENT_", "MLFLOW_", "LANGSMITH_", "LANGCHAIN_")) or key in (
             "KUBECONFIG",
             "ANTHROPIC_API_KEY",
         ):
@@ -46,3 +44,24 @@ def isolated_settings(monkeypatch, tmp_path):
     tracing._on = None  # tracing.enable() sets process-wide state: MLflow's, and these
     for key in [k for k in os.environ if k.startswith("MLFLOW_")]:
         del os.environ[key]  # then monkeypatch restores the shell's own
+
+
+@pytest.fixture
+def traced(monkeypatch, tmp_path):
+    """Tracing to a local MLflow store, no server. MLflow loads a trace only once every span
+    it counted is stored, so a span lost on the way fails the read."""
+    import mlflow
+
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path / 'mlflow.db'}")
+    get_settings.cache_clear()
+    tracing.enable(get_settings())
+
+    def read(result):
+        tracing.flush()
+        trace = mlflow.get_trace(result.trace_id)
+        assert trace is not None and all(s.name for s in trace.data.spans)
+        session = f"metadata.`mlflow.trace.session` = '{result.thread_id}'"
+        assert len(mlflow.search_traces(filter_string=session, return_type="list")) == 1
+        return trace
+
+    return read

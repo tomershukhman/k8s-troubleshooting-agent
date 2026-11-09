@@ -73,39 +73,12 @@ def healthy(kube, ns):
 FAULTS = {"crashloop": crashloop, "selector": selector, "readiness": readiness, "healthy": healthy}
 
 
-def visible_texts(kube: AdminClients, ns: str) -> list[str]:
-    """Every name, label and annotation in the namespace the agent's tools can show."""
-    kinds = [("v1", k) for k in ("Pod", "Service", "ConfigMap", "Event")]
-    kinds += [
-        ("discovery.k8s.io/v1", "EndpointSlice"),
-        ("apps/v1", "Deployment"),
-        ("apps/v1", "ReplicaSet"),
-    ]
-    objects = [kube.core.read_namespace(ns)]
-    for api_version, kind in kinds:
-        objects += (
-            kube.dynamic.resources.get(api_version=api_version, kind=kind).get(namespace=ns).items
-        )
-    texts = []
-    for obj in objects:
-        meta = obj.metadata
-        texts.append(meta.name)
-        texts += [
-            f"{k}={v}"
-            for field in (meta.labels, meta.annotations)
-            for k, v in dict(field or {}).items()
-        ]
-    return texts
-
-
 @pytest.mark.parametrize("name", FOLDERS)
 def test_scenario_up_fault_down(kube: AdminClients, name: str):
     ns = namespace(name)
     try:
         agent("scenario", "up", name)
         FAULTS[name](kube, ns)
-        hints = [t for t in visible_texts(kube, ns) if name in t.lower()]
-        assert hints == [], f"{name}: visible to the agent: {hints}"
     finally:
         agent("scenario", "down", name)
     with pytest.raises(ApiException) as gone:

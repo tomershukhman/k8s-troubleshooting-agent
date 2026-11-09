@@ -11,15 +11,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
 import typer
-from kubernetes.client.exceptions import ApiException
 from pydantic import ValidationError
 from rich.console import Console
 from rich.text import Text
-from urllib3.exceptions import HTTPError
 
 from k8s_agent import access, scenarios, tracing
 from k8s_agent.config import Settings, get_settings
-from k8s_agent.kube import KubeError, admin_clients, error_text
+from k8s_agent.kube import KUBE_ERRORS, KubeError, admin_clients, error_text
 from k8s_agent.logs import LOGGER, setup_logging
 
 # The agent (and ui, which shows its records) takes most of a second to import: only
@@ -36,13 +34,8 @@ app.add_typer(scenario_app, name="scenario")
 
 NameArg = Annotated[str, typer.Argument(help="Scenario name, e.g. selector")]
 EXIT_FAILED, EXIT_NOT_STARTED = 1, 2
-CLUSTER_ERRORS = (
-    scenarios.ScenarioError,
-    KubeError,
-    TimeoutError,
-    ApiException,
-    HTTPError,
-)
+CLUSTER_ERRORS = (scenarios.ScenarioError, KubeError, TimeoutError, *KUBE_ERRORS)
+MCP_HINT = "Is it running? Start it with: docker compose up -d k8s-mcp"
 
 
 def _say(msg: str) -> None:
@@ -172,8 +165,7 @@ def investigate(
 
     s = _settings(EXIT_NOT_STARTED)
     err = Console(stderr=True)
-    # JSON logs are for machines: kept off an interactive terminal unless AGENT_LOG_FILE is set.
-    setup_logging(s.log_level, s.log_file, enabled=bool(s.log_file) or not err.is_terminal)
+    setup_logging(s.log_level, s.log_file)
     trace = _tracing(s)
     user_id = user or s.effective_user_id
     if not quiet:
@@ -200,7 +192,7 @@ def investigate(
                 )
             )
     except McpUnavailable as e:
-        _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", EXIT_NOT_STARTED)
+        _fail(f"{e}. {MCP_HINT}", EXIT_NOT_STARTED)
     except NotStarted as e:
         _fail(str(e), EXIT_NOT_STARTED)
     finally:
@@ -244,7 +236,7 @@ def eval_(
     s = _settings(EXIT_NOT_STARTED)
     if runs:  # the pass marks follow: AGENT_EVAL_PASS_SHARE of the runs
         s = s.model_copy(update={"eval_runs_per_scenario": runs})
-    setup_logging(s.log_level, s.log_file, enabled=bool(s.log_file) or not sys.stderr.isatty())
+    setup_logging(s.log_level, s.log_file)
     tracing.mlflow_env(s)  # before evals imports mlflow, which reads some of it on import
     try:
         from k8s_agent import evals  # the full mlflow package: the `eval` extra
@@ -263,18 +255,19 @@ def eval_(
         _fail("the evals store their results in MLflow: set MLFLOW_TRACKING_URI", EXIT_NOT_STARTED)
     evals.configure(s)
     with _clean_errors(EXIT_NOT_STARTED):
-        found = scenarios.load_all(s.scenarios_dir)
         if scenario:
-            found = {scenario: scenarios.get_scenario(s.scenarios_dir, scenario)}
+            found = [scenarios.get_scenario(s.scenarios_dir, scenario)]
+        else:
+            found = list(scenarios.load_all(s.scenarios_dir).values())
         suite = evals.Suite(s, admin_clients(s), trace.run_url, _say)
     try:
         with redirect_stdout(sys.stderr):  # MLflow prints its own summaries; stdout: the table
-            results = suite.run(found.values())
+            results = suite.run(found)
     except (NotStarted, *CLUSTER_ERRORS) as e:
         code = EXIT_FAILED if suite.scored else EXIT_NOT_STARTED  # until then, nothing ran
         if isinstance(e, McpUnavailable):
-            _fail(f"{e}. Is it running? Start it with: docker compose up -d k8s-mcp", code)
-        _fail(str(e), code)
+            _fail(f"{e}. {MCP_HINT}", code)
+        _fail(error_text(e), code)
     finally:
         tracing.flush()
     out = Console()
@@ -296,7 +289,10 @@ def setup() -> None:
     with _clean_errors():
         c = admin_clients(s)
         _say(f"context {c.context}: setting up the agent identities")
-        paths = {access.READER: s.reader_kubeconfig, access.REMEDIATOR: s.remediator_kubeconfig}
+        paths = {
+            access.READER: access.READER_KUBECONFIG,
+            access.REMEDIATOR: s.remediator_kubeconfig,
+        }
         creds = access.setup(
             c,
             rbac_file=s.rbac_file,
@@ -326,14 +322,7 @@ def scenario_up(name: NameArg) -> None:
         scn = scenarios.get_scenario(s.scenarios_dir, name)
         c = admin_clients(s)
         _say(f"context {c.context}: bringing up {scn.name}")
-        scenarios.up(
-            scn,
-            c,
-            ready_timeout=s.scenario_ready_timeout_seconds,
-            delete_timeout=s.scenario_delete_timeout_seconds,
-            poll=s.scenario_poll_seconds,
-            progress=_say,
-        )
+        scenarios.up(scn, c, s, _say)
     _say(f"{scn.name} is up in namespace {scn.namespace}")
 
 
@@ -343,11 +332,5 @@ def scenario_down(name: NameArg) -> None:
     s = _settings()
     with _clean_errors():
         scn = scenarios.get_scenario(s.scenarios_dir, name)
-        existed = scenarios.down(
-            scn,
-            admin_clients(s),
-            timeout=s.scenario_delete_timeout_seconds,
-            poll=s.scenario_poll_seconds,
-            progress=_say,
-        )
+        existed = scenarios.down(scn, admin_clients(s), s, _say)
     _say(f"namespace {scn.namespace} {'deleted' if existed else 'already absent'}")

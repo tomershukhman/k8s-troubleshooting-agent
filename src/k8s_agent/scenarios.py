@@ -8,9 +8,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import yaml
 from kubernetes import client
-from pydantic import Field
+from pydantic import Field, ValidationError
 
+from k8s_agent.config import Settings
 from k8s_agent.kube import (
     AdminClients,
     Progress,
@@ -89,24 +91,28 @@ class Scenario(Strict):
         return next(d["metadata"]["name"] for d in self.manifests if d["kind"] == "Namespace")
 
 
-def load_all(scenarios_dir: Path) -> dict[str, Scenario]:
-    folders = sorted(p for p in scenarios_dir.glob("*/scenario.yaml"))
-    if not folders:
-        raise ScenarioError(f"no scenarios in {scenarios_dir.resolve()}")
-    return {
-        f.parent.name: Scenario(
-            name=f.parent.name,
-            spec=ScenarioSpec.model_validate(load_yaml(f)[0]),
+def load(folder: Path) -> Scenario:
+    try:
+        return Scenario(
+            name=folder.name,
+            spec=ScenarioSpec.model_validate(load_yaml(folder / "scenario.yaml")[0]),
             # namespace.yaml first: the namespace and the agent's access, then the app
             manifests=load_yaml(
                 *sorted(
-                    (f.parent / "manifests").glob("*.yaml"),
+                    (folder / "manifests").glob("*.yaml"),
                     key=lambda p: p.name != "namespace.yaml",
                 )
             ),
         )
-        for f in folders
-    }
+    except (ValidationError, yaml.YAMLError, IndexError) as e:  # IndexError: an empty file
+        raise ScenarioError(f"scenario {folder.name} is malformed: {e}") from e
+
+
+def load_all(scenarios_dir: Path) -> dict[str, Scenario]:
+    folders = sorted(f.parent for f in scenarios_dir.glob("*/scenario.yaml"))
+    if not folders:
+        raise ScenarioError(f"no scenarios in {scenarios_dir.resolve()}")
+    return {folder.name: load(folder) for folder in folders}
 
 
 def get_scenario(scenarios_dir: Path, name: str) -> Scenario:
@@ -145,10 +151,9 @@ def wait(what: str, done: Callable[[], Any], *, timeout: float, poll: float) -> 
         time.sleep(poll)
 
 
-def down(
-    scn: Scenario, c: AdminClients, *, timeout: float, poll: float, progress: Progress
-) -> bool:
-    """Delete the scenario namespace and wait until it's gone. False if it was absent."""
+def down(scn: Scenario, c: AdminClients, s: Settings, progress: Progress) -> bool:
+    """Delete the scenario namespace and wait until it's gone
+    (AGENT_SCENARIO_DELETE_TIMEOUT_SECONDS). False if it was absent."""
 
     def read() -> client.V1Namespace:
         return c.core.read_namespace(scn.namespace, _request_timeout=c.timeout)
@@ -169,22 +174,16 @@ def down(
     def gone() -> bool:
         return read_or_none(read) is None
 
+    timeout, poll = s.scenario_delete_timeout_seconds, s.scenario_poll_seconds
     wait(f"namespace {scn.namespace} still exists", gone, timeout=timeout, poll=poll)
     return True
 
 
-def up(
-    scn: Scenario,
-    c: AdminClients,
-    *,
-    ready_timeout: float,
-    delete_timeout: float,
-    poll: float,
-    progress: Progress,
-) -> None:
+def up(scn: Scenario, c: AdminClients, s: Settings, progress: Progress) -> None:
     """Recreate the scenario from scratch (no state survives a re-run) and wait until its
-    fault is live."""
-    down(scn, c, timeout=delete_timeout, poll=poll, progress=progress)
+    fault is live (AGENT_SCENARIO_READY_TIMEOUT_SECONDS)."""
+    down(scn, c, s, progress)
+    ready_timeout, poll = s.scenario_ready_timeout_seconds, s.scenario_poll_seconds
     apply(c, [d for d in scn.manifests if d["kind"] == "Namespace"], progress)
 
     # Pods created before the namespace's default ServiceAccount exists are rejected, which

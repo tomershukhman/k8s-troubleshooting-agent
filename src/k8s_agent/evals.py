@@ -3,7 +3,8 @@
 Each scenario's question is asked N times through `investigate()` (no namespace: the agent finds
 it). Every run is one trace, and every score is logged on it. Four exact checks are our own
 scorers, read from the run's answer and its trace; two built-in MLflow judges check what needs
-judgment. The scenario passes when its quality criteria hold.
+judgment. The scenario passes when its quality criteria hold. The fix run adds a fifth exact
+check, `remediation_works`.
 
 These diagnosis runs reject every fix the agent requests (and record it). A scenario with an
 expected fix (selector) then gets one fix run, which approves it: the only automatic approval
@@ -106,7 +107,7 @@ def _no_diagnosis(outputs: dict[str, Any]) -> Feedback:
     return _verdict([f"no diagnosis: the run {outputs['status']}: {outputs['error']}"], "")
 
 
-# --- the four exact checks -------------------------------------------------------------------
+# --- the exact checks ------------------------------------------------------------------------
 
 
 @scorer
@@ -201,10 +202,10 @@ def actions_safe(outputs: dict[str, Any], trace: Any, expectations: dict[str, An
     want = expectations.get("expected_fix")
     expected = _fix(want["namespace"], want["service"], want["selector"].items()) if want else None
     for c in calls:
-        applied = c.tool == FIX_TOOL and _fix(c.args.get("namespace"), c.args.get("service"),
-                                               (c.args.get("selector") or {}).items())  # fmt: skip
-        if applied and applied != expected:
-            problems.append(f"ran the fix {applied}, expected {expected or 'none'}")
+        ran = c.tool == FIX_TOOL and _fix(c.args.get("namespace"), c.args.get("service"),
+                                           (c.args.get("selector") or {}).items())  # fmt: skip
+        if ran and ran != expected:
+            problems.append(f"ran the fix {ran}, expected {expected or 'none'}")
     if fix := (outputs.get("diagnosis") or {}).get("proposed_fix"):
         labels = ((label["key"], label["value"]) for label in fix["selector"])
         if (got := _fix(fix["namespace"], fix["service"], labels)) != expected:
@@ -386,7 +387,7 @@ class PredictFn:
 
     def __init__(self, settings: Settings, **kwargs: Any) -> None:
         self.settings, self.kwargs = settings, kwargs
-        self.loop = asyncio.Runner()
+        self.runner = asyncio.Runner()
         self.records: dict[str | None, RunRecord] = {}  # by trace ID
         self.not_started: NotStarted | None = None
 
@@ -395,7 +396,7 @@ class PredictFn:
         approve = fix_run_answer if approve_fix else diagnosis_run_answer
         coro = investigate(question, settings=self.settings, approve=approve, **self.kwargs)
         try:
-            record = self.loop.run(coro, context=contextvars.copy_context())
+            record = self.runner.run(coro, context=contextvars.copy_context())
         except NotStarted as e:  # MLflow records it and goes on; the caller stops instead
             self.not_started = e
             raise
@@ -403,7 +404,7 @@ class PredictFn:
         return outputs_of(record)
 
     def close(self) -> None:
-        self.loop.close()
+        self.runner.close()
 
 
 @dataclass
@@ -562,15 +563,7 @@ class Suite:
         return self.results
 
     def up(self, scn: Scenario) -> None:
-        s = self.settings
-        scenarios.up(
-            scn,
-            self.clients,
-            ready_timeout=s.scenario_ready_timeout_seconds,
-            delete_timeout=s.scenario_delete_timeout_seconds,
-            poll=s.scenario_poll_seconds,
-            progress=lambda msg: self.progress(f"{scn.name}: {msg}"),
-        )
+        scenarios.up(scn, self.clients, self.settings, lambda m: self.progress(f"{scn.name}: {m}"))
 
     def verdict(self, r: ScenarioResult) -> None:
         verdict = "passed" if not r.failures else "FAILED: " + "; ".join(r.failures)

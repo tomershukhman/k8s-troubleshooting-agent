@@ -94,13 +94,15 @@ def test_healthy_needs_evidence_from_the_scenarios_namespace():
     assert verdict.value is False and "no cited evidence from shop-inventory" in verdict.rationale
 
 
-def test_a_failed_run_is_wrong_and_says_why():
+@pytest.mark.parametrize(
+    ("check", "context"),
+    [(evals.diagnosis_correct, lambda: {"expectations": expectations()}),
+     (evals.evidence_exists, lambda: {"trace": trace()})],
+)  # fmt: skip
+def test_a_failed_run_is_wrong_and_says_why(check, context):
     out = outputs(None, status="failed", error="model API error: rate limit")
-    for check in (evals.diagnosis_correct, evals.evidence_exists):
-        kwargs = {"expectations": expectations()} if check is evals.diagnosis_correct else {
-            "trace": trace()}  # fmt: skip
-        verdict = check(outputs=out, **kwargs)
-        assert verdict.value is False and "rate limit" in verdict.rationale
+    verdict = check(outputs=out, **context())
+    assert verdict.value is False and "rate limit" in verdict.rationale
 
 
 # --- evidence_exists ------------------------------------------------------------------------
@@ -441,7 +443,7 @@ def test_eval_needs_the_tracking_server():
     )
 
 
-def test_eval_with_the_tracking_server_unreachable_fails_at_once(monkeypatch):
+def test_eval_with_the_tracking_server_unreachable_exits_2_with_a_clear_message(monkeypatch):
     monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:9")
     get_settings.cache_clear()
     result = CliRunner().invoke(app, ["eval"])
@@ -516,9 +518,10 @@ def test_eval_exits_2_when_nothing_ran_and_1_once_a_scenario_was_scored(
     assert result.exit_code == code, result.stderr
     errors = [line for line in result.stderr.splitlines() if line.startswith("error:")]
     assert [e.startswith(error) for e in errors] == ([True] if error else [])
+    saved = list(Path("eval-results").glob("*.json"))  # they hold every tool output in full
+    assert len(saved) == (code != 2) and all(stat.S_IMODE(f.stat().st_mode) == 0o600 for f in saved)
     if code == 1:  # what was scored before it stopped is kept
-        [saved] = Path("eval-results").glob("*.json")
-        assert [s["name"] for s in json.loads(saved.read_text())["scenarios"]] == ["crashloop"]
+        assert [s["name"] for s in json.loads(saved[0].read_text())["scenarios"]] == ["crashloop"]
 
 
 def test_a_failed_fix_run_keeps_the_scenarios_scored_diagnosis_runs(monkeypatch):
@@ -527,12 +530,6 @@ def test_a_failed_fix_run_keeps_the_scenarios_scored_diagnosis_runs(monkeypatch)
     [saved] = Path("eval-results").glob("*.json")
     report = json.loads(saved.read_text())["scenarios"]
     assert [(s["name"], s["fix"]) for s in report][-1] == ("selector", None)
-
-
-def test_eval_results_are_readable_by_their_owner_only(monkeypatch):
-    assert eval_run(monkeypatch, "none").exit_code == 0
-    [saved] = Path("eval-results").glob("*.json")  # they hold every tool output in full
-    assert stat.S_IMODE(saved.stat().st_mode) == 0o600
 
 
 def trace_info(metadata: dict[str, str], assessments: list) -> TraceInfo:

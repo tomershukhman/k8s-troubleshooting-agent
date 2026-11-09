@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Admin access, used only by `agent scenario`, `agent setup` and `agent eval` (it rebuilds
     # the scenarios). Unset = the standard kubeconfig lookup ($KUBECONFIG, then ~/.kube/config)
-    # and its current context.
+    # and its current context, which must then be a local cluster (kube.LOCAL_CONTEXTS).
     kubeconfig: Path | None = None
     kube_context: str | None = None
     kube_timeout_seconds: PositiveFloat = 30  # per Kubernetes API call with the admin kubeconfig
@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     # Agent identities (SPEC §3.5)
     rbac_file: Path = Path("deploy/rbac.yaml")
     token_ttl_hours: float = Field(default=12, ge=MIN_TOKEN_TTL_HOURS)
-    reader_kubeconfig: Path = Path(".kube-agent/reader.kubeconfig")
     remediator_kubeconfig: Path = Path(".kube-agent/remediator.kubeconfig")
     # Where the agent may propose a fix (the remediator's RoleBinding grants the same).
     remediation_namespaces: NameList = ["shop-checkout"]
@@ -100,13 +99,9 @@ class Settings(BaseSettings):
     )
     mlflow_http_request_timeout: PositiveInt = Field(
         default=3, validation_alias="MLFLOW_HTTP_REQUEST_TIMEOUT"
-    )  # seconds per call to the tracking server (it runs on this machine's cluster)
+    )  # seconds per call to the tracking server (the compose service, on this machine)
     mlflow_http_request_max_retries: int = Field(
         default=0, ge=0, validation_alias="MLFLOW_HTTP_REQUEST_MAX_RETRIES"
-    )
-    # MLflow's usage telemetry to its own servers (on by default in MLflow); traces never go.
-    mlflow_disable_telemetry: bool = Field(
-        default=True, validation_alias="MLFLOW_DISABLE_TELEMETRY"
     )
     # The code's git commit, recorded on traces and eval runs (it pins the prompts). Unset = the
     # working directory's .git; the image has none, so its build sets this.
@@ -123,20 +118,10 @@ class Settings(BaseSettings):
     # Tries per judge verdict: a judge call that fails or gives no readable verdict is asked
     # again. Still none: that run fails the check.
     judge_attempts: PositiveInt = 3
-    eval_mlflow_experiment_name: str = (
-        "k8s-agent-evals"  # so MLFLOW_EXPERIMENT_NAME shows real runs
-    )
+    # The evals trace to their own experiment, so the one users open (MLFLOW_EXPERIMENT_NAME)
+    # holds only real runs.
+    eval_mlflow_experiment_name: str = "k8s-agent-evals"
     eval_results_dir: Path = Path("eval-results")  # one JSON file per `agent eval`
-
-    # Acceptance tests: how long an assertion may keep retrying for state that flips between
-    # polls (e.g. CrashLoopBackOff).
-    accept_assert_timeout_seconds: PositiveFloat = 30
-    # Acceptance setup (all but the scenarios suite) keeps scenarios already up (ours, manifests
-    # re-applied cleanly, fault live) and leaves them up afterwards; a test that changes one (the
-    # remediate suite's, on the selector Service) rebuilds it. False = fresh, removed after.
-    accept_reuse_scenarios: bool = True
-    # Test runs trace here, so the experiment users open (MLFLOW_EXPERIMENT_NAME) shows real runs.
-    accept_mlflow_experiment_name: str = "k8s-agent-tests"
 
     @field_validator("remediation_namespaces", "tool_output_strip_fields", mode="before")
     @classmethod

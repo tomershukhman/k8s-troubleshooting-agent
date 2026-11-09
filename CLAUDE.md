@@ -1,6 +1,6 @@
 # k8s-agent
 
-Design: `SPEC.md`.
+Design: `DESIGN.md`.
 
 ## Checks
 - `make check` = `make lint` (ruff lint + format check + pyright, standard mode, `src` only) +
@@ -63,8 +63,7 @@ Design: `SPEC.md`.
 - The tracking server is the compose service `mlflow` (official image), at `http://localhost:5050`
   (port 5050: AirPlay often holds 5000); `docker compose up -d --wait k8s-mcp mlflow`. It used to
   run in the cluster via Helm; an old OrbStack setup may still hold a scaled-down `mlflow` release.
-- `make accept SUITE=tracing` needs `MLFLOW_TRACKING_URI`; its "server stopped" tests run `docker compose stop
-  mlflow` and bring it back. Acceptance runs trace to `k8s-agent-tests` (tests/acceptance/conftest.py), not `k8s-agent`. Read traces with `mlflow.get_trace` + `Trace.search_spans`; spans arrive one by one.
+- `make accept SUITE=tracing` needs `MLFLOW_TRACKING_URI`. Acceptance runs trace to `k8s-agent-tests` (tests/acceptance/conftest.py), not `k8s-agent`. Read traces with `mlflow.get_trace` + `Trace.search_spans`; spans arrive one by one.
 - A LangGraph conditional edge given a lambda makes MLflow's autolog record a nameless span, and the
   upload batch it sits in is lost (the trace then won't load: "not fully exported"). Route with a
   named function or `Command(goto=...)`; a unit test traces a fix run and fails if it recurs.

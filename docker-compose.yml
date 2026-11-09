@@ -30,7 +30,6 @@ services:
   admin:
     <<: *app
     build: .
-    entrypoint: [agent]
     environment: [USER, AGENT_KUBECONFIG=/kube/config]
     volumes:  # your kubeconfig (read-only), and what admin writes
       - {type: bind, source: "${KUBECONFIG:-~/.kube/config}", target: /kube/config,

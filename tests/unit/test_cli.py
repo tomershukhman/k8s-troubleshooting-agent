@@ -87,7 +87,7 @@ def test_progress_shows_each_agent_at_work_and_the_result_json_goes_to_stdout(fa
         "  agent    investigator · investigator-model",
         "    thinking Compare the selector with the pod labels.",
         "    tool     resources_get(Service/checkout -n shop-checkout)  E1 · N ms",
-        "             Deployment (14 lines of YAML)",
+        "             Deployment (14 lines of YAML)",  # the fake's resources_get, managedFields cut
         "    draft    fault_found · selector_mismatch · Service/checkout · cites E1",
         "node     verify_evidence",
         "  check    code checks passed",
@@ -167,7 +167,9 @@ def test_control_characters_from_the_cluster_or_a_model_never_reach_the_terminal
     console.print(ui.approval(request(explanation=ESCAPES)))
     shown = console.file.getvalue()
     assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", shown)
-    assert shown.count("✓ approved\ufffd") == 5  # the sequences gone, the bell replaced
+    # each place it went in (the log, the reasoning, the root cause, the finding, the
+    # explanation): the sequences gone, the bell replaced
+    assert shown.count("✓ approved\ufffd") == 5
 
 
 @pytest.mark.parametrize(
@@ -235,8 +237,8 @@ def test_an_inconclusive_run_still_exits_0(fake, env):
     assert json.loads(result.stdout)["diagnosis"]["status"] == "inconclusive"
 
 
-def test_an_unreachable_mcp_server_is_one_clear_message_and_exit_2(env, monkeypatch):
-    env(mcp_url="http://127.0.0.1:9/mcp")
+def test_an_unreachable_mcp_server_is_one_clear_message_and_exit_2(monkeypatch):
+    # the MCP address is one where nothing listens (tests/unit/conftest.py)
     monkeypatch.setattr(core, "make_model", lambda _settings, _name: ScriptedModel())
     result = agent("investigate", "q")
     assert (result.exit_code, result.stdout) == (2, "")
@@ -314,8 +316,8 @@ def terminal(monkeypatch):
 
 
 def request(**args) -> ApprovalRequest:
-    facts = Facts(current_selector={"app": "check-out"}, resource_version="100",
-                  ready_pods=["checkout-a", "checkout-b"])  # fmt: skip
+    owners = dict.fromkeys(["checkout-a", "checkout-b"], "ReplicaSet/checkout-1")
+    facts = Facts(current_selector={"app": "check-out"}, resource_version="100", owners=owners)
     call = fix_call().tool_calls[0]["args"] | args
     return ApprovalRequest(tool="patch_service_selector", args=call, facts=facts)
 
@@ -378,7 +380,7 @@ def test_in_a_terminal_the_change_is_shown_and_only_an_answer_typed_after_it_cou
     assert "Service          shop-checkout/checkout" in shown
     assert "app=check-out  →  app=checkout  (replaces the whole selector)" in shown
     assert "[/] Selects [app=x]." in shown  # the remediator's words, as written: not markup
-    assert "2 ready pods match app=checkout: checkout-a, checkout-b" in shown
+    assert "2 ready pods match app=checkout: checkout-a (ReplicaSet/checkout-1)," in shown
     assert "the Service is still at version 100" in shown and "Apply this change? [y/N]" in shown
 
 
@@ -391,11 +393,23 @@ def test_a_prompt_nobody_answers_is_given_up_cleanly(terminal):
     assert asyncio.run(unanswered()) is False  # it stopped watching the terminal
 
 
-def test_the_prompt_warns_when_approving_would_be_refused():
-    changed = Facts(current_selector={"app": "x"}, resource_version="101", ready_pods=["p"])
+@pytest.mark.parametrize(
+    ("facts", "warning"),
+    [
+        (Facts(current_selector={"app": "x"}, resource_version="101", owners={"p": "RS/p"}),
+         "The Service changed since the remediator read it (version 101): approving will be "
+         "refused as stale."),
+        (Facts(error="403 Forbidden"),
+         "Couldn't check the Service as the remediator: 403 Forbidden"),
+        (Facts(current_selector={"app": "x"}, resource_version="100"),
+         "No ready pod matches the new selector: approving will be refused."),
+    ],
+    ids=["stale", "unreadable", "no ready pod"],
+)  # fmt: skip
+def test_the_prompt_warns_when_approving_would_be_refused(facts, warning):
     console = Console(record=True, width=200)
-    console.print(ui.approval(request().model_copy(update={"facts": changed})))
-    assert "changed since the remediator read it (version 101)" in console.export_text()
+    console.print(ui.approval(request().model_copy(update={"facts": facts})))
+    assert warning in console.export_text()
 
 
 class Terminal:
@@ -461,24 +475,35 @@ def proposing(fake, fixer=None) -> None:
 ROOT_CAUSE = "The Service selects app=check-out; the pods are labelled app=checkout."
 
 
-def test_with_quiet_the_prompt_shows_the_diagnosis_first_and_the_end_does_not_repeat_it(
-    fake, investigate_in
+@pytest.mark.parametrize(
+    "elsewhere", [False, True], ids=["stdout the terminal", "stdout elsewhere"]
+)
+def test_the_prompt_shows_the_diagnosis_first_and_the_end_repeats_it_only_for_another_stdout(
+    elsewhere, fake, investigate_in
 ):
     proposing(fake)
     terminal = Terminal()
-    investigate_in(terminal)
+    other = Terminal(answer=None) if elsewhere else None  # its watcher stops once read
+    investigate_in(terminal, stdout=other.file("w") if other else None)
     shown = terminal.shown()
     prompt = shown.index("Apply this change? [y/N] n")
-    before, after = shown[:prompt], shown[prompt:]
+    before = shown[:prompt]
     # nothing before the diagnosis (--quiet), and the diagnosis before the change
     assert before.startswith("╭─ Fault found · selector_mismatch · Service/checkout in shop-")
     assert before.index(ROOT_CAUSE) < before.index("Next step:") < before.index("Approve this fix?")
     assert "resources_get Service/checkout -n shop-checkout" in before  # where E1 came from
-    assert "Proposed fix:" not in shown  # the change panel says it, once
-    # the end: the fix's outcome only, in a panel with the same title
-    assert "Fault found · selector_mismatch" in after and ROOT_CAUSE not in after
-    assert "Fix: rejected: answered no in the terminal (by alice," in after
-    assert "Next step:" not in after and "E1 " not in after
+    assert "Proposed fix:" not in before  # the change panel says it, once
+    end = other.shown() if other else shown[prompt:]
+    flat = " ".join(end.replace("│", " ").split())  # the panel wraps lines
+    assert "Fix: rejected: answered no in the terminal (by alice," in flat
+    if other:  # the full summary: that output may be read without the terminal
+        assert "Fix:" not in shown
+        assert ROOT_CAUSE in flat and "resources_get Service/checkout -n shop-checkout" in flat
+        assert "Next step: Set the Service selector to app=checkout." in flat
+        assert "Proposed fix: set the selector of Service shop-checkout/checkout" in flat
+    else:  # the fix's outcome only, in a panel with the same title
+        assert "Fault found · selector_mismatch" in end and ROOT_CAUSE not in end
+        assert "Next step:" not in end and "E1 " not in end
 
 
 def test_with_json_the_prompt_shows_the_diagnosis_and_stdout_is_the_result_json_alone(
@@ -495,22 +520,6 @@ def test_with_json_the_prompt_shows_the_diagnosis_and_stdout_is_the_result_json_
     assert out == result.model_dump_json() + "\n"  # exactly the result: nothing added
     assert set(json.loads(out)["remediation"]["request"]) == {"tool", "args", "facts"}
     assert result.remediation.decision.reason == "answered no in the terminal"
-
-
-def test_the_full_summary_prints_when_stdout_is_not_the_terminal_the_prompt_used(
-    fake, investigate_in
-):
-    proposing(fake)
-    terminal, other = Terminal(), Terminal(answer=None)
-    stdout = other.file("w")
-    investigate_in(terminal, stdout=stdout)
-    shown, printed = terminal.shown(), other.shown()
-    assert ROOT_CAUSE in shown and "Fix:" not in shown
-    flat = " ".join(printed.replace("│", " ").split())  # the panel wraps lines
-    assert ROOT_CAUSE in flat and "resources_get Service/checkout -n shop-checkout" in flat
-    assert "Next step: Set the Service selector to app=checkout." in flat
-    assert "Proposed fix: set the selector of Service shop-checkout/checkout" in flat
-    assert "Fix: rejected: answered no in the terminal (by alice," in flat
 
 
 @pytest.mark.parametrize(

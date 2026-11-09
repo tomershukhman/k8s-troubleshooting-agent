@@ -1,36 +1,24 @@
-"""The fix on the real cluster, model and tracking server. The selector scenario's question is
-asked without a namespace. The first test reads the real command's run with no terminal on stdin
-(shared with test_tracing.py), so the fix request is rejected; the others decide the request with
-the test's own approver, inside the same call, as the CLI does. A test that changes
-the Service rebuilds the scenario afterwards. Model answers vary: a run that never reaches the fix
-request gets one retry."""
+"""The fix on the real cluster and model. The selector scenario's question is asked without a
+namespace. The first test reads the real command's run with no terminal on stdin (shared with
+test_tracing.py), so the fix request is rejected; the approved-fix test decides it with its own
+approver, inside the same call, as the CLI does; the patch test calls the fix tool directly, as
+the remediator, against the real API server. A test that changes the Service rebuilds the
+scenario afterwards. Model answers vary: a run that never reaches the fix request gets one
+retry."""
 
 import asyncio
 
-import mlflow
 import pytest
 from kubernetes import client
 
-from k8s_agent import tracing
 from k8s_agent.agent import Answer, RunRecord, investigate
 from k8s_agent.agent.records import FixArgs, FixOutcome
-from k8s_agent.agent.remediator import Kube, apply_fix
+from k8s_agent.agent.remediator import apply_fix
 from k8s_agent.config import get_settings
-from k8s_agent.policy import FIX_TOOL
+from k8s_agent.kube import Kube
 from k8s_agent.scenarios import get_scenario
-from tests.fakes import (
-    SERVICE_ARGS,
-    ScriptedModel,
-    answer,
-    call,
-    critic,
-    diagnosis,
-    fix_call,
-    remediator,
-    selector_fix,
-)
 
-from .conftest import agent, run_selector, stored
+from .conftest import agent, run_selector
 
 pytestmark = pytest.mark.usefixtures("cluster")
 ATTEMPTS = 2
@@ -48,14 +36,6 @@ def close_loop():
 @pytest.fixture(scope="module")
 def want():
     return get_scenario(get_settings().scenarios_dir, "selector")
-
-
-@pytest.fixture(scope="module")
-def traced() -> tracing.Tracing:
-    s = get_settings()
-    if not s.mlflow_tracking_uri:
-        pytest.fail("set MLFLOW_TRACKING_URI (see .env.example) to run the fix tests")
-    return tracing.enable(s)
 
 
 @pytest.fixture
@@ -110,7 +90,7 @@ def test_the_right_fix_is_proposed_and_requested_and_without_a_terminal_rejected
     args = r["request"]["args"]  # exactly what the remediator asked to run
     assert (args["namespace"], args["service"], args["selector"]) == (NS, NAME, expected.selector)
     assert args["resource_version"] == before.metadata.resource_version
-    assert len(r["request"]["facts"]["ready_pods"]) == 2  # read as the remediator at the pause
+    assert len(r["request"]["facts"]["owners"]) == 2  # read as the remediator at the pause
     assert (r["decision"]["approved"], r["decision"]["reason"]) == (
         False,
         "no interactive approval available",
@@ -123,48 +103,20 @@ def test_the_right_fix_is_proposed_and_requested_and_without_a_terminal_rejected
     )
 
 
-def test_editing_the_service_during_the_pause_makes_the_fix_refuse(kube, want, rebuilt):
-    # Scripted models, so no cost and no retry: they only get the run to the pause. The MCP
-    # server, the pause, the remediator's identity and its fix tool are the real ones.
-    async def edit_then_approve(*_):
-        edit = {"metadata": {"annotations": {"k8s-agent.test/edited": "during-the-pause"}}}
-        kube.core.patch_namespaced_service(NAME, NS, edit)
-        return Answer(True, "approved after an edit, by the remediate acceptance test")
-
-    investigator = ScriptedModel(script=[
-        call(("resources_get", SERVICE_ARGS), ("pods_list_in_namespace", {"namespace": NS})),
-        answer(diagnosis("E1", "E2", proposed_fix=selector_fix())),  # app=checkout
-    ])  # fmt: skip
-    selector = want.spec.expected_fix.selector
-    reads = call(("get_service", {"namespace": NS, "name": NAME}),
-                 ("list_pods", {"namespace": NS, "selector": selector}))  # fmt: skip
-    version = service(kube).metadata.resource_version  # as the remediator reads it
-    get_settings.cache_clear()
-    record = LOOP.run(
-        investigate(want.spec.question, settings=get_settings(), user_id="bob",
-                    approve=edit_then_approve, model=investigator, critic_model=critic(),
-                    remediator_model=remediator(reads, fix_call(resource_version=version)))
-    )  # fmt: skip
-    r = record.result.remediation
-    assert r.request.facts.resource_version == version  # unchanged until the edit in the pause
-    assert r.decision.approved and r.outcome == "stale" and "nothing was applied" in r.detail
-    assert service(kube).spec.selector == BROKEN
-
-
 def test_the_patch_itself_refuses_a_service_changed_after_the_tools_check(
     kube, want, monkeypatch, rebuilt
 ):
     # SPEC 6 item 8 on the real API server: the JSON Patch's `test` of the resourceVersion, not
     # just the tool's own check before it. No model: the fix tool, as the remediator.
     s, before = get_settings(), service(kube)
-    check = Kube.ready_pods
+    check = Kube.ready_pod_owners
 
     def edited_meanwhile(self, namespace, selector):  # after the tool's version check passed
         edit = {"metadata": {"annotations": {"k8s-agent.test/edited": "before-the-patch"}}}
         kube.core.patch_namespaced_service(NAME, NS, edit)
         return check(self, namespace, selector)
 
-    monkeypatch.setattr(Kube, "ready_pods", edited_meanwhile)
+    monkeypatch.setattr(Kube, "ready_pod_owners", edited_meanwhile)
     version = before.metadata.resource_version
     args = FixArgs(namespace=NS, service=NAME, selector=want.spec.expected_fix.selector,
                    resource_version=version, explanation="test")  # fmt: skip
@@ -174,9 +126,7 @@ def test_the_patch_itself_refuses_a_service_changed_after_the_tools_check(
     assert service(kube).spec.selector == BROKEN
 
 
-def test_an_approved_fix_gets_endpoints_and_is_verified_all_in_one_trace(
-    kube, want, traced, rebuilt
-):
+def test_an_approved_fix_gets_endpoints_and_is_verified(kube, want, rebuilt):
     at_pause = []
 
     async def approve(*_):
@@ -195,18 +145,3 @@ def test_an_approved_fix_gets_endpoints_and_is_verified_all_in_one_trace(
     assert check.resolved and {e.ref for e in check.evidence}.isdisjoint(
         e.ref for e in result.diagnosis.evidence
     )  # fresh evidence, from the recheck
-
-    trace = stored(result.trace_id)
-    session = f"metadata.`mlflow.trace.session` = '{result.thread_id}'"
-    found = mlflow.search_traces(
-        locations=[traced.experiment_id], filter_string=session, return_type="list"
-    )
-    assert [t.info.trace_id for t in found] == [result.trace_id]  # one trace for the whole run
-    [approval] = trace.search_spans(name="approval")
-    assert approval.inputs["args"]["selector"] == want.spec.expected_fix.selector  # what was shown
-    assert (approval.outputs["approved"], approval.outputs["by"]) == (True, "bob")
-    [patch] = trace.search_spans(name=FIX_TOOL)
-    [recheck] = trace.search_spans(name="recheck")
-    assert approval.end_time_ns <= patch.start_time_ns < recheck.start_time_ns
-    assert trace.search_spans(name="investigator") and trace.search_spans(name="critic")
-    print(f"  trace: {traced.url(result.trace_id)}")

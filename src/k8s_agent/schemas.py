@@ -1,8 +1,9 @@
 """The diagnosis vocabulary and the agents' answer schemas (SPEC §4.2).
 
 Only what Claude's structured output enforces lives here: types, enums, required fields. The
-consistency rules (no_fault ↔ category none, evidence required, ...) are code checks in
-verify_evidence, which send the investigator feedback instead of discarding its answer.
+consistency rules (no_fault ↔ category none, evidence required, ...) are code checks
+(graph.code_checks, run by verify_evidence), which send the investigator feedback instead of
+discarding its answer.
 """
 
 from enum import StrEnum

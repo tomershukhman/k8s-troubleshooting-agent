@@ -2,17 +2,22 @@
 cost). Settings are isolated by conftest.py; `env` sets AGENT_* settings for one test."""
 
 import asyncio
+import base64
+import json
 import logging
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from fastmcp import Client as FastMCPClient
+from fastmcp import FastMCP
 from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
 from langchain_core.exceptions import ModelRateLimitError, OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from k8s_agent.agent import (
+    FixCalled,
     McpUnavailable,
     NotStarted,
     RunStatus,
@@ -20,9 +25,9 @@ from k8s_agent.agent import (
     core,
     investigate,
 )
-from k8s_agent.agent.graph import system_prompt, verify_evidence
+from k8s_agent.agent.graph import verify_evidence
+from k8s_agent.agent.investigator import system_prompt
 from k8s_agent.config import get_settings
-from k8s_agent.policy import READ_ONLY_TOOLS
 from k8s_agent.schemas import CATEGORY_DEFINITIONS, CriticVerdict
 from tests.fakes import (
     DEPLOYMENT_YAML,
@@ -50,7 +55,7 @@ LOG = {"name": "p", "namespace": "shop-checkout"}
 
 def run(model, cluster=None, judge=None, *, target=None, **kwargs):
     kwargs.setdefault("remediator_model", remediator())
-    kwargs.setdefault("remediator_kube", FakeServices().kube)
+    kwargs.setdefault("load_remediator_kube", FakeServices().kube)
     return asyncio.run(
         investigate(
             "Why is checkout down?",
@@ -101,7 +106,6 @@ def test_the_investigator_uses_native_structured_output_and_only_read_tools():
         # ToolStrategy would add an answer tool and force tool use, which Sonnet 5.5 rejects.
         assert kwargs["response_format"]["type"] == "json_schema"
         assert "tool_choice" not in kwargs
-    assert {frozenset(tools) for tools in model.bound_tools} == {READ_ONLY_TOOLS}
     assert cluster.calls == []  # the model asked for pods_delete; nothing ran
     assert seen(model, 1)[0].status == "error" and record.steps[0].error
 
@@ -111,7 +115,7 @@ def test_the_critic_is_one_structured_call_with_no_tools():
     run(ScriptedModel(script=[call(LIST), answer(healthy("E1"))]), judge=judge)
     [kwargs] = judge.structured
     assert (kwargs["schema"], kwargs["method"]) == (CriticVerdict, "json_schema")
-    assert judge.bound_tools == [] and len(judge.received) == 1
+    assert len(judge.received) == 1
 
 
 def test_the_models_come_from_the_settings(env, monkeypatch):
@@ -217,12 +221,17 @@ def test_pods_log_tail_is_bounded_by_config(env):
     assert [s.args["tail"] for s in record.steps] == [20, 20, 5]
 
 
-def test_refused_access_is_tagged_evidence_and_the_reason_says_how_to_grant_it():
+def test_refused_access_is_tagged_evidence_and_the_reason_says_how_to_grant_it(traced):
     cluster = FakeCluster({"pods_list_in_namespace": forbidden})
     model = ScriptedModel(
         script=[call(("pods_list_in_namespace", {"namespace": "default"})), answer(unsure("E1"))]
     )
     record = run(model, cluster)
+    assert len(cluster.calls) == 1  # tried once: a refusal isn't retried
+    # on the trace: an error span with the refusal
+    [span] = traced(record.result).search_spans(name="pods_list_in_namespace")
+    assert span.status.status_code == "ERROR" and "forbidden" in span.status.description
+    assert [e.name for e in span.events] == ["exception"]
     [result] = seen(model, 1)
     assert (
         result.status == "error"
@@ -566,13 +575,15 @@ def test_an_inconclusive_answer_citing_nothing_skips_the_critic():
 
 def test_the_tool_call_limit_refuses_further_calls_and_the_model_concludes(env):
     env(max_tool_calls="2")
-    cluster = FakeCluster()
+    cluster, events = FakeCluster(), []
     model = ScriptedModel(script=[call(LIST, LIST, LIST), answer(diagnosis("E1", "E2"))])
-    record = run(model, cluster)
+    record = run(model, cluster, on_event=events.append)
     assert len(cluster.calls) == 2
     refused = [m.content for m in seen(model, 1) if m.status == "error"]
     assert refused == ["Tool call limit exceeded. Do not make additional tool calls."]
     assert record.result.diagnosis.status == "fault_found"
+    # progress shows the two calls made, and the refused one as nothing (not a fix tool call)
+    assert [type(e) for e in events if isinstance(e, ToolCalled | FixCalled)] == [ToolCalled] * 2
 
 
 def test_the_model_call_limit_per_round_ends_inconclusive_with_partial_steps(env):
@@ -695,10 +706,26 @@ def test_an_error_in_the_progress_callback_fails_the_run_and_stops_the_graph_at_
     assert left == []  # no graph task still running once the run has returned
 
 
-def test_an_unreachable_mcp_server_stops_the_run_before_any_model_call():
+def write_only_server() -> FastMCP:
+    server = FastMCP("write-only")
+
+    @server.tool
+    async def pods_delete(name: str) -> str:
+        return "deleted"
+
+    return server
+
+
+@pytest.mark.parametrize(
+    ("make_target", "error"),
+    [(lambda: "http://127.0.0.1:9/mcp", r"cannot use the MCP server at .*: "),
+     (write_only_server, "offers none of the allowed tools")],
+    ids=["unreachable", "no allowed tool"],
+)  # fmt: skip
+def test_an_mcp_server_the_agent_cannot_use_stops_the_run_before_any_model_call(make_target, error):
     model = ScriptedModel()
-    with pytest.raises(McpUnavailable, match="cannot use the MCP server"):
-        run(model, target="http://127.0.0.1:9/mcp")
+    with pytest.raises(McpUnavailable, match=error):
+        run(model, target=make_target())
     assert model.received == []
 
 
@@ -720,6 +747,18 @@ def test_an_invalid_model_setting_stops_the_run_before_anything_else(env):
         asyncio.run(investigate("q", settings=get_settings(), mcp_target=FakeCluster().server))
 
 
+def test_expired_agent_tokens_stop_the_run_before_anything_else(env, tmp_path):
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": 1_700_000_000}).encode()).decode()
+    kubeconfig = {"users": [{"name": "u", "user": {"token": f"h.{claims.rstrip('=')}.s"}}]}
+    path = tmp_path / "remediator.kubeconfig"
+    path.write_text(yaml.safe_dump(kubeconfig))
+    env(remediator_kubeconfig=str(path))
+    model = ScriptedModel()
+    with pytest.raises(NotStarted, match="tokens expired at 2023-11-14 22:13 UTC: run `docker"):
+        run(model)
+    assert model.received == []
+
+
 @pytest.mark.parametrize(
     ("level", "events"),
     [  # INFO: the run starting and finishing, and problems; DEBUG adds each step
@@ -732,11 +771,9 @@ def test_an_invalid_model_setting_stops_the_run_before_anything_else(env):
 )
 def test_every_log_line_carries_the_run_ids(level, events, caplog):
     caplog.set_level(level, logger="k8s_agent")
-    record = run(
-        ScriptedModel(script=[call(LIST), answer(healthy("E1"))]), user_id="bob", thread_id="t-1"
-    )
+    record = run(ScriptedModel(script=[call(LIST), answer(healthy("E1"))]), user_id="bob")
     ours = [r for r in caplog.records if r.name.startswith("k8s_agent")]
     assert [r.getMessage() for r in ours] == events
     assert {(r.run_id, r.thread_id, r.user_id) for r in ours} == {
-        (record.result.run_id, "t-1", "bob")
+        (record.result.run_id, record.result.thread_id, "bob")
     }

@@ -26,14 +26,16 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(data, default=str)
 
 
-def setup_logging(level: str, file: Path | None = None, *, enabled: bool = True) -> None:
-    """Send this package's logs as JSON lines to `file`, else stderr; or nowhere. Called by
-    the CLI; the core only logs."""
+def setup_logging(level: str, file: Path | None = None) -> None:
+    """Send this package's logs as JSON lines to `file`, else to stderr unless it's an
+    interactive terminal (JSON is for machines; the CLI's progress display shows the same events
+    there). Called by the CLI; the core only logs."""
     logger = logging.getLogger(LOGGER)
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
+        handler.close()
     handler: logging.Handler = logging.NullHandler()
-    if enabled:
+    if file is not None or not sys.stderr.isatty():
         handler = logging.FileHandler(file) if file else logging.StreamHandler(sys.stderr)
         handler.setFormatter(JsonFormatter())
     logger.addHandler(handler)
