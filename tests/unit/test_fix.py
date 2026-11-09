@@ -435,7 +435,7 @@ def test_no_answer_from_the_api_server_to_the_patch_is_a_failure_that_says_check
     assert result.outcome is FixOutcome.failed and "check whether" in result.detail
 
 
-def test_once_applied_a_fix_stays_applied_whatever_the_endpoint_count_meets(monkeypatch):
+def test_once_applied_a_fix_stays_applied_whatever_the_endpoint_wait_finds(monkeypatch):
     services = FakeServices()
     monkeypatch.setattr(services, "list_namespaced_endpoint_slice", broken_connection)
     result = apply_fix(services.kube(), args(), get_settings())
