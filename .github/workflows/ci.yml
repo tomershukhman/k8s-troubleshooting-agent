@@ -1,7 +1,8 @@
-# One pipeline, cheap gates first: lint, type check and unit tests; then the image build and a
-# run of it as non-root; then, on pull requests to main (and the Actions tab's "Run workflow"
-# button), the evals with the real model on a throwaway kind cluster (SPEC 1, CI). Pushes to main
-# and v* tags publish the image (linux/amd64, linux/arm64) to ghcr.io.
+# The pipeline, one stage after another (SPEC 1, CI):
+#   lint → unit tests → build image → publish image → mlflow evals
+# The evals pull the image just published, so they grade the artifact that ships. Pull requests
+# to main run every stage; pushes to main and v* tags stop after publishing (latest on main); the
+# Actions tab's "Run workflow" button runs every stage.
 name: ci
 
 on:
@@ -24,21 +25,33 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  check:
+  lint:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.13.7"
           enable-cache: true
-      - run: make check
+      - run: make lint
+
+  unit-tests:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          enable-cache: true
+      - run: make test
         env:
           PYTEST_ADDOPTS: -rA  # list every test by name, passed ones too
 
-  image:
-    needs: check
+  build-image:
+    needs: unit-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -59,72 +72,11 @@ jobs:
           test "$uid" != 0
           docker run --rm "$IMAGE:ci" scenario list
 
-  # GitHub gives no secrets to a pull request from a fork: there the evals don't run.
-  key:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-24.04
-    outputs:
-      present: ${{ steps.check.outputs.present }}
-    steps:
-      - id: check
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$ANTHROPIC_API_KEY" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::No ANTHROPIC_API_KEY secret (e.g. a pull request from a fork): the evals didn't run. Run them locally: docker compose run --rm admin eval"
-          fi
-
-  # The README's own docker compose commands, on the image built from this code.
-  eval:
-    needs: [image, key]
-    if: needs.key.outputs.present == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The settings a reviewer puts in .env. Native Linux Docker: the containers run as the
-      # owner of the 0600 kubeconfigs.
-      - name: Write .env
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          umask 077
-          cat > .env <<EOF
-          ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
-          AGENT_CONTAINER_USER=$(id -u):$(id -g)
-          AGENT_KUBE_CONTEXT=kind-k8s-agent
-          MLFLOW_TRACKING_URI=http://localhost:5050
-          EOF
-      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
-        with:
-          cluster_name: k8s-agent
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # The image the compose services use (from the image job's cache, so quick).
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          load: true
-          tags: ${{ env.IMAGE }}:latest
-          build-args: GIT_COMMIT=${{ github.sha }}
-          cache-from: type=gha
-      - name: agent setup (the agent's identities)
-        run: docker compose run --rm -T admin setup
-      - name: Start the MCP server and the tracking server
-        run: docker compose up -d --wait k8s-mcp mlflow
-      - name: agent eval
-        run: docker compose run --rm -T admin eval
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: eval-results
-          path: eval-results/*.json
-          if-no-files-found: ignore
-
-  publish:
-    if: github.event_name == 'push'
-    needs: image
+  # Every run publishes under its commit SHA; main also as latest, a v* tag under its name.
+  # Pull requests from forks get no write token (or secrets): publish and evals don't run there.
+  publish-image:
+    needs: build-image
+    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -143,10 +95,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          # latest from main; every image also under its full commit SHA; a v* tag under its name
           tags: |
+            type=raw,value=${{ github.sha }}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=long,prefix=
             type=ref,event=tag
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -158,3 +109,49 @@ jobs:
           build-args: GIT_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The README's own docker compose commands, with the real model, on a throwaway kind cluster.
+  mlflow-evals:
+    needs: publish-image
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The settings a reviewer puts in .env. Native Linux Docker: the containers run as the
+      # owner of the 0600 kubeconfigs.
+      - name: Write .env
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::Set the ANTHROPIC_API_KEY repository secret to run the evals"
+            exit 1
+          fi
+          umask 077
+          cat > .env <<EOF
+          ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+          AGENT_CONTAINER_USER=$(id -u):$(id -g)
+          AGENT_KUBE_CONTEXT=kind-k8s-agent
+          MLFLOW_TRACKING_URI=http://localhost:5050
+          EOF
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: k8s-agent
+      # The image just published, under the name compose uses.
+      - name: Pull the published image
+        run: |
+          docker pull "$IMAGE:$GITHUB_SHA"
+          docker tag "$IMAGE:$GITHUB_SHA" "$IMAGE:latest"
+      - name: agent setup (the agent's identities)
+        run: docker compose run --rm -T admin setup
+      - name: Start the MCP server and the tracking server
+        run: docker compose up -d --wait k8s-mcp mlflow
+      - name: agent eval
+        run: docker compose run --rm -T admin eval
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eval-results
+          path: eval-results/*.json
+          if-no-files-found: ignore

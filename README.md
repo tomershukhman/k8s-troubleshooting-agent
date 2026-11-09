@@ -2,14 +2,14 @@
 
 An AI agent that investigates a Kubernetes cluster, finds the root cause of an issue, and recommends the next action. It can apply one narrow fix, and only after you approve the exact change.
 
-**Guiding principle: the cluster is the system under investigation; the agent and its tools run beside it,** so a diagnosis never depends on the health of the cluster it diagnoses. In the cluster: the test scenarios, the agent's identities, and the MLflow tracking server that stores the traces.
+**Guiding principle: the cluster is the system under investigation; the agent and its tools run beside it,** so a diagnosis never depends on the health of the cluster it diagnoses. In the cluster: only the test scenarios and the agent's identities. Everything else runs in Docker beside it, the MLflow tracking server included.
 
 Design, with each decision and the alternatives rejected: [SPEC.md](SPEC.md). Build plan: [PLAN.md](PLAN.md).
 
 ## Requirements
 
-- **A local Kubernetes cluster.** Tested on [OrbStack](https://orbstack.dev/) (macOS) with its Kubernetes cluster turned on. kind, minikube and Docker Desktop should work but are untested ([other clusters](#other-clusters-kind-minikube)).
-- Docker with Compose and host networking (built in on OrbStack and Linux; on Docker Desktop 4.34+: Settings → Resources → Network → Enable host networking). Everything else (Python, the agent, Helm 4) is in the image.
+- **A local Kubernetes cluster.** Tested on [OrbStack](https://orbstack.dev/) (macOS) with its Kubernetes cluster turned on. CI runs the evals on kind; minikube and Docker Desktop should work but are untested.
+- Docker with Compose and host networking (built in on OrbStack and Linux; on Docker Desktop 4.34+: Settings → Resources → Network → Enable host networking). Everything else is in the images.
 - On native Linux Docker only: set `AGENT_CONTAINER_USER` in `.env` to your `id -u`:`id -g`, so the containers can read your kubeconfig and the credential files `agent setup` writes (all 0600).
 - An [Anthropic API key](https://console.anthropic.com/), as `ANTHROPIC_API_KEY` in `.env` or your environment. Runs are billed to that key's API account.
 
@@ -20,27 +20,20 @@ With OrbStack's Kubernetes running:
 ```bash
 cp .env.example .env && chmod 600 .env   # then set ANTHROPIC_API_KEY (the file holds your key)
 docker compose pull                      # the app image from ghcr.io (or build it here: docker compose build)
-docker compose run --rm admin setup      # the agent's identities and the tracking server (re-run to refresh tokens)
-docker compose up -d --wait k8s-mcp      # the read-only MCP server
+docker compose run --rm admin setup      # the agent's identities (re-run to refresh their tokens)
+docker compose up -d --wait k8s-mcp mlflow   # the read-only MCP server and the tracking server
 ```
 
-Three containers, each with only the credentials it needs ([SPEC 3.5](SPEC.md#35-safety-boundary-cluster-enforced)):
+Four services. The three that touch the cluster hold only the credentials they need ([SPEC 3.5](SPEC.md#35-safety-boundary-cluster-enforced)):
 
 | Service | Runs | Holds |
 |---|---|---|
-| `admin` | `agent setup`, `agent scenario`, `agent eval` | your kubeconfig (`AGENT_KUBECONFIG`, default `~/.kube/config`, read-only); writes the agent's credentials to `.kube-agent/` and results to `eval-results/` |
+| `admin` | `agent setup`, `agent scenario`, `agent eval` | your kubeconfig (`$KUBECONFIG`, default `~/.kube/config`, read-only); writes the agent's credentials to `.kube-agent/` and results to `eval-results/` |
 | `agent` | `agent investigate` | the remediator's credentials only. Your kubeconfig is never mounted here: it reads the cluster only through the MCP server, as the read-only `reader` ([safety boundary](#safety-boundary)) |
 | `k8s-mcp` | the MCP server | the reader's credentials only |
+| `mlflow` | the MLflow tracking server, at http://localhost:5050 | traces and eval results, on a Docker volume; nothing from the cluster |
 
 `admin` uses your kubeconfig's current context (`orbstack` on OrbStack); set `AGENT_KUBE_CONTEXT` for another. The eval runner holds both your kubeconfig and the agent's credentials: it resets the scenarios and runs the agent. Every setting and its default is in [`.env.example`](.env.example); compose passes `.env` to every container.
-
-### Other clusters (kind, minikube)
-
-Untested locally (CI runs the evals on kind), but the same steps should work. These clusters give LoadBalancer Services no address, so forward the tracking server before `agent investigate` or `agent eval`:
-
-```bash
-kubectl port-forward -n mlflow svc/mlflow-mlflow 5050 &
-```
 
 ## Reproducing the failure scenarios
 
@@ -130,7 +123,7 @@ Details: [SPEC 3.4](SPEC.md#34-remediation-a-remediator-agent-behind-human-appro
 
 ### Traces
 
-Every run, fix included, is one MLflow trace: each stage, model call and tool call with its inputs, outputs, errors and latency, plus the critic's verdicts and your approval. The CLI prints its link after each run (`Trace: http://localhost:5050/#/experiments/…`); the UI is at http://localhost:5050. What each span holds: [SPEC 3.7](SPEC.md#37-observability).
+Every run, fix included, is one MLflow trace: each stage, model call and tool call with its inputs, outputs, errors and latency, plus the critic's verdicts and your approval. With `MLFLOW_TRACKING_URI=http://localhost:5050` in `.env` (as in `.env.example`), the CLI prints its link after each run (`Trace: http://localhost:5050/#/experiments/…`); the UI is at http://localhost:5050. What each span holds: [SPEC 3.7](SPEC.md#37-observability).
 
 ### Output and exit codes
 
@@ -210,19 +203,33 @@ The cluster enforces it, through two identities from [`deploy/rbac.yaml`](deploy
 - **The MCP server** ([kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server), pinned by digest): read-only, exactly the 7 tools, Secrets denied, listening on `127.0.0.1` only.
 - **The fix** runs only after a person approves its exact call, and code rejects anything but the proposed fix.
 - **Tool output is data:** logs, events and ConfigMaps can hold text written by anyone; a manipulated model's worst case is a wrong diagnosis or a fix proposal, which still stops at the code checks and your approval.
-- **Known limit:** Kubernetes grants permissions per object type, so the remediator could patch any field of a Service in `shop-checkout`. The fix tool's code (only `spec.selector`), your approval and the short token lifetime keep it narrow.
-- **Local, single-user setup:** the MLflow tracking server has no login, so add authentication or a NetworkPolicy for anything shared. `.env` holds your API key: keep it `chmod 600`.
+- **`.env` holds your API key:** keep it `chmod 600`.
 
 Details: [SPEC 3.5](SPEC.md#35-safety-boundary-cluster-enforced).
 
 ## CI
 
-- **[`ci.yml`](.github/workflows/ci.yml), on every push and pull request:** `make check`, the image build and a run of it as non-root. Pushes to `main` publish the image (`linux/amd64`, `linux/arm64`) to `ghcr.io/tomershukhman/k8s-troubleshooting-agent`, tagged `latest` and with the commit SHA.
-- **[`eval.yml`](.github/workflows/eval.yml), on every pull request to `main` and from the Actions tab's "Run workflow" button:** a throwaway kind cluster, then this README's commands through `docker compose` (`admin setup`, `k8s-mcp`, `admin eval`) with the real model, on the image built from the pull request. It fails if any scenario misses its thresholds, and keeps `eval-results/` as a workflow artifact. Pull requests from forks get no secrets, so there it stops with a notice.
+One pipeline, [`ci.yml`](.github/workflows/ci.yml), one stage after another:
+
+| Stage | What it checks | Runs on |
+|---|---|---|
+| `lint` | ruff and pyright (`make lint`) | pull requests to `main`, pushes to `main` |
+| `unit-tests` | the unit tests, each listed by name (`make test`) | the same |
+| `build-image` | the image builds, runs as non-root and starts the CLI | the same |
+| `publish-image` | pushes the image (`linux/amd64`, `linux/arm64`) to `ghcr.io/tomershukhman/k8s-troubleshooting-agent` under its commit SHA; `latest` from `main` | the same |
+| `mlflow-evals` | pulls that published image and runs this README's commands through `docker compose` on a throwaway kind cluster, with the real model: every scenario must meet its thresholds; `eval-results/` is kept as the run's artifact | pull requests to `main`, and the Actions tab's "Run workflow" button |
+
+A newer push to a pull request cancels its run in progress. Pull requests from forks get no secrets or write token, so they stop after `build-image`.
+
+## Known limitations
+
+- **CI's evals don't reach your MLflow.** The `eval` job runs its own throwaway tracking server on the GitHub runner, gone when the job ends; only `eval-results/<time>.json` is kept, as the run's artifact. Seeing CI runs in MLflow would need a hosted tracking server CI can reach, with a login.
+- **The remediator's permission is per object type:** Kubernetes grants permissions per type, so it could patch any field of a Service in `shop-checkout`. The fix tool's code (only `spec.selector`), your approval and the short token lifetime keep it narrow; more fix types would need per-fix permissions and admission policies.
+- **The tracking server has no login:** it's published on `127.0.0.1` only, for a local, single-user setup. Add authentication before sharing it.
 
 ## Development
 
-Needs [uv](https://docs.astral.sh/uv/) and, for `agent setup`, [Helm 4](https://helm.sh/docs/intro/install/). `uv sync` installs Python 3.14 and every dependency; then `uv run agent …` runs any command without the containers.
+Needs [uv](https://docs.astral.sh/uv/). `uv sync` installs Python 3.14 and every dependency; then `uv run agent …` runs any command without the app containers (`k8s-mcp` and `mlflow` still run in compose). The image you build yourself (`docker compose build`) records no commit on traces; CI's images do.
 
 ```bash
 make check         # lint, type check + unit tests (no cluster, Docker or network; never reads your .env)
@@ -234,7 +241,7 @@ make accept        # every milestone's acceptance tests
 
 ```
 scenarios/<folder>/   manifests/*.yaml + scenario.yaml, one folder per scenario
-deploy/               the agent's identities (rbac.yaml), the tracking server's Helm values
+deploy/rbac.yaml      the agent's identities
 mcp/config.toml       the MCP server's configuration (read-only, tool allowlist, Secrets denied)
 src/k8s_agent/        the `agent` CLI, settings, scenarios, setup, evals
   agent/              the LangGraph workflow, critic, remediator, approval gate, the three prompts
