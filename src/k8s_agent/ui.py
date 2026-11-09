@@ -350,6 +350,13 @@ def fix_summary(r: Remediation, check: PostFixCheck | None) -> Text:
     return text
 
 
+def owned(pod: str, owners: dict[str, str | None]) -> str:
+    """A pod with the controller that manages it: `checkout-a (ReplicaSet/checkout-69db948c9f)`."""
+    if pod not in owners:  # not read (a record from before owners were)
+        return pod
+    return f"{pod} ({owners[pod] or 'no controller'})"
+
+
 def approval(request: ApprovalRequest) -> RenderableType:
     """The fix a person is asked to approve: the change, the remediator's explanation, and
     facts code just read as the remediator."""
@@ -364,7 +371,7 @@ def approval(request: ApprovalRequest) -> RenderableType:
     rows.add_row("Selector", Text(f"{now}  →  {labels(a.selector)}  (replaces the whole selector)"))
     rows.add_row("Remediator", Text(a.explanation))
     if f.error is None:
-        pods = ", ".join(f.ready_pods) or "none"
+        pods = ", ".join(owned(p, f.owners) for p in f.ready_pods) or "none"
         match = f"{len(f.ready_pods)} ready pods match {labels(a.selector)}: {pods}"
         rows.add_row("Checked now", Text(match))
     rows.add_row("Applies only if", Text(f"the Service is still at version {a.resource_version}"))
@@ -378,6 +385,11 @@ def approval(request: ApprovalRequest) -> RenderableType:
         )
     elif not f.ready_pods:
         warnings.append("No ready pod matches the new selector: approving will be refused.")
+    unmanaged = [p for p in f.ready_pods if p in f.owners and f.owners[p] is None]
+    if f.error is None and unmanaged:  # a planted standalone pod, say
+        warnings.append(
+            f"A pod no controller manages would receive traffic: {', '.join(unmanaged)}."
+        )
     body = Group(rows, *(Text(w, "bold yellow") for w in warnings))
     return Panel(body, title="[bold]Approve this fix?", title_align="left", border_style="yellow")
 

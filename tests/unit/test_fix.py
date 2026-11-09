@@ -119,9 +119,11 @@ def test_the_run_pauses_before_the_fix_runs_and_approving_applies_exactly_that_c
     assert at_pause == [[]]  # paused: the tool hadn't run
     [request] = seen
     assert (request.tool, request.args) == (FIX_TOOL, fix_call().tool_calls[0]["args"])
+    owner = "ReplicaSet/checkout-69db948c9f"
     assert request.facts == Facts(  # read as the remediator, while the run waited
         current_selector={"app": "check-out"}, resource_version="100",
         ready_pods=["checkout-a", "checkout-b"],
+        owners={"checkout-a": owner, "checkout-b": owner},
     )  # fmt: skip
     assert services.patches == [("shop-checkout", "checkout", PATCH, "application/json-patch+json")]
     r = record.result.remediation
@@ -153,6 +155,34 @@ def test_the_approver_gets_the_verified_diagnosis_and_the_tool_calls_behind_it()
     assert steps == record.result.evidence_steps  # the summary's own, cited ones only
     assert [(s.ref, s.tool) for s in steps] == [("E1", "resources_get"),
                                                 ("E2", "pods_list_in_namespace")]  # fmt: skip
+
+
+def test_the_approval_shows_each_pods_owner_and_warns_of_a_pod_no_controller_manages():
+    # A standalone pod carrying the new selector's labels (planted, say) would get traffic.
+    services, seen = FakeServices(), []
+    services.pods["planted"] = ({"app": "checkout"}, True)
+    services.unowned.add("planted")
+    fix(approver(yes=False, seen=seen), services=services)
+    [request] = seen
+    assert request.facts.owners == {"checkout-a": "ReplicaSet/checkout-69db948c9f",
+                                    "checkout-b": "ReplicaSet/checkout-69db948c9f",
+                                    "planted": None}  # fmt: skip
+    console = Console(width=300, record=True)
+    console.print(ui.approval(request))
+    text = console.export_text()
+    assert (
+        "3 ready pods match app=checkout: checkout-a (ReplicaSet/checkout-69db948c9f), "
+        "checkout-b (ReplicaSet/checkout-69db948c9f), planted (no controller)"
+    ) in text
+    assert "A pod no controller manages would receive traffic: planted." in text
+
+
+def test_with_every_pod_managed_there_is_no_owner_warning():
+    seen = []
+    fix(approver(yes=False, seen=seen))
+    console = Console(width=300, record=True)
+    console.print(ui.approval(seen[0]))
+    assert "no controller" not in console.export_text()
 
 
 def test_a_reject_applies_nothing_and_there_is_no_recheck():

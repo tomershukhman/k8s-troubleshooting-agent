@@ -2,7 +2,7 @@
 
 When the remediator's fix tool pauses the graph, `Gate.decide`:
 1. reads facts as the remediator: the Service's current selector and version, and the ready
-   pods the exact new selector matches;
+   pods the exact new selector matches, each with the controller that manages it;
 2. rejects at once a request that is malformed or differs from the investigator's proposed
    fix (the one the critic checked), so nobody is asked to approve anything else;
 3. otherwise asks the approver the caller gave (the CLI's y/N prompt, or the evals), with the
@@ -52,13 +52,14 @@ def read_facts(load_kube: Callable[[], Kube], args: FixArgs) -> Facts:
     try:
         k = load_kube()
         svc = k.service(args.namespace, args.service)
-        pods = k.ready_pods(args.namespace, args.selector)
+        owners = k.ready_pod_owners(args.namespace, args.selector)
     except (KubeError, *KUBE_ERRORS) as e:
         return Facts(error=str(e))
     return Facts(
         current_selector=present(svc.spec).selector,
         resource_version=present(svc.metadata).resource_version,
-        ready_pods=pods,
+        ready_pods=list(owners),
+        owners=owners,
     )
 
 

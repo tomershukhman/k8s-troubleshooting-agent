@@ -106,10 +106,15 @@ class Kube:
 
     def ready_pods(self, namespace: str, selector: dict[str, str]) -> list[str]:
         """The ready pods the exact `selector` matches (as a Service's: an empty one, none)."""
+        return sorted(self.ready_pod_owners(namespace, selector))
+
+    def ready_pod_owners(self, namespace: str, selector: dict[str, str]) -> dict[str, str | None]:
+        """The same pods, by name, each with the controller that manages it, from its
+        ownerReferences (`ReplicaSet/checkout-69db948c9f`); None when none does."""
         if not selector:
-            return []
-        pods = self.pods(namespace, selector)
-        return sorted(present(present(p.metadata).name) for p in pods if pod_ready(p))
+            return {}
+        pods = [p for p in self.pods(namespace, selector) if pod_ready(p)]
+        return dict(sorted((present(present(p.metadata).name), controller(p)) for p in pods))
 
     def ready_endpoints(self, namespace: str, service: str) -> int:
         """Ready endpoints across the Service's EndpointSlices, by the API's rules: an unset
@@ -139,6 +144,13 @@ class Kube:
             name, namespace, ops,
             _content_type="application/json-patch+json", _request_timeout=self.timeout,
         )  # fmt: skip
+
+
+def controller(pod: client.V1Pod) -> str | None:
+    """The pod's managing controller, as `Kind/name`; None for a pod no controller manages."""
+    refs = present(pod.metadata).owner_references or []
+    ref = next((r for r in refs if r.controller), None)
+    return f"{ref.kind}/{ref.name}" if ref else None
 
 
 # --- the fix ---------------------------------------------------------------------------------

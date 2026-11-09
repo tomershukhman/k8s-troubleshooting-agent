@@ -301,6 +301,7 @@ class FakeServices:
             "checkout-a": ({"app": "checkout"}, True),
             "checkout-b": ({"app": "checkout"}, True),
         }
+        self.unowned: set[str] = set()  # pods no controller manages (others: OWNER's)
         self.patches: list[tuple[str, str, Any, str]] = []
 
     def kube(self) -> Any:
@@ -321,7 +322,7 @@ class FakeServices:
     def list_namespaced_pod(self, namespace, label_selector=None, **_):
         want = dict(kv.split("=", 1) for kv in label_selector.split(",")) if label_selector else {}
         return k.V1PodList(items=[
-            labelled_pod(name, labels, ready)
+            labelled_pod(name, labels, ready, owner=None if name in self.unowned else OWNER)
             for name, (labels, ready) in self.pods.items() if want.items() <= labels.items()
         ])  # fmt: skip
 
@@ -349,9 +350,19 @@ class FakeServices:
         self.version += 1
 
 
-def labelled_pod(name: str, labels: dict[str, str], ready: bool) -> k.V1Pod:
+OWNER = ("ReplicaSet", "checkout-69db948c9f")
+
+
+def labelled_pod(
+    name: str, labels: dict[str, str], ready: bool, owner: tuple[str, str] | None = None
+) -> k.V1Pod:
+    refs = [  # an owner that isn't the controller first: only the controller counts
+        k.V1OwnerReference(api_version="v1", kind="ConfigMap", name="other", uid="u0"),
+        k.V1OwnerReference(api_version="apps/v1", kind=owner[0], name=owner[1], uid="u1",
+                           controller=True),
+    ] if owner else None  # fmt: skip
     p = pod(ready=ready)
-    p.metadata = k.V1ObjectMeta(name=name, labels=labels)
+    p.metadata = k.V1ObjectMeta(name=name, labels=labels, owner_references=refs)
     return p
 
 

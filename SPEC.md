@@ -482,7 +482,7 @@ sequenceDiagram
     else safe and would work
         R->>H: patch_service_selector(namespace, service, selector, resource_version, explanation)
         H-->>CLI: the whole graph pauses before the tool runs
-        Note over CLI,K: Code reads facts as remediator: current selector and version, ready pods the exact new selector matches
+        Note over CLI,K: Code reads facts as remediator: current selector and version, ready pods the exact new selector matches (with their owners)
         alt malformed, or not the proposed fix
             CLI->>G: resume: reject, without asking you
         else interactive terminal: you approve
@@ -550,8 +550,9 @@ sequenceDiagram
    - the namespace and the Service
    - the current selector → the new selector (it replaces the whole selector)
    - the remediator's explanation
-   - facts read by code with the remediator identity: how many ready pods the **exact new selector** matches, and which
+   - facts read by code with the remediator identity: how many ready pods the **exact new selector** matches, and which, each with the controller that manages it (from its `ownerReferences`, e.g. `ReplicaSet/checkout-69db948c9f`)
    - the version the fix is pinned to, and a warning if approving would be refused (the Service changed since the remediator read it; no ready pod matches)
+   - a warning if a matched pod has no managing controller ("a pod no controller manages would receive traffic"): it guards against a standalone pod planted with the new selector's labels
 3. `Apply this change? [y/N]`
 
 **At the end,** when the summary goes to the terminal the prompt used (stdout and stderr the same terminal), it doesn't repeat the diagnosis: it shows what happened to the fix (the decision, the outcome, and whether the recheck verified it, with the recheck's fresh evidence). Otherwise (stdout on another terminal) it prints in full, so a saved output is complete; piped or with `--json`, stdout is the result JSON, unchanged. A run without a fix, or whose fix code rejected without asking, shows nothing before the summary, which is in full.

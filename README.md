@@ -100,7 +100,9 @@ node     remediate
 ╭─ Approve this fix? ────────────────────────────────────────────────────────────────────────────────────────╮
 │ Service          shop-checkout/checkout                                                                    │
 │ Selector         app=check-out  →  app=checkout  (replaces the whole selector)                             │
-│ Checked now      2 ready pods match app=checkout: checkout-69db948c9f-5tx4d, checkout-69db948c9f-s77kl     │
+│ Checked now      2 ready pods match app=checkout: checkout-69db948c9f-5tx4d                                │
+│                  (ReplicaSet/checkout-69db948c9f), checkout-69db948c9f-s77kl                               │
+│                  (ReplicaSet/checkout-69db948c9f)                                                          │
 │ Applies only if  the Service is still at version 34889                                                     │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Apply this change? [y/N]

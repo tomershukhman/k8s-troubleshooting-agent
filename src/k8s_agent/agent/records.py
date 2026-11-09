@@ -81,6 +81,9 @@ class Facts(BaseModel):
     current_selector: dict[str, str] | None = None
     resource_version: str | None = None
     ready_pods: list[str] = []  # ready pods the exact new selector matches
+    # Each of those pods' managing controller (`ReplicaSet/checkout-69db948c9f`); None: no
+    # controller manages it (a standalone pod, perhaps planted to receive the traffic).
+    owners: dict[str, str | None] = {}
     error: str | None = None  # why they couldn't be read
 
 
