@@ -325,10 +325,11 @@ class FakeServices:
         """One endpoint per ready pod the selector matches."""
         ready = k.V1EndpointConditions(ready=True)
         endpoints = [
-            k.V1Endpoint(addresses=["10.0.0.1"], conditions=ready)
-            for labels, is_ready in self.pods.values()
+            k.V1Endpoint(addresses=[f"10.0.0.{i}"], conditions=ready,
+                         target_ref=k.V1ObjectReference(kind="Pod", name=name, uid=name))
+            for i, (name, (labels, is_ready)) in enumerate(self.pods.items(), 1)
             if is_ready and self.selector.items() <= labels.items()
-        ]
+        ]  # fmt: skip
         return k.V1EndpointSliceList(
             items=[k.V1EndpointSlice(address_type="IPv4", endpoints=endpoints)]
         )

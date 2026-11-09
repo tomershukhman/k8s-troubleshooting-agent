@@ -94,14 +94,18 @@ class Kube:
         return sorted(p.metadata.name for p in self.pods(namespace, selector) if ready(p))
 
     def ready_endpoints(self, namespace: str, service: str) -> int:
-        """Ready endpoints across the Service's EndpointSlices."""
+        """Ready endpoints across the Service's EndpointSlices, by the API's rules: an unset
+        `ready` means ready, and one endpoint may be in several slices, so each counts once."""
         slices = self.discovery.list_namespaced_endpoint_slice(
             namespace,
             label_selector=f"{SERVICE_NAME_LABEL}={service}",
             _request_timeout=self.timeout,
         )
-        return sum(bool(e.conditions and e.conditions.ready) for s in slices.items
-                   for e in s.endpoints or [])  # fmt: skip
+        return len({
+            e.target_ref.uid if e.target_ref and e.target_ref.uid else tuple(e.addresses)
+            for s in slices.items for e in s.endpoints or []
+            if e.conditions is None or e.conditions.ready is not False
+        })  # fmt: skip
 
     def replace_selector(self, namespace: str, name: str, selector: dict[str, str], version: str):
         """One JSON Patch, applied atomically by the API server: the test fails (422) if the

@@ -6,10 +6,12 @@ import asyncio
 import logging
 import time
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 import urllib3
 import yaml
+from kubernetes import client as k
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde import jsonplus
@@ -386,6 +388,24 @@ def test_once_applied_a_fix_stays_applied_whatever_the_endpoint_count_meets(monk
     result = apply_fix(services.kube(), args(), get_settings())
     assert (result.outcome, services.selector) == (FixOutcome.applied, {"app": "checkout"})
     assert "couldn't count the endpoints" in result.detail
+
+
+def test_ready_endpoints_are_counted_once_each_and_an_unset_ready_is_ready():
+    def endpoint(uid: str | None, ip: str, conditions):  # noqa: ANN001
+        ref = k.V1ObjectReference(kind="Pod", uid=uid) if uid else None
+        return k.V1Endpoint(addresses=[ip], conditions=conditions, target_ref=ref)
+
+    ready, unset, no = (k.V1EndpointConditions(ready=r) for r in (True, None, False))
+    slices = [
+        [endpoint("a", "10.0.0.1", ready), endpoint("b", "10.0.0.2", None),
+         endpoint("c", "10.0.0.3", unset), endpoint("d", "10.0.0.4", no)],
+        [endpoint("a", "10.0.0.1", ready), endpoint(None, "10.0.0.5", ready)],  # a: in both
+    ]  # fmt: skip
+    listed = k.V1EndpointSliceList(
+        items=[k.V1EndpointSlice(address_type="IPv4", endpoints=e) for e in slices]
+    )
+    discovery = SimpleNamespace(list_namespaced_endpoint_slice=lambda *_a, **_kw: listed)
+    assert Kube(None, discovery, timeout=1).ready_endpoints("shop-checkout", "checkout") == 4
 
 
 def broken_connection(*_args, **_kwargs):
