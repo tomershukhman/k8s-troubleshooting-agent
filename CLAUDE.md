@@ -3,8 +3,8 @@
 Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
 
 ## Checks
-- `make check`: ruff lint + format check + pyright (standard mode, `src` only) + unit tests (no
-  cluster, no LLM). Keep green. Narrow a Kubernetes field the API server always sets with
+- `make check` = `make lint` (ruff lint + format check + pyright, standard mode, `src` only) +
+  `make test` (unit tests; no cluster, no LLM); CI runs them as separate stages. Keep green. Narrow a Kubernetes field the API server always sets with
   `kube.present()`; a `# pyright: ignore[rule]` only where a library's annotation is wrong, with
   the reason beside it.
 - `make accept M=<n>`: milestone n's acceptance tests only, against the real cluster; `make accept`
@@ -61,13 +61,26 @@ Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
   `MLFLOW_HTTP_REQUEST_TIMEOUT` from settings (`MLFLOW_ASYNC_TRACE_LOGGING_RETRY_TIMEOUT` only affects
   Databricks). Without an active experiment the slim package silently gives a `NoOpSpan`
   (`default_experiment_registry` NameError, logged at debug), so `set_experiment` must run first.
-- The tracking server is at `http://localhost:5050` on OrbStack (port 5050: AirPlay often holds 5000).
-  After the pod restarts, OrbStack's localhost route answers ~1 s after the Deployment is ready.
-- `make accept M=4` needs `MLFLOW_TRACKING_URI`; it restarts and stops the MLflow pod (restored by
-  `agent setup`). Acceptance runs trace to `k8s-agent-tests` (tests/acceptance/conftest.py), not `k8s-agent`. Read traces with `mlflow.get_trace` + `Trace.search_spans`; spans arrive one by one.
+- The tracking server is the compose service `mlflow` (official image), at `http://localhost:5050`
+  (port 5050: AirPlay often holds 5000); `docker compose up -d --wait k8s-mcp mlflow`. Until M7 it
+  ran in the cluster via Helm; an old OrbStack setup may still hold a scaled-down `mlflow` release.
+- `make accept M=4` needs `MLFLOW_TRACKING_URI`; its "server stopped" tests run `docker compose stop
+  mlflow` and bring it back. Acceptance runs trace to `k8s-agent-tests` (tests/acceptance/conftest.py), not `k8s-agent`. Read traces with `mlflow.get_trace` + `Trace.search_spans`; spans arrive one by one.
 - A LangGraph conditional edge given a lambda makes MLflow's autolog record a nameless span, and the
   upload batch it sits in is lost (the trace then won't load: "not fully exported"). Route with a
   named function or `Command(goto=...)`; a unit test traces a fix run and fails if it recurs.
 - `make accept M=6` changes the selector Service and rebuilds the scenario (~20 s per test that does).
+- Containers (M7): one app image (`Dockerfile`, uv's single-stage example) for `agent` (only
+  `investigate`; the remediator kubeconfig only) and `admin` (setup, scenario, eval; your
+  kubeconfig). `docker compose build` is slow on OrbStack (~5–10 min when the dependency layer
+  changes, mostly exporting ~16k files); code-only changes reuse it. `make accept M=7` rebuilds the
+  image itself. Settings reach containers only through `.env` (or `docker compose run -e`), not your
+  shell. Pipe `--json` with `docker compose run -T`: a TTY merges stderr into stdout.
+- The image has no `.git`: CI stamps the commit (`GIT_COMMIT` build arg → `AGENT_GIT_COMMIT`); a
+  local `docker compose build` records none. MLflow logs a harmless "Failed to import Git" warning in
+  `agent eval` there (no git binary); `GIT_PYTHON_REFRESH=quiet` doesn't silence it.
+- CI (`.github/workflows/ci.yml`): lint → unit-tests → build-image → publish-image → mlflow-evals; the
+  evals (PRs to main + the manual button) pull the image just published, by commit SHA. Don't run
+  the evals locally to check CI changes: dispatch the workflow (`gh workflow run ci.yml --ref <branch>`).
 - The y/N approval prompt needs a real terminal (stdin a TTY): drive demos through a pty. Tests that
   run `agent investigate` as a subprocess need `stdin=DEVNULL`, or a terminal makes them wait for y/N.

@@ -12,10 +12,10 @@ HiBob Senior AIOps home assignment. The build order and per-milestone checks are
 
 **What it is.** An AI agent that investigates a local Kubernetes cluster. You ask a free-text question. The agent reads the cluster with tools and returns a JSON diagnosis: the root cause (or "no fault", or "couldn't tell"), evidence linked to the tool calls that found it, and a recommended action.
 
-**Guiding principle: the diagnosis path (the agent and its MCP server) runs beside the cluster, so diagnosis never depends on cluster health. Supporting services, such as the tracking server, run in it via Helm.**
+**Guiding principle: the diagnosis path (the agent and its MCP server) runs beside the cluster, so diagnosis never depends on cluster health. So does the tracking server.**
 - The brief treats the cluster as the patient. It asks to containerize the agent and its supporting tools, runnable with "Docker and the local Kubernetes environment", and notes the agent "does not need to run inside Kubernetes".
 - A diagnostic tool shouldn't depend on the health of the thing it diagnoses. So the agent and the MCP server run as containers beside the cluster.
-- The MLflow tracking server is a supporting service, not part of the diagnosis path. It runs in the cluster, installed with MLflow's official Helm chart ([3.7](#37-observability)).
+- The MLflow tracking server is a supporting service, not part of the diagnosis path. It runs as a compose service beside the others, from MLflow's official image ([3.7](#37-observability)). Until M7 it ran in the cluster via Helm; that put Helm in the image and a port-forward in CI.
 - Also inside the cluster: the scenarios, and the agent's identities and permissions.
 
 ```mermaid
@@ -23,16 +23,16 @@ flowchart LR
     claude["Anthropic API<br/>Claude Sonnet 5.5"]
     you(["You"])
 
-    subgraph beside["Beside the cluster: the diagnosis path, Docker containers on your machine"]
+    subgraph beside["Beside the cluster: Docker containers on your machine"]
         agent["agent container<br/>runs: agent investigate<br/>holds: remediator kubeconfig"]
         mcp["k8s-mcp container<br/>read-only MCP server, 7 tools<br/>holds: reader kubeconfig"]
         admin["admin container<br/>runs: setup, scenario, eval<br/>holds: your admin kubeconfig<br/>(eval also runs the agent, see 3.5)"]
+        mlflow["mlflow container<br/>MLflow tracking server<br/>SQLite on a volume"]
     end
 
-    subgraph cluster["Inside the cluster: the system under investigation, plus supporting services"]
+    subgraph cluster["Inside the cluster: the system under investigation"]
         scen["4 scenario namespaces<br/>shop-orders<br/>shop-checkout<br/>shop-catalog<br/>shop-inventory"]
         ids["k8s-agent namespace<br/>reader + remediator<br/>accounts"]
-        mlflow["MLflow tracking server<br/>namespace mlflow<br/>Helm chart, SQLite"]
     end
 
     you --> agent
@@ -43,8 +43,8 @@ flowchart LR
     agent -- "the one fix:<br/>shop-checkout only,<br/>as remediator,<br/>after your approval" --> scen
     admin -- "creates identities" --> ids
     admin -- "deploys scenarios" --> scen
-    agent -. "traces, via LoadBalancer<br/>or port-forward" .-> mlflow
-    admin -. "installs it (Helm, at setup);<br/>eval results" .-> mlflow
+    agent -. "traces<br/>localhost:5050" .-> mlflow
+    admin -. "eval results" .-> mlflow
 ```
 
 The M8 extra adds two more containers beside the cluster: `api` and `postgres` ([3.8](#38-state)).
@@ -59,7 +59,7 @@ The M8 extra adds two more containers beside the cluster: `api` and `postgres` (
 | Safety | Two cluster identities: `reader` (read-only, no Secrets) and `remediator` (patch Services and verify the fix, in `shop-checkout` only). Each container holds only the credentials it needs. | [3.5](#35-safety-boundary-cluster-enforced) |
 | Stopping rule | Investigator, per round: 15 tool calls, 20 model calls; per run: 30 tool calls, 40 model calls. At most 2 verify rounds (one critic call each). The remediator: its own 20 model and 15 tool calls. 300 s of agent working time per run. Worst case about 62 model and 45 tool calls per run; output caps bound tokens. All configurable. | [2.1](#21-functional-requirements) |
 | Evals | 4 scenarios with `mlflow.genai.evaluate`, 1 run each by default (`--runs 3` to measure reliability), plus the selector scenario's fix run. Code scorers check what can be checked exactly; LLM judges check evidence and advice. | [2.3](#23-definition-of-done-evals), [3.6](#36-scenarios-and-evals) |
-| Observability | The full run record in memory, structured JSON logs, and an MLflow 3 tracking server in the cluster (optional for `investigate`, required for evals). | [3.7](#37-observability) |
+| Observability | The full run record in memory, structured JSON logs, and an MLflow 3 tracking server beside the cluster, in compose (optional for `investigate`, required for evals). | [3.7](#37-observability) |
 | Interface | A CLI (M3–M7). M8 extra: an HTTP API with Postgres. | [4.3](#43-cli), [4.1](#41-http-api-m8-extra) |
 
 **Contents:** [1. Key decisions](#1-key-decisions) · [2. Requirements and definition of done](#2-requirements-and-definition-of-done) · [3. Components](#3-components) · [4. Interfaces and schemas](#4-interfaces-and-schemas) · [5. Stack](#5-stack) · [6. To verify at build time](#6-to-verify-at-build-time) · [7. Deliverables checklist](#7-deliverables-checklist)
@@ -87,26 +87,27 @@ The M8 extra adds two more containers beside the cluster: `api` and `postgres` (
 **Language: Python 3.14**
 - **Why:** supported by langchain-core 1.7.x, kubernetes 37.x and FastAPI 0.162.x (checked on PyPI 2026-11-08).
 
-**CI: GitHub Actions, two workflows, built in M7**
+**CI: GitHub Actions, one staged pipeline, built in M7**
 - **Why:** the brief requires it: tests, container build, and eval execution or validation. We run the evals for real, because only that tests the agent: re-scoring saved answers would test only the scoring code.
-- **`ci.yml`, on every push and PR** (fast, free; no cluster, no tracking server, no API key):
-  - `make check`: lint + unit tests
-  - the image build
-  - scenario-file validation
-- **Branches (from M7 on):** day-to-day work goes to `dev`, and reaches `main` only through a pull request. A branch rule on `main` requires both workflows to pass before the merge (a repository setting, set in M7).
-- **`eval.yml`, on every pull request to `main` and from a manual button** (evaluation execution):
+- **`ci.yml`, one stage after another, cheap gates first:** `lint` (`make lint`) → `unit-tests` (`make test`, every test listed by name; they also load and check every scenario file) → `build-image` (and a run of it as non-root) → `publish-image` (`linux/amd64` + `linux/arm64` to ghcr.io, under the commit SHA; `latest` from `main`) → `mlflow-evals`.
+  - **Runs on** pull requests to `main` (every stage), pushes to `main` and `v*` tags (up to publishing), and a manual button (every stage).
+  - **Build once:** the evals pull the image just published, by its commit SHA, so they grade the artifact that ships. Pull requests from forks get no write token or secrets: they stop after `build-image`.
   - A newer push to the same pull request cancels the run in progress, so only the latest code gets paid for.
-  - A throwaway kind cluster on GitHub's runner, from the official `helm/kind-action` (pinned by commit SHA). Testing on a temporary kind cluster in CI is what kind is built for, and how Helm tests its own charts.
-  - The README's own commands: `agent setup` (permissions, MCP server, MLflow via Helm), then the full evals (`agent eval`) with the real model and judges.
-  - MLflow is reached through `kubectl port-forward` on the same local port as on OrbStack: kind gives LoadBalancer Services no address. CI installs Helm 4: its `--wait` doesn't wait for a LoadBalancer address, whereas Helm 3's waits forever on kind (both checked in the sources, 2026-11-08).
-  - The job fails if any scenario misses its thresholds. The eval results file is kept as a workflow artifact.
-  - The API key is the `ANTHROPIC_API_KEY` repository secret. GitHub doesn't give secrets to pull requests from forks, so there the job stops at its first step with a notice; a reviewer can run the same evals locally (`agent eval`).
+- **Branches (from M7 on):** day-to-day work goes to `dev`, and reaches `main` only through a pull request. A branch rule on `main` requires the pipeline's stages to pass before the merge (a repository setting, set in M7).
+- **`mlflow-evals`** (evaluation execution):
+  - A throwaway kind cluster on GitHub's runner, from the official `helm/kind-action` (pinned by commit SHA). Testing on a temporary kind cluster in CI is what kind is built for.
+  - The README's own commands through `docker compose`: `admin setup`, `up -d k8s-mcp mlflow`, then the full evals (`admin eval`) with the real model and judges. So the gate tests the containers too.
+  - CI writes the `.env` a reviewer would, with `AGENT_CONTAINER_USER=$(id -u):$(id -g)`: on native Linux the containers must run as the owner of the 0600 kubeconfigs.
+  - The job fails if any scenario misses its thresholds. The eval results file is kept as a workflow artifact. The traces go to the runner's own throwaway tracking server, gone when the job ends (a known limit, in the README).
+  - The API key is the `ANTHROPIC_API_KEY` repository secret; without it the job fails, saying so.
 - **kind is CI-only.** Local development stays on OrbStack; both are plain Kubernetes reached through a kubeconfig context.
 - **Rejected:**
   - Validation only (re-scoring saved eval traces in `make check`): it tests the scoring code, not the agent.
   - A self-hosted runner on the developer's Mac or cluster. CI would depend on that machine being on, it isn't clean per job, and it's unsafe if the repo is ever public.
   - Evals on every push to any branch: a full eval costs money each time, and model answers vary, so running it on every `dev` push would be slow and flaky. It runs on the pull request that brings work to `main`.
   - Evals again on the push to `main` after the merge: the pull request already ran them on the merged code.
+  - Two workflows (checks, evals) side by side: the evals didn't wait for the checks, so a pull request with a failing test still paid for a full eval run (M7's first version).
+  - Rebuilding the image for the evals: they would grade a second build, not the published artifact.
 
 ---
 
@@ -257,7 +258,7 @@ By default every scenario runs **once** (`AGENT_EVAL_RUNS_PER_SCENARIO`, 1; user
 - **No keyword lists:** a word list would fail "no need to delete the pods" and pass "scale to 0".
 
 ### 2.4 Constraints
-- Runs with only Docker, a local Kubernetes cluster and an Anthropic API key. Until M7 packages it, the CLI also needs uv and Helm 4 on the host (Helm 4: `--rollback-on-failure` exists only there); from M7, Helm is in the app image.
+- Runs with only Docker, a local Kubernetes cluster and an Anthropic API key (from M7, every command is a `docker compose run`; uv only for development).
 - **Supported and tested: OrbStack (macOS);** kind (Linux) is tested by CI from M7. Other local clusters (minikube, Docker Desktop) should work but are untested; Docker Desktop needs host networking switched on (next point).
 - Docker must allow host networking for our containers that talk to the cluster ([3.10](#310-networking)). It's built in on Linux and OrbStack. On Docker Desktop (4.34+) it's one setting: Settings → Resources → Network → Enable host networking.
 - Read-only by default.
@@ -612,7 +613,7 @@ flowchart LR
 **Plain YAML, in two places**
 - **`deploy/rbac.yaml`** (static, the long-lived pieces): the two ServiceAccounts, `reader` and `remediator`, in the `k8s-agent` namespace; our two ClusterRoles (`k8s-agent-list-namespaces`, `k8s-agent-remediate`); and the cluster-wide namespace-list binding. The reader's read access is Kubernetes' built-in `view` ClusterRole, so we define no custom read role. Scenarios never delete the `k8s-agent` namespace.
 - **Each scenario folder:** its Namespace and its RoleBindings (see "Per-namespace bindings" below).
-- **`agent setup`** (your admin kubeconfig) = apply `deploy/rbac.yaml` + mint short-lived tokens + write the kubeconfigs. It also installs the MLflow tracking server ([3.7](#37-observability)).
+- **`agent setup`** (your admin kubeconfig) = apply `deploy/rbac.yaml` + mint short-lived tokens + write the kubeconfigs.
 
 | ClusterRole | Grants | Bound to |
 |---|---|---|
@@ -752,7 +753,7 @@ flowchart LR
   - Rejected: the fix run as one more row of the diagnosis evaluation (it would count in the diagnosis runs' pass marks, and only the row order would keep it after the diagnosis runs); a second `evaluate` in the same MLflow run (its metrics overwrite the first's).
 - **Output:** every score sits on its run's trace in MLflow, and eval runs compare across versions. Evals use their own experiment, `k8s-agent-evals` (configurable), so `k8s-agent` shows real investigations only. Locally: `./eval-results/<timestamp>.json` (each run's scores with reasons, duration, tokens, cost and full run record; rewritten after each scenario) plus a summary table. Exit 0 = every scenario passed, 1 = one missed its marks, 2 = nothing ran (e.g. the tracking server is down).
 - **Speed and cost:** MLflow records duration, tokens and cost per traced run. The README shows the numbers from one real eval run (average per investigation, and the total), so accuracy is reported next to what it costs.
-- **CI (execution):** `eval.yml` runs these same evaluations on a throwaway kind cluster for every pull request to `main` ([1](#1-key-decisions)). The "the eval can fail" tests (a fake agent, judges given bad answers) run in `make accept M=5`.
+- **CI (execution):** the pipeline's `mlflow-evals` stage runs these same evaluations on a throwaway kind cluster for every pull request to `main` ([1](#1-key-decisions)). The "the eval can fail" tests (a fake agent, judges given bad answers) run in `make accept M=5`.
 - **Why:** use the widely used tool we already run for tracing instead of a custom harness. Scores next to traces is exactly "see what the agent did, then judge it".
 - **Rejected:**
   - A custom eval runner.
@@ -781,14 +782,14 @@ Three layers. Nothing in `investigate` depends on the tracking server running; l
 - `AGENT_LOG_LEVEL` switches between them.
 - **Where:** stderr, or `AGENT_LOG_FILE` if set. In an interactive terminal they're off unless `AGENT_LOG_FILE` is set: the progress display shows the same events there.
 
-**3. MLflow 3 tracing, with a tracking server in the cluster.** It holds the full trace for humans.
-- **Where it runs:** an MLflow tracking server in the cluster, in its own namespace (e.g. `mlflow`). The host and our host-networked containers reach it through OrbStack's LoadBalancer or a port-forward.
-- **Reliable, minimal install:** `agent setup` installs it with MLflow's official Helm chart via `helm upgrade --install --wait`, which returns only when the readiness check passes. A committed values file keeps it minimal: one replica, small CPU and memory requests, and SQLite on a small persistent volume, so traces survive a pod restart. Measured on OrbStack in M4: a ~365–430 MiB working set and ~5m CPU idle, so the requests are 50m CPU and 448 MiB, with a 1 GiB memory limit ([`deploy/mlflow-values.yaml`](deploy/mlflow-values.yaml)).
+**3. MLflow 3 tracing, with a tracking server beside the cluster.** It holds the full trace for humans.
+- **Where it runs:** the compose service `mlflow`, from MLflow's official image (pinned by digest), published on `127.0.0.1:5050` only. SQLite and the trace files on a Docker volume, so traces survive a restart. `docker compose up -d --wait k8s-mcp mlflow` returns once its health check passes. Idle it holds ~390 MiB (measured in M7).
+  - **Rejected (M7):** in the cluster via MLflow's official Helm chart, installed by `agent setup` (M4–M6). It put Helm in the app image, a 1.4 GB image pull into the cluster, and a `kubectl port-forward` in CI (kind gives LoadBalancers no address), for a supporting service the guiding principle keeps beside the cluster anyway.
 - **Optional for `investigate`; required for running live evals,** since eval results go to the tracking server.
 - **One-line tracing:** `mlflow.langchain.autolog()` traces the LangGraph run: request → agent → model calls → tool calls → result. Each graph stage is its own span.
 - **One trace per run, approval included:** the root span `investigation` is opened in the core function every caller uses (CLI, evals, M8 API), so each gets the same trace, `trace_id` and metadata. So the approval pause and the resume happen inside that one call (M6: an approval callback the CLI passes in); a second call would start a second trace. The trace's top level then reads `graph` (to the pause) → `approval` → `graph` (the resume). In M8, where the approval arrives in a separate request, the trace context (`mlflow.tracing.get_tracing_context_headers_for_http_request()`, a W3C `traceparent`) is saved with the paused state and restored on resume with `set_tracing_context_from_http_request_headers(...)` (tested: one stored trace, spans from both halves).
 - **M4 spike findings** (2026-11-08, full report in the shared notes):
-  - **Helm:** the chart's defaults get OOMKilled (1.8 GiB); set `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`. Then a ~365–430 MiB working set and ~5m CPU idle; install takes 15 s warm, about 2m20s on the first image pull.
+  - **Memory:** the server's job runner starts ~8 workers of ~230 MB (1.8 GiB; OOM-killed in the cluster at 1 GiB); `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false` turns it off (the evals score client-side). Then a ~365–430 MiB working set.
   - **Exit with the server down:** `MLFLOW_HTTP_REQUEST_MAX_RETRIES=0` and `MLFLOW_HTTP_REQUEST_TIMEOUT` (3 s) are the two settings that matter. With them, exit takes ~1 s; with MLflow's defaults it hangs for minutes (M4, measured).
   - **Refused tool call as an error span:** `handle_tool_error=False` plus LangChain's `ToolErrorMiddleware`, which turns the error back into a message for the model (M4).
   - **Verified working:** Python 3.14; the slim `mlflow-tracing` package with LangGraph autolog; stage names; tool arguments, output and timing; user and session; tokens; cost; the critic's verdict; the trace link.
@@ -805,7 +806,7 @@ Three layers. Nothing in `investigate` depends on the tracking server running; l
 - **Checked once at start:** if the tracking server is unreachable, `investigate` logs one warning and continues without tracing. The evals require it, and fail with a clear message.
 - **Flush on exit:** the CLI calls `mlflow.flush_trace_async_logging()` before exiting, bounded by the two HTTP settings above, so a down server can't hang it.
 - **MLflow's usage telemetry** (calls to MLflow's own servers) is off by default, in the agent and in the tracking server (`MLFLOW_DISABLE_TELEMETRY`).
-- **Port 5050, not 5000:** macOS's AirPlay Receiver often holds 5000. On OrbStack the server is at `http://localhost:5050`; elsewhere, a port-forward on the same port.
+- **Port 5050, not 5000:** macOS's AirPlay Receiver often holds 5000. The server is at `http://localhost:5050` on any setup.
 - **Packaging:** the agent needs only MLflow's slim `mlflow-tracing` package, which covers the LangGraph autolog (confirmed in M4). The full `mlflow` package (88 dependencies) is the `eval` extra, needed only where the evals run; `uv sync` installs it for development (the dev group includes it).
 
 **What a trace shows, against the brief's observability list.** `tests/acceptance/test_m4_tracing.py` checks a real stored trace against every line.
@@ -821,7 +822,7 @@ Three layers. Nothing in `investigate` depends on the tracking server running; l
 
 **Why MLflow 3** (verified 2026-11-08 by installing MLflow 3.18.0 and reading its docs)
 - Minimal: one server, SQLite by default.
-- An official Helm chart.
+- An official container image.
 - Widely used: ~28.7k GitHub stars, ~19.9M monthly PyPI downloads.
 - One-line LangGraph tracing: `mlflow.langchain.autolog()`.
 - Evals built in: `mlflow.genai.evaluate` with custom scorers, built-in judges and quality criteria ([3.6](#36-scenarios-and-evals)).
@@ -855,8 +856,8 @@ Three layers. Nothing in `investigate` depends on the tracking server running; l
   - **Tested 2026-11-08 on OrbStack:** a throwaway container couldn't reach `127.0.0.1:26443` on the default network, and could with host networking.
   - **Docs:** [OrbStack host networking](https://docs.orbstack.dev/docker/host-networking); [Docker Desktop host networking](https://docs.docker.com/engine/network/drivers/host/) (4.34+, opt-in).
 - **Containers that don't talk to the cluster** (M8's Postgres) stay on normal networking, and publish their ports on `127.0.0.1` only.
-- **The MLflow tracking server** runs in the cluster ([3.7](#37-observability)). The host and our host-networked containers reach it through OrbStack's LoadBalancer or a port-forward.
-- **Native Linux Docker:** the MCP container must run as the host user to read the 0600 kubeconfig (`AGENT_CONTAINER_USER`).
+- **The MLflow tracking server** ([3.7](#37-observability)) doesn't talk to the cluster: normal networking, published on `127.0.0.1:5050`, which the host and our host-networked containers reach as `localhost:5050`.
+- **Native Linux Docker:** the containers must run as the host user to read and write the 0600 kubeconfigs (`AGENT_CONTAINER_USER`).
 - **Rejected:**
   - Rewriting the kubeconfig address to `host.docker.internal`: needs a certificate workaround.
   - kind's internal network: kind only.
@@ -1058,14 +1059,11 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 | `AGENT_EVAL_PASS_SHARE` | 0.667 (2/3) | The share of the runs, rounded up, in which the diagnosis and both judges must pass: 1 of 1, 2 of 3, 7 of 10 |
 | `AGENT_EVAL_MLFLOW_EXPERIMENT_NAME` | `k8s-agent-evals` | Where eval runs and their traces go |
 | `AGENT_EVAL_RESULTS_DIR` | `eval-results` | The local results files |
-| `MLFLOW_TRACKING_URI` | unset = tracing off | The tracking server's address: `http://localhost:5050` (OrbStack LoadBalancer or port-forward) |
+| `MLFLOW_TRACKING_URI` | unset = tracing off | The tracking server's address: `http://localhost:5050` (the compose service `mlflow`) |
 | `MLFLOW_EXPERIMENT_NAME` | `k8s-agent` | MLflow's own variable |
 | `MLFLOW_HTTP_REQUEST_TIMEOUT` / `MLFLOW_HTTP_REQUEST_MAX_RETRIES` | 3 / 0 | MLflow's own variables; fail fast so a stopped server can't hold up exit |
 | `MLFLOW_DISABLE_TELEMETRY` | `true` | MLflow's usage telemetry to its own servers |
-| `AGENT_MLFLOW_CHART` / `AGENT_MLFLOW_CHART_VERSION` | `oci://ghcr.io/mlflow/charts/mlflow@sha256:14838bbc…` / `3.18.0` | The chart `agent setup` installs, pinned by digest (Helm refuses a version whose digest differs) |
-| `AGENT_MLFLOW_RELEASE` / `AGENT_MLFLOW_NAMESPACE` | `mlflow` / `mlflow` | |
-| `AGENT_MLFLOW_VALUES_FILE` | `deploy/mlflow-values.yaml` | The minimal values |
-| `AGENT_MLFLOW_INSTALL_TIMEOUT_SECONDS` | 600 | The first install pulls a ~1.4 GB image |
+| `AGENT_GIT_COMMIT` | unset = from `.git` | The code's commit on traces and eval runs; CI's image build sets it (the image has no `.git`) |
 
 **M8 extra**
 
@@ -1086,10 +1084,10 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 | CLI | Typer + Rich |
 | Schemas / config | Pydantic + pydantic-settings |
 | Tests | pytest. `make check`: lint, type check and unit tests with a fake model and a fake cluster; no network. `make accept M=n`: milestone n's acceptance tests only, on a real cluster (real model from M3); `make accept`: every milestone's. |
-| CI | GitHub Actions. `ci.yml` on every push/PR: `make check`, image build, scenario-file validation. `eval.yml` on pull requests to `main` + a manual button: kind cluster (`helm/kind-action`), Helm 4, `agent setup`, `agent eval` with the `ANTHROPIC_API_KEY` secret. |
-| Tracing | MLflow 3 tracing (`mlflow.langchain.autolog()`). Tracking server in the cluster via MLflow's official Helm chart (`helm upgrade --install --wait`, a committed minimal values file), SQLite on a small persistent volume. The agent uses the slim `mlflow-tracing` package (it covers the autolog); the full `mlflow` package only where the evals run. `gitpython`, through which MLflow records the git commit on each trace. |
+| CI | GitHub Actions, one staged `ci.yml`: lint → unit tests → build image → publish image (ghcr.io, multi-arch) → evals on the published image (pull requests to `main` + a manual button: kind cluster via `helm/kind-action`, the README's `docker compose` commands, the `ANTHROPIC_API_KEY` secret). |
+| Tracing | MLflow 3 tracing (`mlflow.langchain.autolog()`). Tracking server: the compose service `mlflow` (MLflow's official image), SQLite on a Docker volume. The agent uses the slim `mlflow-tracing` package (it covers the autolog); the full `mlflow` package only where the evals run. `gitpython`, through which MLflow records the git commit on each trace (`AGENT_GIT_COMMIT` in the image). |
 | Evals | `mlflow.genai.evaluate`, one evaluation per scenario: four custom `@scorer` functions (exact checks) plus two built-in judges, `ExpectationsGuidelines` (advice) and `make_judge` on the cited tool outputs (evidence); pass marks checked by `agent eval` from each run's verdicts. The full `mlflow` package is an optional `eval` extra (the agent needs only `mlflow-tracing`). |
-| Containers | One app image (non-root, slim, with Helm 4 pinned for `agent setup`). Compose services: `k8s-mcp`, `agent` (remediator creds), `admin` (admin kubeconfig). The MLflow tracking server runs in the cluster (Helm), not in compose. M8 adds `api` and `postgres`. |
+| Containers | One app image (uv's single-stage Docker example on uv's Python 3.14 image, the `eval` extra, non-root, no secrets), published to ghcr.io. Compose services: `agent` (remediator creds), `admin` (admin kubeconfig), `k8s-mcp`, `mlflow`. M8 adds `api` and `postgres`. |
 | M8 extra | FastAPI 0.162.x + Uvicorn, Postgres 18 (pinned minor), psycopg 3, `langgraph-checkpoint-postgres`, Alembic; API tests on a real Postgres (testcontainers) |
 
 ---
@@ -1100,9 +1098,8 @@ Each item says what's already confirmed and what's still to check.
 
 1. **Host networking on other setups**
    - Confirmed: tested on OrbStack.
-   - To check: native Linux Docker with `AGENT_CONTAINER_USER`.
    - kind on Linux (native Docker) gets exercised by the CI eval workflow (M7) ([1](#1-key-decisions)); minikube and Docker Desktop stay untested.
-   - To check in M7: on kind, `agent setup` completes with Helm 4 and MLflow answers through `kubectl port-forward`.
+   - Checked in M7: CI's evals pass on kind through the containers, with `AGENT_CONTAINER_USER` set (native Linux Docker).
 2. **kubernetes-mcp-server**
    - Confirmed: done in M2's first build. Release pinned (v0.1.2), tool argument names read, Secret refusal tested.
 3. **Structured output with tools on Sonnet 5.5**
@@ -1146,7 +1143,8 @@ From the brief.
 - [ ] README "Beyond the brief" for M8
 - [x] Scenarios (4) + evals (`mlflow.genai.evaluate`) + results from one real run
 - [x] Safety: RBAC setup + tool allowlist + one narrow fix tool behind human approval
-- [x] The MLflow Helm install, and the compose service `k8s-mcp`
-- [ ] Dockerfile + the compose services `agent` and `admin` (M7; M8: `api`, `postgres`)
-- [x] Git repository (private GitHub repo)
-- [ ] CI: GitHub Actions, `ci.yml` + `eval.yml` (M7); tag `assignment-complete`
+- [x] The compose services `k8s-mcp` and (M7) `mlflow`
+- [x] Dockerfile + the compose services `agent` and `admin` (M7; M8: `api`, `postgres`)
+- [x] Git repository (public GitHub repo)
+- [x] CI: GitHub Actions, one staged `ci.yml` (M7)
+- [ ] Tag `assignment-complete`

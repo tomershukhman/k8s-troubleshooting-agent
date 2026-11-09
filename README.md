@@ -11,7 +11,7 @@ Design, with each decision and the alternatives rejected: [SPEC.md](SPEC.md). Bu
 - **A local Kubernetes cluster.** Tested on [OrbStack](https://orbstack.dev/) (macOS) with its Kubernetes cluster turned on. CI runs the evals on kind; minikube and Docker Desktop should work but are untested.
 - Docker with Compose and host networking (built in on OrbStack and Linux; on Docker Desktop 4.34+: Settings → Resources → Network → Enable host networking). Everything else is in the images.
 - On native Linux Docker only: set `AGENT_CONTAINER_USER` in `.env` to your `id -u`:`id -g`, so the containers can read your kubeconfig and the credential files `agent setup` writes (all 0600).
-- An [Anthropic API key](https://console.anthropic.com/), as `ANTHROPIC_API_KEY` in `.env` or your environment. Runs are billed to that key's API account.
+- An [Anthropic API key](https://console.anthropic.com/), as `ANTHROPIC_API_KEY` in `.env` (the containers get their settings only from `.env`). Runs are billed to that key's API account.
 
 ## Setup
 
@@ -33,7 +33,7 @@ Four services. The three that touch the cluster hold only the credentials they n
 | `k8s-mcp` | the MCP server | the reader's credentials only |
 | `mlflow` | the MLflow tracking server, at http://localhost:5050 | traces and eval results, on a Docker volume; nothing from the cluster |
 
-`admin` uses your kubeconfig's current context (`orbstack` on OrbStack); set `AGENT_KUBE_CONTEXT` for another. The eval runner holds both your kubeconfig and the agent's credentials: it resets the scenarios and runs the agent. Every setting and its default is in [`.env.example`](.env.example); compose passes `.env` to every container.
+`admin` uses your kubeconfig's current context (`orbstack` on OrbStack); set `AGENT_KUBE_CONTEXT` in `.env` for another. The eval runner holds both your kubeconfig and the agent's credentials: it resets the scenarios and runs the agent. Every setting and its default is in [`.env.example`](.env.example); compose passes `.env` to every container.
 
 ## Reproducing the failure scenarios
 

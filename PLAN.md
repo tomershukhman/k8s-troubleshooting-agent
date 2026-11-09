@@ -431,7 +431,7 @@ The full suite at the end, every milestone, since a refactor can touch anything:
 After this, every requirement in the brief is met.
 
 **How**
-- **One app image** for every service (decided): the same CLI, with the `eval` extra (full `mlflow`) and Helm 4 (pinned), since `agent setup` and `agent eval` need them and the brief allows only Docker on the reviewer's machine. Non-root, no secrets. The safety split comes from what each container is given (its mounts), not from the image. Rejected: two build targets (a slimmer `agent` image), since the same CLI runs in both and size doesn't matter for a local tool. The image has no `.git`, so the git commit is baked in at build time and passed as trace metadata. Bump the `uv_build` pin (it's below 0.12; uv is at 0.13) while touching packaging.
+- **One app image** for every service (decided): the same CLI, with the `eval` extra (full `mlflow`), since `agent eval` needs it and the brief allows only Docker on the reviewer's machine. Built as uv's single-stage Docker example, on uv's own Python image. Non-root, no secrets. The safety split comes from what each container is given (its mounts), not from the image. Rejected: two build targets (a slimmer `agent` image), since the same CLI runs in both and size doesn't matter for a local tool. The image has no `.git`, so the git commit is baked in at build time and passed as trace metadata. Bump the `uv_build` pin (it's below 0.12; uv is at 0.13) while touching packaging.
 - **Compose services,** each with only the credentials it needs ([SPEC 3.5, Safety boundary](SPEC.md#35-safety-boundary-cluster-enforced)):
 
   | Service | Runs | Holds |
@@ -440,16 +440,15 @@ After this, every requirement in the brief is met.
   | `admin` | `setup`, `scenario` and `eval` | Your admin kubeconfig |
   | `k8s-mcp` | the MCP server | The reader credentials only |
 
-- **The MLflow tracking server** isn't a compose service: it's installed in the cluster with MLflow's official Helm chart ([SPEC 3.7, Observability](SPEC.md#37-observability)).
+- **The MLflow tracking server** is a compose service, from MLflow's official image (decided during M7; until then `agent setup` installed it in the cluster with Helm, which put Helm in the image and a port-forward in CI) ([SPEC 3.7, Observability](SPEC.md#37-observability)).
 - **Host networking** for containers that talk to the cluster ([SPEC 3.10, Networking](SPEC.md#310-networking)). Health checks, so containers start in order.
 - **The reviewer needs only Docker,** a local cluster and an API key.
   - Every README command is a `docker compose run …`.
   - The README's main path is OrbStack, the supported and tested setup. It notes the one Docker Desktop setting for other setups.
 - **Clear errors:** a missing API key, an unreachable cluster or a stopped MCP server each give one clear message.
-- **CI (GitHub Actions)** ([SPEC 1, Key decisions](SPEC.md#1-key-decisions)):
-  - **`ci.yml`, on every push and PR,** with no tracking server, no cluster and no API key: `make check` (which already loads and checks every scenario file) and the image build, with a quick run of the image as non-root.
-  - **`eval.yml`, on every pull request to `main` and from a manual button:** a throwaway kind cluster (`helm/kind-action`), Helm 4, then the README's own commands through `docker compose` (`agent setup`, `agent eval`) with the real model, so the gate tests the containers too. CI sets `AGENT_CONTAINER_USER=$(id -u):$(id -g)`: on native Linux the MCP container must run as the owner of the 0600 reader kubeconfig. MLflow is reached through `kubectl port-forward`. It fails if any scenario misses its thresholds, and keeps the results file as a workflow artifact. At the default 1 run per scenario, each run costs about $0.70 and takes about 2 minutes of evals (an estimate; M5 measured $1.80 and 5–6 minutes at 3 runs). The API key is the `ANTHROPIC_API_KEY` repository secret; without it the job stops with a notice. A newer push to the pull request cancels the run in progress.
-- **Branches:** M7 is built on `main` until both workflows run green on GitHub (`eval.yml` from its manual button). Then work moves to `dev` and reaches `main` only through a pull request, and a branch rule on `main` requires both workflows to pass before the merge.
+- **CI (GitHub Actions)** ([SPEC 1, Key decisions](SPEC.md#1-key-decisions)): one staged `ci.yml` (decided during M7, replacing two side-by-side workflows): `lint` → `unit-tests` → `build-image` (and a non-root run) → `publish-image` (ghcr.io, `linux/amd64` + `linux/arm64`, under the commit SHA; `latest` from `main`) → `mlflow-evals`.
+  - **The evals** run on pull requests to `main` and from a manual button, on the image just published: a throwaway kind cluster (`helm/kind-action`), then the README's own commands through `docker compose` (`admin setup`, `up -d k8s-mcp mlflow`, `admin eval`) with the real model. CI writes the `.env` a reviewer would, with `AGENT_CONTAINER_USER=$(id -u):$(id -g)`. It fails if any scenario misses its thresholds, and keeps the results file as a workflow artifact. Measured: ~$0.80 a run (agent and judges), the job ~6 minutes. The API key is the `ANTHROPIC_API_KEY` repository secret. A newer push to the pull request cancels the run in progress.
+- **Branches:** M7 is built on `main` until the pipeline runs green on GitHub (the evals from the manual button). Then work moves to `dev` and reaches `main` only through a pull request, and a branch rule on `main` requires the pipeline's stages to pass before the merge.
 - **MLflow login:** none (decided). It's a local, single-user setup; the README says the server has no login and any pod can reach it.
 - **README:** setup, running the agent, the scenarios, how to run the evals (no results tables), and the design rationale: the guiding principle, framework, tool boundaries, eval approach, safety boundary and its known limit, and sub-agents as the path to scale.
 
@@ -457,7 +456,7 @@ After this, every requirement in the brief is met.
 - **Kept lean:** CI itself builds and smoke-runs the image, and the eval PR runs everything through the containers. `make accept M=7` adds only what those don't show: the `agent` container has no admin kubeconfig mounted, and the image holds no secrets.
 - **CI:**
   - `ci.yml` passes on GitHub; a deliberately broken unit test makes it fail.
-  - `eval.yml` passes on the first `dev` → `main` pull request: kind cluster up, `agent setup` done, every scenario meets its thresholds. Its run link goes in the README.
+  - The evals pass on the first `dev` → `main` pull request: kind cluster up, `agent setup` done, every scenario meets its thresholds. Its run link goes in the README.
   - The branch rule blocks merging while a check is failing.
 - **Fresh-clone test:** a helper that only reads the README sets everything up from scratch on a fresh OrbStack cluster (or a fresh namespace setup on it). Any step it has to guess is a README bug.
 - **Final check:** every requirement in the brief maps to working code or a README section.

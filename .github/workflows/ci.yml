@@ -132,7 +132,6 @@ jobs:
           cat > .env <<EOF
           ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
           AGENT_CONTAINER_USER=$(id -u):$(id -g)
-          AGENT_KUBE_CONTEXT=kind-k8s-agent
           MLFLOW_TRACKING_URI=http://localhost:5050
           EOF
       - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
