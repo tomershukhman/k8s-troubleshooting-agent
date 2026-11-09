@@ -394,6 +394,8 @@ Nothing carries over between runs: each run starts a fresh conversation. Re-runn
 
 The last stage pulls the image just published, by its commit, and runs the full eval on a fresh kind cluster through the README's own commands, so the artifact that ships is the one graded.
 
+**Each platform builds natively:** amd64 and arm64 build in parallel, each on a runner of its own architecture, and a last step joins them into one multi-arch image (arm64 emulated on an Intel runner took 6–8 minutes; now about 1). That last step is the required `publish-image` check. It runs even when a platform build failed, and then fails: GitHub skips a job whose prerequisite failed and counts a skipped required check as passed, so otherwise a failed build could merge.
+
 **`main` is protected:** changes arrive only by pull request, all five stages must pass, the branch must be up to date, and admins are included. A pull request from a fork gets no secrets, so it skips the publish and eval stages, and GitHub counts a skipped check as passed: such a change needs its evals run from a branch of this repository before merging.
 
 ---
