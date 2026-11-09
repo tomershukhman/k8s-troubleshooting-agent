@@ -206,23 +206,23 @@ def test_only_approve_or_reject_are_accepted():
 
 
 def test_the_wait_for_approval_does_not_count_toward_the_run_time_budget(env):
-    env(run_max_seconds="1")
-    record = fix(approver(delay=1.5))
-    assert record.result.duration_ms > 1500 and record.forced_reason is None
+    env(run_max_seconds="2")
+    record = fix(approver(delay=3))
+    assert record.result.duration_ms > 3000 and record.forced_reason is None
     assert record.result.remediation.verified
 
 
 def test_an_approval_that_does_not_come_in_time_is_a_reject(env):
-    env(approval_timeout_seconds="0.2")
+    env(approval_timeout_seconds="0.4")
     services, t0 = FakeServices(), time.monotonic()
     r = fix(approver(delay=30), services=services).result.remediation
     assert time.monotonic() - t0 < 10
-    assert (r.decision.approved, r.decision.reason) == (False, "the approval timed out after 0.2 s")
+    assert (r.decision.approved, r.decision.reason) == (False, "the approval timed out after 0.4 s")
     assert services.patches == [] and r.outcome == "not_applied"
 
 
 def test_a_time_budget_that_runs_out_in_the_fix_keeps_the_diagnosis(env):
-    env(run_max_seconds="1")
+    env(run_max_seconds="2")
 
     async def slow(_messages):
         await asyncio.sleep(10)
@@ -232,7 +232,7 @@ def test_a_time_budget_that_runs_out_in_the_fix_keeps_the_diagnosis(env):
     assert record.forced_reason is None and record.result.diagnosis.status == "fault_found"
     r = record.result.remediation
     assert (r.outcome, r.decision) == ("failed", None)
-    assert "the run stopped before the fix finished: The run hit its 1 s time budget" in r.detail
+    assert "the run stopped before the fix finished: The run hit its 2 s time budget" in r.detail
 
 
 @pytest.mark.parametrize(
@@ -258,8 +258,8 @@ def test_a_remediator_that_stops_before_requesting_the_fix_keeps_the_diagnosis(
 
 
 def test_the_agents_time_after_the_resume_counts_against_what_was_left(env):
-    # 2 s of agent time: the investigation takes 1.5 s, the recheck after the approval 1 s more
-    env(run_max_seconds="2")
+    # 4 s of agent time: the investigation takes 3 s, the recheck after the approval 2 s more
+    env(run_max_seconds="4")
 
     def slow(seconds: float, reply):
         async def turn(_messages):
@@ -269,13 +269,13 @@ def test_the_agents_time_after_the_resume_counts_against_what_was_left(env):
         return turn
 
     model = investigator()
-    model.script[0] = slow(1.5, model.script[0])
-    model.script[2] = slow(1.0, model.script[2])
-    record = fix(approver(delay=1), model=model)  # the wait itself counts on its own clock
+    model.script[0] = slow(3.0, model.script[0])
+    model.script[2] = slow(2.0, model.script[2])
+    record = fix(approver(delay=2), model=model)  # the wait itself counts on its own clock
     r = record.result.remediation
     assert (record.result.diagnosis.status, record.forced_reason) == ("fault_found", None)
     assert (r.outcome, r.verified) == ("applied", False)
-    assert "the run stopped in the recheck: The run hit its 2 s time budget" in r.recheck_note
+    assert "the run stopped in the recheck: The run hit its 4 s time budget" in r.recheck_note
 
 
 def test_the_recheck_counts_toward_the_run_wide_budget(env):
@@ -592,7 +592,7 @@ def malformed() -> ScriptedModel:
     ("approve", "make_remediator", "reason", "by"),
     [  # a model is built per run (its script is used up), so the parameter is its factory
         (approver(yes=False), None, "rejected in a test", "alice"),
-        (approver(delay=30), None, "the approval timed out after 0.2 s", "k8s-agent"),
+        (approver(delay=30), None, "the approval timed out after 0.4 s", "k8s-agent"),
         (None, None, "no interactive approval available", "k8s-agent"),
         (approver(), malformed, "the request is malformed: resource_version", "k8s-agent"),
     ],
@@ -600,7 +600,7 @@ def malformed() -> ScriptedModel:
 def test_every_decision_is_on_the_trace_with_who_and_when(
     approve, make_remediator, reason, by, traced, env
 ):
-    env(approval_timeout_seconds="0.2")
+    env(approval_timeout_seconds="0.4")
     result = fix(approve, remediator_model=make_remediator and make_remediator()).result
     [approval] = traced(result).search_spans(name="approval")
     decision = approval.outputs

@@ -236,7 +236,7 @@ def test_refused_access_is_tagged_evidence_and_the_reason_says_how_to_grant_it()
 
 
 def test_a_tool_that_times_out_is_retried_then_comes_back_as_a_tool_error(env):
-    env(tool_max_retries="1")
+    env(tool_max_retries="1", tool_retry_delay_seconds="0")
 
     async def hangs(_args):
         await asyncio.sleep(5)
@@ -563,13 +563,13 @@ def test_the_run_wide_tool_budget_spans_rounds(env):
 
 
 def test_the_time_budget_ends_inconclusive_with_partial_steps(env):
-    env(run_max_seconds="0.5")
+    env(run_max_seconds="1")
 
     async def slow(_messages):
         await asyncio.sleep(10)
 
     record = run(ScriptedModel(script=[call(LIST), slow]))
-    assert "0.5 s time budget (AGENT_RUN_MAX_SECONDS)" in forced_reason(record)
+    assert "1 s time budget (AGENT_RUN_MAX_SECONDS)" in forced_reason(record)
     assert [s.ref for s in record.steps] == ["E1"]
 
 

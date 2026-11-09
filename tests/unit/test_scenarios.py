@@ -39,9 +39,10 @@ def test_live_state_counts_live_pods_only():
     assert live_state(pods) == ReadyWhen(pods_ready=1, pods_not_ready=1, restarts=3)
 
 
-def up(kube: FakeKube, name: str = "selector") -> None:
+def up(kube: FakeKube, name: str = "selector", ready_timeout: float = 1) -> None:
     scn = scenarios.get_scenario(get_settings().scenarios_dir, name)
-    scenarios.up(scn, kube.clients, ready_timeout=1, delete_timeout=1, poll=0.01, progress=print)
+    scenarios.up(scn, kube.clients, ready_timeout=ready_timeout, delete_timeout=1, poll=0.01,
+                 progress=print)  # fmt: skip
 
 
 def test_up_recreates_the_namespace_then_its_access_then_the_app():
@@ -61,7 +62,7 @@ def test_up_recreates_the_namespace_then_its_access_then_the_app():
 
 def test_up_waits_until_the_fault_is_live():
     with pytest.raises(TimeoutError, match="fault not live"):
-        up(FakeKube(pods=[pod()]), "crashloop")  # no restarts yet
+        up(FakeKube(pods=[pod()]), "crashloop", ready_timeout=0.05)  # no restarts yet
     up(FakeKube(pods=[pod(ready=False, restarts=2)]), "crashloop")
 
 
