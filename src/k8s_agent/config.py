@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # Agent identities (SPEC §3.5)
     rbac_file: Path = Path("deploy/rbac.yaml")
-    token_ttl_hours: float = Field(12, ge=MIN_TOKEN_TTL_HOURS)
+    token_ttl_hours: float = Field(default=12, ge=MIN_TOKEN_TTL_HOURS)
     reader_kubeconfig: Path = Path(".kube-agent/reader.kubeconfig")
     remediator_kubeconfig: Path = Path(".kube-agent/remediator.kubeconfig")
     # Where the agent may propose a fix (the remediator's RoleBinding grants the same).
@@ -47,13 +47,13 @@ class Settings(BaseSettings):
 
     # MCP server. Host networking (SPEC §3.10): the same URL works from the host and from
     # containers. Unset AGENT_MCP_URL = http://localhost:<AGENT_MCP_PORT>/mcp.
-    mcp_port: int = Field(8080, ge=1, le=65535)
+    mcp_port: int = Field(default=8080, ge=1, le=65535)
     mcp_url: str = ""
     mcp_timeout_seconds: PositiveFloat = 30  # per MCP call
 
     # The agents (SPEC §2.1 stopping rule, §4.6). The API key is read from ANTHROPIC_API_KEY
     # (no AGENT_ prefix); unset = the provider's own lookup.
-    anthropic_api_key: SecretStr | None = Field(None, validation_alias="ANTHROPIC_API_KEY")
+    anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     user_id: str | None = None  # who is talking; unset = the OS user
     model: str = "anthropic:claude-sonnet-5-5"  # the investigator; LangChain model string
     critic_model: str | None = None  # the evidence critic; unset = AGENT_MODEL
@@ -74,9 +74,9 @@ class Settings(BaseSettings):
     max_verify_rounds: PositiveInt = 2  # critic verdicts per run; then unfounded = inconclusive
     recursion_limit: PositiveInt = 250  # LangGraph steps per run: a backstop the limits beat
     max_output_tokens: PositiveInt = 8000  # per model call, thinking included
-    model_max_retries: int = Field(2, ge=0)  # provider SDK retries (429, 5xx, connection)
-    tool_max_retries: int = Field(2, ge=0)  # failed MCP calls, except refused or not found
-    tool_retry_delay_seconds: float = Field(1.0, ge=0)  # first wait; doubles each retry
+    model_max_retries: int = Field(default=2, ge=0)  # provider SDK retries (429, 5xx, connection)
+    tool_max_retries: int = Field(default=2, ge=0)  # failed MCP calls, except refused or not found
+    tool_retry_delay_seconds: float = Field(default=1.0, ge=0)  # first wait; doubles each retry
     tool_output_max_chars: PositiveInt = 40000  # safety cap per tool result
     tool_output_strip_fields: NameList = ["managedFields"]  # noise removed (never spec/status)
     log_tail_lines: PositiveInt = 100  # max lines pods_log returns
@@ -90,16 +90,20 @@ class Settings(BaseSettings):
     # MLflow tracing (SPEC §3.7), under MLflow's own variable names. No tracking URI = no
     # tracing. MLflow's own HTTP defaults retry for minutes, so a stopped server would hold up
     # exit: these fail fast instead (tracing never decides how a run ends).
-    mlflow_tracking_uri: str | None = Field(None, validation_alias="MLFLOW_TRACKING_URI")
-    mlflow_experiment_name: str = Field("k8s-agent", validation_alias="MLFLOW_EXPERIMENT_NAME")
+    mlflow_tracking_uri: str | None = Field(default=None, validation_alias="MLFLOW_TRACKING_URI")
+    mlflow_experiment_name: str = Field(
+        default="k8s-agent", validation_alias="MLFLOW_EXPERIMENT_NAME"
+    )
     mlflow_http_request_timeout: PositiveInt = Field(
-        3, validation_alias="MLFLOW_HTTP_REQUEST_TIMEOUT"
+        default=3, validation_alias="MLFLOW_HTTP_REQUEST_TIMEOUT"
     )  # seconds per call to the tracking server (it runs on this machine's cluster)
     mlflow_http_request_max_retries: int = Field(
-        0, ge=0, validation_alias="MLFLOW_HTTP_REQUEST_MAX_RETRIES"
+        default=0, ge=0, validation_alias="MLFLOW_HTTP_REQUEST_MAX_RETRIES"
     )
     # MLflow's usage telemetry to its own servers (on by default in MLflow); traces never go.
-    mlflow_disable_telemetry: bool = Field(True, validation_alias="MLFLOW_DISABLE_TELEMETRY")
+    mlflow_disable_telemetry: bool = Field(
+        default=True, validation_alias="MLFLOW_DISABLE_TELEMETRY"
+    )
     # The tracking server `agent setup` installs in the cluster, with MLflow's Helm chart.
     # Pinned by digest; Helm 4 also resolves the version and refuses it if the digests differ.
     mlflow_chart: str = (
