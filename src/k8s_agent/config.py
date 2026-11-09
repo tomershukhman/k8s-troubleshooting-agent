@@ -97,9 +97,11 @@ class Settings(BaseSettings):
     mlflow_experiment_name: str = Field(
         default="k8s-agent", validation_alias="MLFLOW_EXPERIMENT_NAME"
     )
+    # Seconds per call to the tracking server (the compose service, on this machine): room for
+    # the evals to fetch a large trace (the selector run's ~85 spans took ~3 s locally).
     mlflow_http_request_timeout: PositiveInt = Field(
-        default=3, validation_alias="MLFLOW_HTTP_REQUEST_TIMEOUT"
-    )  # seconds per call to the tracking server (the compose service, on this machine)
+        default=10, validation_alias="MLFLOW_HTTP_REQUEST_TIMEOUT"
+    )
     mlflow_http_request_max_retries: int = Field(
         default=0, ge=0, validation_alias="MLFLOW_HTTP_REQUEST_MAX_RETRIES"
     )
