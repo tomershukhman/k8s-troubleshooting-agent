@@ -208,7 +208,7 @@ def feedback_message(feedback: str) -> HumanMessage:
 
 
 async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext]) -> Command:
-    ctx, draft = runtime.context, state["structured_response"]
+    ctx, draft = runtime.context, state.get("structured_response")  # unset: no answer yet
     if draft is None:
         reason = "The investigator stopped without a final answer."
         return Command(goto="result", update={"forced_reason": reason})

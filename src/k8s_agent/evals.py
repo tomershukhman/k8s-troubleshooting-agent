@@ -486,7 +486,7 @@ def per_run(trace: Any, record: RunRecord | None) -> dict[str, Any]:
         "tokens": json.loads(meta.get("mlflow.trace.tokenUsage") or "{}").get("total_tokens", 0),
         "cost_usd": json.loads(meta.get("mlflow.trace.cost") or "{}").get("total_cost", 0.0),
         "judge_cost_usd": sum(
-            float(f.metadata.get("mlflow.assessment.judgeCost", 0)) for f in feedback
+            float((f.metadata or {}).get("mlflow.assessment.judgeCost", 0)) for f in feedback
         ),
         "record": record.model_dump(mode="json") if record else None,
     }

@@ -3,6 +3,7 @@ cost). Settings are isolated by conftest.py; `env` sets AGENT_* settings for one
 
 import asyncio
 import logging
+from types import SimpleNamespace
 
 import pytest
 from fastmcp import Client as FastMCPClient
@@ -20,7 +21,7 @@ from k8s_agent.agent import (
     core,
     investigate,
 )
-from k8s_agent.agent.graph import system_prompt
+from k8s_agent.agent.graph import system_prompt, verify_evidence
 from k8s_agent.config import get_settings
 from k8s_agent.policy import READ_ONLY_TOOLS
 from k8s_agent.schemas import CATEGORY_DEFINITIONS, CriticVerdict
@@ -478,6 +479,15 @@ def test_an_investigator_that_stops_without_an_answer_ends_inconclusive():
     model = ScriptedModel(script=[first, answer(diagnosis("E1")), first])
     record = run(model, judge=critic(verdict("E1", founded=False)))
     assert forced_reason(record) == "The investigator stopped without a final answer."
+
+
+def test_a_first_round_that_never_answered_ends_inconclusive_too():
+    state = {"question": "q", "messages": [], "rounds": []}  # LangGraph leaves an unset key out
+    command = asyncio.run(verify_evidence(state, SimpleNamespace(context=None)))
+    assert (command.goto, command.update) == (
+        "result",
+        {"forced_reason": "The investigator stopped without a final answer."},
+    )
 
 
 def test_an_inconclusive_answer_citing_nothing_skips_the_critic():
