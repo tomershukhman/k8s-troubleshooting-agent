@@ -104,6 +104,13 @@ def pod_ready(pod: client.V1Pod) -> bool:
     return any(c.type == "Ready" and c.status == "True" for c in conditions or [])
 
 
+def error_text(e: Exception) -> str:
+    """One line for a Kubernetes API error: an ApiException's own text adds the HTTP headers."""
+    if isinstance(e, ApiException):
+        return f"{e.status} {e.reason}: {e.body}" if e.body else f"{e.status} {e.reason}"
+    return str(e)
+
+
 def read_or_none[T](read: Callable[[], T]) -> T | None:
     """`read()`, or None if the object doesn't exist."""
     try:

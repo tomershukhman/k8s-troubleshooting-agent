@@ -212,6 +212,8 @@ def code_checks(d: Diagnosis, steps: list[Step], settings: Settings) -> list[str
     if fix := d.proposed_fix:
         res = d.affected_resource
         target = (res.kind, res.namespace, res.name) if res else None
+        if d.status is not DiagnosisStatus.fault_found:
+            problems.append("A fix may be proposed only with status fault_found.")
         if d.fault_category is not FaultCategory.selector_mismatch:
             problems.append("A fix may be proposed only for a selector mismatch.")
         elif target != ("Service", fix.namespace, fix.service):
@@ -257,6 +259,21 @@ async def read_verdict(
         return None
 
 
+def what_failed(verdict: CriticVerdict, draft: Diagnosis) -> str:
+    """Why a round is unfounded when the critic gave no feedback: it said "founded" while its own
+    findings, its fix verdict or its coverage of the draft's evidence say otherwise."""
+    reasons = [f"{f.ref}: {f.reason}" for f in verdict.findings if not f.supported]
+    judged = {f.ref for f in verdict.findings}
+    if unjudged := [ref for ref in draft.refs if ref not in judged]:
+        reasons.append(f"These findings couldn't be checked: {', '.join(unjudged)}.")
+    if draft.proposed_fix is not None:
+        if verdict.proposed_fix is None:
+            reasons.append("The proposed fix couldn't be checked.")
+        elif not verdict.proposed_fix.backed:
+            reasons.append(f"The proposed fix isn't backed: {verdict.proposed_fix.reason}")
+    return " ".join(reasons) or "The critic's verdict didn't cover the draft's evidence exactly."
+
+
 async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext]) -> Command:
     ctx, draft = runtime.context, state.get("structured_response")  # unset: no answer yet
     if draft is None:
@@ -279,7 +296,7 @@ async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext
         covered = sorted(f.ref for f in findings) == sorted(draft.refs)  # one per finding
         supported = covered and all(f.supported for f in findings)
         founded = verdict.founded and supported and fix_backed is not False
-        feedback = None if founded else (verdict.feedback.strip() or "Not every finding held up.")
+        feedback = None if founded else (verdict.feedback.strip() or what_failed(verdict, draft))
     round_ = VerifyRound(
         round=number,
         founded=founded,

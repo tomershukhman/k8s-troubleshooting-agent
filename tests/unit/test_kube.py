@@ -4,6 +4,7 @@ No cluster: a kubeconfig pointing nowhere, and the dynamic client's transport re
 from types import SimpleNamespace
 
 import yaml
+from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic import DynamicClient
 
 from k8s_agent import kube
@@ -36,3 +37,10 @@ def test_every_admin_call_has_the_configured_time_limit(env, tmp_path, monkeypat
     c.dynamic.server_side_apply(resource, body={"metadata": {"name": "n"}}, field_manager="m")
     assert sent == [("GET", "/apis", 4.5), ("patch", "/x/n", 4.5)]
     assert c.timeout == 4.5  # what the core calls pass (tests/unit/test_scenarios, test_access)
+
+
+def test_an_api_error_reads_as_one_line_without_the_http_headers():
+    e = ApiException(status=403, reason="Forbidden")
+    e.headers, e.body = {"Audit-Id": "a1"}, '{"message": "services is forbidden"}'
+    assert "Audit-Id" in str(e)  # the library's own text: several lines, headers included
+    assert kube.error_text(e) == '403 Forbidden: {"message": "services is forbidden"}'

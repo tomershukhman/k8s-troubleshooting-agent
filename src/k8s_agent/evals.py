@@ -521,7 +521,7 @@ def per_run(trace: Any, record: RunRecord | None) -> dict[str, Any]:
 class Suite:
     """One `agent eval`: for each scenario, rebuild it and score its diagnosis runs; for one with
     an expected fix, then its fix run and a rebuild. The report goes to `path` after each
-    scenario, so a later stop keeps what was scored. `run_url`: an MLflow run's page;
+    scoring, so a later stop keeps what was scored. `run_url`: an MLflow run's page;
     `progress`: what it's doing, for a person."""
 
     settings: Settings
@@ -547,6 +547,8 @@ class Suite:
                 result = evaluate(scn, s, predict)
                 self.scored = True
                 self.verdict(result)
+                self.results.append(result)
+                self.save()
                 if scn.spec.expected_fix is not None:
                     self.progress(f"{scn.name}: the fix run (it approves the fix), then a rebuild")
                     try:
@@ -554,8 +556,7 @@ class Suite:
                     finally:
                         self.up(scn)  # the fix changed the cluster: back to the scenario's fault
                     self.verdict(result.fix)
-                self.results.append(result)
-                self.save()
+                    self.save()
         finally:
             predict.close()
         return self.results

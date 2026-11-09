@@ -433,6 +433,10 @@ ORDERS_FIX = selector_fix(namespace="shop-orders")
             "Fixes are allowed only in shop-checkout",
         ),
         (
+            diagnosis("E1", status="inconclusive", proposed_fix=selector_fix()),
+            "only with status fault_found",
+        ),
+        (
             diagnosis("E1", fault_category="bad_config", proposed_fix=selector_fix()),
             "only for a selector mismatch",
         ),
@@ -458,6 +462,18 @@ def test_the_critic_must_back_a_proposed_fix(env):
     assert record.result.verification[0].proposed_fix_backed is False
 
 
+def test_a_founded_verdict_that_does_not_back_the_fix_says_the_fix_is_the_problem(env):
+    # The critic says "founded" with no feedback, but its own fix verdict is "not backed": the
+    # investigator is told about the fix, not that its findings failed.
+    record, _ = one_round(
+        diagnosis("E1", proposed_fix=selector_fix()),
+        critic(verdict("E1", fix=False)),
+        rounds=1,
+        env=env,
+    )
+    assert forced_reason(record).endswith("The proposed fix isn't backed: r")
+
+
 def test_a_fix_verdict_on_a_draft_without_a_fix_is_ignored():
     # The critic adds a stray "not backed" although nothing was proposed: still founded.
     record, _ = one_round(diagnosis("E1"), critic(verdict("E1", fix=False)))
@@ -470,7 +486,9 @@ def test_the_critic_must_judge_every_finding(env):
     judge = critic(verdict("E1"))
     model = ScriptedModel(script=[call(LIST, LIST), answer(diagnosis("E1", "E2"))])
     env(max_verify_rounds="1")
-    assert "Not every finding held up" in forced_reason(run(model, judge=judge))
+    assert forced_reason(run(model, judge=judge)).endswith(
+        "These findings couldn't be checked: E2."
+    )
 
 
 def test_a_verdict_founded_with_a_finding_not_supported_is_not_founded(env):
@@ -479,7 +497,7 @@ def test_a_verdict_founded_with_a_finding_not_supported_is_not_founded(env):
     judge = critic(verdict("E1", founded=True) | {"findings": unsupported})
     record, _ = one_round(diagnosis("E1"), judge, rounds=1, env=env)
     assert record.result.verification[0].founded is False
-    assert "Not every finding held up" in forced_reason(record)
+    assert forced_reason(record).endswith(": E1: r")
 
 
 GARBLED = OutputParserException('Invalid json output: {"findings": [')

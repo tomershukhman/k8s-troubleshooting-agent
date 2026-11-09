@@ -1,6 +1,6 @@
-"""M2: the identities and the MCP server hold the safety boundary (PLAN.md M2). Checked two
-ways: through the MCP server, with the client the agent uses, and directly at Kubernetes, with
-each identity's own kubeconfig."""
+"""The identities and the MCP server hold the safety boundary. Checked two ways: through the MCP
+server, with the client the agent uses, and directly at Kubernetes, with each identity's own
+kubeconfig."""
 
 import asyncio
 import base64

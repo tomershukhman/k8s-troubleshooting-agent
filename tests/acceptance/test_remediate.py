@@ -1,7 +1,7 @@
-"""M6: the fix on the real cluster, model and tracking server (PLAN.md M6). The selector
-scenario's question is asked without a namespace. The first test reads the real command's run
-with no terminal on stdin (shared with M4), so the fix request is rejected; the others decide the
-request with the test's own approver, inside the same call, as the CLI does. A test that changes
+"""The fix on the real cluster, model and tracking server. The selector scenario's question is
+asked without a namespace. The first test reads the real command's run with no terminal on stdin
+(shared with test_tracing.py), so the fix request is rejected; the others decide the request with
+the test's own approver, inside the same call, as the CLI does. A test that changes
 the Service rebuilds the scenario afterwards. Model answers vary: a run that never reaches the fix
 request gets one retry."""
 
@@ -129,7 +129,7 @@ def test_editing_the_service_during_the_pause_makes_the_fix_refuse(kube, want, r
     async def edit_then_approve(*_):
         edit = {"metadata": {"annotations": {"k8s-agent.test/edited": "during-the-pause"}}}
         kube.core.patch_namespaced_service(NAME, NS, edit)
-        return Answer(True, "approved after an edit, by the M6 acceptance test")
+        return Answer(True, "approved after an edit, by the remediate acceptance test")
 
     investigator = ScriptedModel(script=[
         call(("resources_get", SERVICE_ARGS), ("pods_list_in_namespace", {"namespace": NS})),
@@ -181,7 +181,7 @@ def test_an_approved_fix_gets_endpoints_and_is_verified_all_in_one_trace(
 
     async def approve(*_):
         at_pause.append((service(kube).spec.selector, ready_endpoints(kube)))
-        return Answer(True, "approved by the M6 acceptance test")
+        return Answer(True, "approved by the remediate acceptance test")
 
     record = until_requested(want.spec.question, approve)
     result, r = record.result, record.result.remediation

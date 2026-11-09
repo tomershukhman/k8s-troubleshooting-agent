@@ -1,4 +1,4 @@
-"""M1: each scenario comes up with its fault live, and `down` removes it (PLAN.md M1)."""
+"""Each scenario comes up with its fault live, and `down` removes it."""
 
 import pytest
 from kubernetes.client.exceptions import ApiException

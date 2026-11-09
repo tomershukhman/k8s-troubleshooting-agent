@@ -19,7 +19,8 @@ def test_every_scenario_loads_with_its_own_neutral_namespace():
     assert len(set(namespaces)) == 4 and all(ns.startswith("shop-") for ns in namespaces)
     for name, scn in found.items():
         # nothing the agent can see gives away the folder name, which describes the fault: as
-        # M1 checks on the cluster, each name, and each label and annotation as key=value
+        # tests/acceptance/test_scenarios.py checks on the cluster, each name, and each label and
+        # annotation as key=value
         for doc in scn.manifests:
             pods = doc.get("spec", {}).get("template", {}).get("metadata", {})  # its pods'
             visible = [doc["metadata"]["name"]] + [

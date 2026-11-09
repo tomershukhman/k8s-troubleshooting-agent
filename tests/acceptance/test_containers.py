@@ -1,4 +1,4 @@
-"""M7: what CI's image build and the eval runs through the containers don't show (PLAN M7).
+"""What CI's image build and the eval runs through the containers don't show.
 Needs Docker; no cluster."""
 
 import json

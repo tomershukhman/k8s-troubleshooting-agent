@@ -1,5 +1,5 @@
 """The evals' exact checks and pass marks (SPEC 2.3), with hand-made answers and traces. The
-judges and `mlflow.genai.evaluate` itself run in tests/acceptance/test_m5_evals.py."""
+judges and `mlflow.genai.evaluate` itself run in tests/acceptance/test_evals.py."""
 
 import importlib.abc
 import json
@@ -295,7 +295,13 @@ def three_runs() -> Settings:
     return get_settings().model_copy(update={"eval_runs_per_scenario": 3})
 
 
-def test_the_pass_share_sets_the_marks_for_any_number_of_runs():
+@pytest.mark.parametrize(
+    "share", [None, "0.667"]
+)  # the default (2/3), and as .env.example writes it
+def test_the_pass_share_sets_the_marks_for_any_number_of_runs(env, share):
+    if share:
+        env(eval_pass_share=share)
+
     def least(runs: int) -> int:
         return get_settings().model_copy(update={"eval_runs_per_scenario": runs}).eval_pass_min_runs
 
@@ -513,6 +519,14 @@ def test_eval_exits_2_when_nothing_ran_and_1_once_a_scenario_was_scored(
     if code == 1:  # what was scored before it stopped is kept
         [saved] = Path("eval-results").glob("*.json")
         assert [s["name"] for s in json.loads(saved.read_text())["scenarios"]] == ["crashloop"]
+
+
+def test_a_failed_fix_run_keeps_the_scenarios_scored_diagnosis_runs(monkeypatch):
+    # The 5th evaluation is selector's fix run, after its diagnosis runs were scored.
+    assert eval_run(monkeypatch, "evaluate 5").exit_code == 1
+    [saved] = Path("eval-results").glob("*.json")
+    report = json.loads(saved.read_text())["scenarios"]
+    assert [(s["name"], s["fix"]) for s in report][-1] == ("selector", None)
 
 
 def test_eval_results_are_readable_by_their_owner_only(monkeypatch):

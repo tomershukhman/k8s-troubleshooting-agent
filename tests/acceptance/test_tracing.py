@@ -1,4 +1,4 @@
-"""M4: tracing on the real cluster, model and tracking server (PLAN.md M4). Every investigation
+"""Tracing on the real cluster, model and tracking server. Every investigation
 runs as the real command (`agent investigate`, a subprocess), so the trace link, the flush on exit
 and the stored trace are what a user gets; traces are then read back from the server. Model
 answers vary: a run that misses something the model decides (a reasoning summary, a refused
@@ -71,7 +71,8 @@ def inside(trace, span, name: str) -> bool:
 
 
 def tool_calls(trace) -> list:
-    """The investigator's tool calls, in evidence-ID order (a fix's remediator calls: M6)."""
+    """The investigator's tool calls, in evidence-ID order (a fix's remediator calls: see
+    test_remediate.py)."""
     calls = trace.search_spans(span_type=SpanType.TOOL)
     return sorted((s for s in calls if inside(trace, s, "investigator")), key=ref_number)
 
@@ -86,8 +87,9 @@ def ref_number(span) -> int:
 
 @pytest.fixture(scope="module")
 def selector(uri, cluster, selector_run):
-    """The selector scenario, investigated with a user (no namespace given): the run M6 shares.
-    Run again if the model returned no reasoning summary at all, which happens at any effort."""
+    """The selector scenario, investigated with a user (no namespace given): the run
+    test_remediate.py shares. Run again if the model returned no reasoning summary at all, which
+    happens at any effort."""
     run = selector_run
     for attempt in range(ATTEMPTS):
         if attempt:
@@ -112,7 +114,7 @@ def test_the_flow_request_agent_model_tool_calls_response(selector):
     rounds = len(result["verification"])
     investigation = ["intake", *["investigate", "verify_evidence"] * rounds, "result"]
     assert stages[: len(investigation)] == investigation
-    assert set(stages[len(investigation) :]) <= {"remediate", "investigate", "recheck"}  # M6
+    assert set(stages[len(investigation) :]) <= {"remediate", "investigate", "recheck"}  # a fix
     for stage in trace.search_spans(name="investigate"):
         # the agent, inside its stage (then `after_investigate`: where the graph goes next)
         assert children(trace, stage)[0].name == "investigator"

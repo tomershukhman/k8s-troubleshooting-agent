@@ -49,7 +49,7 @@ from k8s_agent.agent.records import (
 )
 from k8s_agent.agent.tool_output import cap, quoted
 from k8s_agent.config import Settings
-from k8s_agent.kube import KubeError, pod_ready, present
+from k8s_agent.kube import KubeError, error_text, pod_ready, present
 from k8s_agent.policy import FIX_TOOL
 from k8s_agent.schemas import ProposedFix, RemediatorAnswer
 
@@ -196,7 +196,7 @@ def apply_fix(kube: Kube, args: FixArgs, settings: Settings) -> FixResult:
         endpoints = wait_for_endpoints(kube, ns, name, settings)
         counted = f"{endpoints} ready endpoint{'s' * (endpoints != 1)}"
     except KUBE_ERRORS as e:
-        endpoints, counted = 0, f"couldn't count the endpoints: {e}"
+        endpoints, counted = 0, f"couldn't count the endpoints: {error_text(e)}"
     detail = f"selector {labels(before)} → {want}; {counted}"
     return FixResult(FixOutcome.applied, detail, before, endpoints)
 
@@ -248,7 +248,7 @@ def tools(load_kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
         except KubeError as e:
             raise ToolException(str(e)) from e
         except ApiException as e:
-            raise ToolException(f"{e.status} {e.reason}: {e.body}") from e
+            raise ToolException(error_text(e)) from e
         except HTTPError as e:
             raise ToolException(f"no answer from the API server: {e}") from e
 

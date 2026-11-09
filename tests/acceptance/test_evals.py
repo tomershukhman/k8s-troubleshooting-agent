@@ -1,4 +1,4 @@
-"""M5: the evals on the real cluster, model, judges and tracking server (PLAN.md M5).
+"""The evals on the real cluster, model, judges and tracking server.
 
 First, that they can fail: a fake agent that always answers "no fault", and each judge given a
 bad answer, which it must reject every time it's asked. Then the real thing: one full

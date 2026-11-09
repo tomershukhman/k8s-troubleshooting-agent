@@ -199,8 +199,8 @@ def run_selector(kube: AdminClients) -> SelectorRun:
 
 @pytest.fixture(scope="session")
 def selector_run(cluster: AdminClients) -> SelectorRun:
-    """One real selector run, shared: M4 checks its trace, M6 its rejected fix request. Each
-    makes a run of its own only if this one misses what it checks."""
+    """One real selector run, shared: test_tracing.py checks its trace, test_remediate.py its
+    rejected fix request. Each makes a run of its own only if this one misses what it checks."""
     return run_selector(cluster)
 
 

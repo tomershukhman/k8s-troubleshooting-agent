@@ -1,5 +1,5 @@
-"""M3: the investigation graph on the real model and the real cluster (PLAN.md M3). Model
-answers vary, so each real-model check gets one retry; every attempt is printed."""
+"""The investigation graph on the real model and the real cluster. Model answers vary, so each
+real-model check gets one retry; every attempt is printed."""
 
 import asyncio
 import subprocess
@@ -72,7 +72,8 @@ def problems(record: RunRecord, scn: Scenario) -> list[str]:
     if r.duration_ms > get_settings().run_max_seconds * 1000:
         found.append(f"took {r.duration_ms} ms")
     # status, category, resource, and for no fault evidence from its namespace: the evals' own
-    # check, so M3 and M5 can't drift apart (the evals' other checks read the run's trace)
+    # check, so these tests and the evals can't drift apart (the evals' other checks read the
+    # run's trace)
     out, expected = evals.outputs_of(record), evals.expectations(scn)
     if not (correct := evals.diagnosis_correct(outputs=out, expectations=expected)).value:
         found.append(correct.rationale)

@@ -809,7 +809,7 @@ Three layers. Nothing in `investigate` depends on the tracking server running; l
 - **Port 5050, not 5000:** macOS's AirPlay Receiver often holds 5000. The server is at `http://localhost:5050` on any setup.
 - **Packaging:** the agent needs only MLflow's slim `mlflow-tracing` package, which covers the LangGraph autolog (confirmed in M4). The full `mlflow` package (88 dependencies) is the `eval` extra, needed only where the evals run; `uv sync` installs it for development (the dev group includes it).
 
-**What a trace shows, against the brief's observability list.** `tests/acceptance/test_m4_tracing.py` checks a real stored trace against every line.
+**What a trace shows, against the brief's observability list.** `tests/acceptance/test_tracing.py` checks a real stored trace against every line.
 
 | The brief asks to capture | Where it appears in the trace |
 |---|---|
@@ -1083,7 +1083,7 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 | Fix / setup / scenarios | Official `kubernetes` Python client 37.x (`urllib3` for its transport errors); `pyyaml` for the manifests and for stripping tool output |
 | CLI | Typer + Rich |
 | Schemas / config | Pydantic + pydantic-settings |
-| Tests | pytest. `make check`: lint, type check and unit tests with a fake model and a fake cluster; no network. `make accept M=n`: milestone n's acceptance tests only, on a real cluster (real model from M3); `make accept`: every milestone's. |
+| Tests | pytest. `make check`: lint, type check and unit tests with a fake model and a fake cluster; no network. `make accept SUITE=<name>`: one acceptance suite (`tests/acceptance/test_<name>.py`), on a real cluster and the real model; `make accept`: every suite. |
 | CI | GitHub Actions, one staged `ci.yml`: lint → unit tests → build image → publish image (ghcr.io, multi-arch) → evals on the published image (pull requests to `main` + a manual button: kind cluster via `helm/kind-action`, the README's `docker compose` commands, the `ANTHROPIC_API_KEY` secret). |
 | Tracing | MLflow 3 tracing (`mlflow.langchain.autolog()`). Tracking server: the compose service `mlflow` (MLflow's official image), SQLite on a Docker volume. The agent uses the slim `mlflow-tracing` package (it covers the autolog); the full `mlflow` package only where the evals run. `gitpython`, through which MLflow records the git commit on each trace (`AGENT_GIT_COMMIT` in the image). |
 | Evals | `mlflow.genai.evaluate`, one evaluation per scenario: four custom `@scorer` functions (exact checks) plus two built-in judges, `ExpectationsGuidelines` (advice) and `make_judge` on the cited tool outputs (evidence); pass marks checked by `agent eval` from each run's verdicts. The full `mlflow` package is an optional `eval` extra (the agent needs only `mlflow-tracing`). |

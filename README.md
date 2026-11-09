@@ -233,8 +233,8 @@ Needs [uv](https://docs.astral.sh/uv/). `uv sync` installs Python 3.14 and every
 
 ```bash
 make check         # lint, type check + unit tests (no cluster, Docker or network; never reads your .env)
-make accept M=6    # milestone 6's acceptance tests, against your cluster, the real model and MLflow
-make accept        # every milestone's acceptance tests
+make accept SUITE=remediate  # one acceptance suite (tests/acceptance/test_remediate.py), against your cluster, the real model and MLflow
+make accept            # every acceptance suite
 ```
 
 ## Project layout

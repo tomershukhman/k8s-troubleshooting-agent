@@ -1,6 +1,6 @@
-"""M6, the fix (PLAN.md M6, SPEC 3.4): the remediator, the approval pause, the fix tool and the
+"""The fix (SPEC 3.4): the remediator, the approval pause, the fix tool and the
 recheck, with fake models, the in-process fake cluster and a fake Kubernetes API for the
-remediator (tests/fakes.py). The real cluster and model: tests/acceptance/test_m6_fix.py."""
+remediator (tests/fakes.py). The real cluster and model: tests/acceptance/test_remediate.py."""
 
 import asyncio
 import logging

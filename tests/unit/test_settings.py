@@ -1,5 +1,7 @@
 """Settings parsing. No cluster."""
 
+import os
+
 import pytest
 from pydantic import ValidationError
 
@@ -16,6 +18,18 @@ def test_mcp_endpoint_follows_port_unless_set(env):
     assert get_settings().mcp_endpoint == "http://localhost:9090/mcp"
     env(mcp_url="http://localhost:1/mcp")
     assert get_settings().mcp_endpoint == "http://localhost:1/mcp"
+
+
+def test_user_id_falls_back_to_the_uid_when_the_os_user_is_unknown(monkeypatch):
+    # The image's non-root uid has no passwd entry; a plain `docker run` sets no USER.
+    for name in ("LOGNAME", "USER", "LNAME", "USERNAME"):
+        monkeypatch.delenv(name, raising=False)
+
+    def no_passwd_entry(uid: int):
+        raise KeyError(uid)
+
+    monkeypatch.setattr("pwd.getpwuid", no_passwd_entry)
+    assert get_settings().effective_user_id == f"uid-{os.getuid()}"
 
 
 def test_critic_model_defaults_to_the_agent_model(env):

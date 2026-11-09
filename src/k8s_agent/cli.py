@@ -19,7 +19,7 @@ from urllib3.exceptions import HTTPError
 
 from k8s_agent import access, scenarios, tracing
 from k8s_agent.config import Settings, get_settings
-from k8s_agent.kube import KubeError, admin_clients
+from k8s_agent.kube import KubeError, admin_clients, error_text
 from k8s_agent.logs import LOGGER, setup_logging
 
 # The agent (and ui, which shows its records) takes most of a second to import: only
@@ -138,7 +138,7 @@ def _clean_errors(code: int = EXIT_FAILED) -> Iterator[None]:
     try:
         yield
     except CLUSTER_ERRORS as e:
-        _fail(str(e), code)
+        _fail(error_text(e), code)
 
 
 @app.command()
