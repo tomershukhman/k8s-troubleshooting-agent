@@ -625,8 +625,11 @@ def test_every_reject_applies_nothing_and_is_on_the_trace_with_who_and_when(
 
 def test_the_summary_says_what_was_decided_done_and_verified():
     console = Console(width=200, record=True)
-    console.print(ui.summary(fix(approver()).result))
+    panel = ui.summary(fix(approver()).result)
+    console.print(panel)
     text = console.export_text()
+    assert text.startswith("╭─ Fixed · selector_mismatch · Service/checkout in shop-checkout")
+    assert panel.border_style == "green"  # a verified fix: not the red of a live fault
     assert "Fix: approved: approved in a test (by alice, " in text
     assert (
         "Applied: selector app=check-out → app=checkout; 2 ready endpoints. "

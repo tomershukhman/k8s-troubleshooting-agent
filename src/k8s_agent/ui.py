@@ -279,8 +279,14 @@ def summary(result: RunResult, diagnosis_shown: bool = False) -> RenderableType:
         body = Text(result.error or "unknown error")
         return Panel(body, title="[bold red]Run failed", subtitle=footer, border_style="red")
     rem = result.remediation
+    # The title says where the run ended: a verified fix is green, an unverified one yellow.
+    status = None
+    if rem and rem.verified:
+        status = ("Fixed", "green")
+    elif rem and rem.outcome == "applied":
+        status = ("Fix applied, not verified", "yellow")
     if rem and diagnosis_shown:
-        return _panel(d, [fix_summary(rem, d.post_fix_check)], footer)
+        return _panel(d, [fix_summary(rem, d.post_fix_check)], footer, status)
     parts = _findings(d, result.evidence_steps)
     if fix := d.proposed_fix:
         unchanged = "" if rem else " Nothing has been changed."  # else: the fix line says
@@ -294,7 +300,7 @@ def summary(result: RunResult, diagnosis_shown: bool = False) -> RenderableType:
         )
     if rem:
         parts.append(fix_summary(rem, d.post_fix_check))
-    return _panel(d, parts, footer)
+    return _panel(d, parts, footer, status)
 
 
 def diagnosis(d: Diagnosis, evidence_steps: list[EvidenceStep]) -> RenderableType:
@@ -321,9 +327,15 @@ def _findings(d: Diagnosis, evidence_steps: list[EvidenceStep]) -> list[Renderab
     return [*parts, Text(), Text.assemble(("Next step: ", "bold"), d.recommended_action)]
 
 
-def _panel(d: Diagnosis, parts: list[RenderableType], footer: str | None = None) -> Panel:
-    """`parts` in a panel titled with what was found."""
-    label, color = TITLES[d.status]
+def _panel(
+    d: Diagnosis,
+    parts: list[RenderableType],
+    footer: str | None = None,
+    status: tuple[str, str] | None = None,
+) -> Panel:
+    """`parts` in a panel titled with what was found, or with `status` (label, colour): where a
+    fix left it."""
+    label, color = status or TITLES[d.status]
     # Text, not markup, wherever the model's words go: they may hold "[...]".
     title = Text(label, f"bold {color}")
     r = d.affected_resource
