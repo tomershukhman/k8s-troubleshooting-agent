@@ -9,7 +9,7 @@ import termios
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext, redirect_stdout
 from dataclasses import dataclass
-from typing import Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated, NoReturn
 
 import typer
 from kubernetes.client.exceptions import ApiException
@@ -18,20 +18,18 @@ from rich.console import Console
 from rich.text import Text
 from urllib3.exceptions import HTTPError
 
-from k8s_agent import access, scenarios, tracing, tracking_server, ui
-from k8s_agent.agent import (
-    Answer,
-    ApprovalRequest,
-    McpUnavailable,
-    NotStarted,
-    RunStatus,
-)
-from k8s_agent.agent import investigate as run_investigation
-from k8s_agent.agent.records import EvidenceStep
+from k8s_agent import access, scenarios, tracing, tracking_server
 from k8s_agent.config import Settings, get_settings
 from k8s_agent.kube import KubeError, admin_clients
 from k8s_agent.logs import LOGGER, setup_logging
-from k8s_agent.schemas import Diagnosis
+
+# The agent (and ui, which shows its records) takes most of a second to import: only
+# `investigate` and `eval` import it, when they run.
+if TYPE_CHECKING:
+    from k8s_agent import ui
+    from k8s_agent.agent import Answer, ApprovalRequest
+    from k8s_agent.agent.records import EvidenceStep
+    from k8s_agent.schemas import Diagnosis
 
 app = typer.Typer(no_args_is_help=True, help="Kubernetes troubleshooting agent.")
 scenario_app = typer.Typer(no_args_is_help=True, help="Create or remove the broken scenarios.")
@@ -105,6 +103,9 @@ class Prompt:
     async def __call__(
         self, request: ApprovalRequest, diagnosis: Diagnosis, evidence_steps: list[EvidenceStep]
     ) -> Answer:
+        from k8s_agent import ui
+        from k8s_agent.agent import Answer
+
         with self.progress.paused() if self.progress else nullcontext():
             # Drop anything typed while the agent worked: only an answer typed after seeing
             # the change counts.
@@ -167,6 +168,10 @@ def investigate(
     0: a diagnosis, "inconclusive" included.
     1: the run failed; the result says why.
     2: nothing ran (invalid settings, or the MCP server can't be reached)."""
+    from k8s_agent import ui
+    from k8s_agent.agent import McpUnavailable, NotStarted, RunStatus
+    from k8s_agent.agent import investigate as run_investigation
+
     s = _settings(EXIT_NOT_STARTED)
     err = Console(stderr=True)
     # JSON logs are for machines: kept off an interactive terminal unless AGENT_LOG_FILE is set.
@@ -248,6 +253,9 @@ def eval_(
         from k8s_agent import evals  # the full mlflow package: the `eval` extra
     except ImportError as e:
         _fail(f"agent eval needs the eval extra (uv sync --extra eval): {e}", EXIT_NOT_STARTED)
+    from k8s_agent import ui
+    from k8s_agent.agent import McpUnavailable, NotStarted
+
     try:
         trace = tracing.enable(
             s.model_copy(update={"mlflow_experiment_name": s.eval_mlflow_experiment_name})
