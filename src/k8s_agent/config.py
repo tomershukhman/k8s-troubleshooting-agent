@@ -98,7 +98,11 @@ class Settings(BaseSettings):
     # MLflow's usage telemetry to its own servers (on by default in MLflow); traces never go.
     mlflow_disable_telemetry: bool = Field(True, validation_alias="MLFLOW_DISABLE_TELEMETRY")
     # The tracking server `agent setup` installs in the cluster, with MLflow's Helm chart.
-    mlflow_chart: str = "oci://ghcr.io/mlflow/charts/mlflow"
+    # Pinned by digest; Helm 4 also resolves the version and refuses it if the digests differ.
+    mlflow_chart: str = (
+        "oci://ghcr.io/mlflow/charts/mlflow"
+        "@sha256:14838bbc4d897fd1675edef7930c5eb0135f0791d4479be2c3357dde5d5b259e"
+    )
     mlflow_chart_version: str = "3.18.0"
     mlflow_release: str = "mlflow"
     mlflow_namespace: str = "mlflow"

@@ -1007,7 +1007,7 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 | `MLFLOW_EXPERIMENT_NAME` | `k8s-agent` | MLflow's own variable |
 | `MLFLOW_HTTP_REQUEST_TIMEOUT` / `MLFLOW_HTTP_REQUEST_MAX_RETRIES` | 3 / 0 | MLflow's own variables; fail fast so a stopped server can't hold up exit |
 | `MLFLOW_DISABLE_TELEMETRY` | `true` | MLflow's usage telemetry to its own servers |
-| `AGENT_MLFLOW_CHART` / `AGENT_MLFLOW_CHART_VERSION` | `oci://ghcr.io/mlflow/charts/mlflow` / `3.18.0` | The chart `agent setup` installs |
+| `AGENT_MLFLOW_CHART` / `AGENT_MLFLOW_CHART_VERSION` | `oci://ghcr.io/mlflow/charts/mlflow@sha256:14838bbc…` / `3.18.0` | The chart `agent setup` installs, pinned by digest (Helm refuses a version whose digest differs) |
 | `AGENT_MLFLOW_RELEASE` / `AGENT_MLFLOW_NAMESPACE` | `mlflow` / `mlflow` | |
 | `AGENT_MLFLOW_VALUES_FILE` | `deploy/mlflow-values.yaml` | The minimal values |
 | `AGENT_MLFLOW_INSTALL_TIMEOUT_SECONDS` | 600 | The first install pulls a ~1.4 GB image |

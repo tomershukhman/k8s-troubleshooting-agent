@@ -4,6 +4,7 @@ server in tests/acceptance/test_m4_tracing.py."""
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -100,3 +101,20 @@ def test_a_failed_tracking_server_install_says_why(monkeypatch, helm, run, error
     monkeypatch.setattr(tracking_server.subprocess, "run", lambda *_args, **_kw: run)
     with pytest.raises(tracking_server.InstallError, match=error):
         tracking_server.install(get_settings(), FakeKube().clients, lambda _msg: None)
+
+
+def test_the_tracking_server_chart_is_pinned_by_digest(monkeypatch):
+    ran = []
+
+    def helm(command, **_kwargs):  # noqa: ANN001
+        ran.append(command)
+        return subprocess.CompletedProcess(command, 1, "", "Error: stop here\n")
+
+    monkeypatch.setattr(tracking_server.shutil, "which", lambda _name: "/bin/helm")
+    monkeypatch.setattr(tracking_server.subprocess, "run", helm)
+    with pytest.raises(tracking_server.InstallError):
+        tracking_server.install(get_settings(), FakeKube().clients, lambda _msg: None)
+    [command] = ran
+    chart = command[command.index("--install") + 2]
+    assert re.fullmatch(r"oci://ghcr\.io/mlflow/charts/mlflow@sha256:[0-9a-f]{64}", chart)
+    assert command[command.index("--version") + 1] == "3.18.0"  # its digest must match the pin
