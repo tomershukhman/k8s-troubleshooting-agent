@@ -19,7 +19,6 @@ Needs the full `mlflow` package (the `eval` extra); the agent itself uses only m
 
 import asyncio
 import contextvars
-import json
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +27,7 @@ import mlflow
 from mlflow.entities import Feedback, SpanType
 from mlflow.genai.judges import make_judge
 from mlflow.genai.scorers import ExpectationsGuidelines, scorer
+from mlflow.tracing.constant import AssessmentMetadataKey
 from mlflow.utils.git_utils import get_git_commit
 from mlflow.utils.mlflow_tags import MLFLOW_GIT_COMMIT
 
@@ -474,19 +474,19 @@ def _evaluate(
 
 def per_run(trace: Any, record: RunRecord | None) -> dict[str, Any]:
     """One run: its scores (as logged on its trace), what it took, and its full run record."""
-    meta = trace.info.trace_metadata
-    feedback = [a for a in trace.info.assessments if isinstance(a, Feedback)]
+    info = trace.info
+    feedback = [a for a in info.assessments if isinstance(a, Feedback)]
     return {
-        "trace_id": trace.info.trace_id,
+        "trace_id": info.trace_id,
         "scores": {
             f.name: {"value": f.value, "rationale": f.rationale, "error": f.error_message}
             for f in feedback
         },
-        "duration_ms": trace.info.execution_duration,
-        "tokens": json.loads(meta.get("mlflow.trace.tokenUsage") or "{}").get("total_tokens", 0),
-        "cost_usd": json.loads(meta.get("mlflow.trace.cost") or "{}").get("total_cost", 0.0),
+        "duration_ms": info.execution_duration,
+        "tokens": (info.token_usage or {}).get("total_tokens", 0),
+        "cost_usd": (info.cost or {}).get("total_cost", 0.0),
         "judge_cost_usd": sum(
-            float((f.metadata or {}).get("mlflow.assessment.judgeCost", 0)) for f in feedback
+            float((f.metadata or {}).get(AssessmentMetadataKey.JUDGE_COST, 0)) for f in feedback
         ),
         "record": record.model_dump(mode="json") if record else None,
     }

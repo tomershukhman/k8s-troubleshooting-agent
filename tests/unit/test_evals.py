@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from mlflow.entities import Feedback, SpanType
+from mlflow.entities import Feedback, SpanType, TraceInfo, TraceLocation, TraceState
 from mlflow.genai.evaluation.quality_criteria import parse_quality_criteria
 from typer.testing import CliRunner
 
@@ -492,13 +492,21 @@ def test_eval_results_are_readable_by_their_owner_only(monkeypatch):
     assert stat.S_IMODE(saved.stat().st_mode) == 0o600
 
 
+def trace_info(metadata: dict[str, str], assessments: list) -> TraceInfo:
+    return TraceInfo(trace_id="t", trace_location=TraceLocation.from_experiment_id("0"),
+                     request_time=0, state=TraceState.OK, execution_duration=1200,
+                     trace_metadata=metadata, assessments=assessments)  # fmt: skip
+
+
 def test_a_runs_scores_and_judge_cost_are_read_from_its_trace_metadata_or_not():
     exact = Feedback(name="right_tools", value=True, rationale="looked")  # metadata: None
     judge = Feedback(name="advice_ok", value="yes", rationale="ok",
                      metadata={"mlflow.assessment.judgeCost": "0.25"})  # fmt: skip
-    info = SimpleNamespace(trace_id="t", trace_metadata={}, assessments=[exact, judge],
-                           execution_duration=1200)  # fmt: skip
-    run = evals.per_run(SimpleNamespace(info=info), None)
-    assert run["judge_cost_usd"] == 0.25
+    run = evals.per_run(SimpleNamespace(info=trace_info({}, [exact, judge])), None)
+    assert (run["judge_cost_usd"], run["tokens"], run["cost_usd"]) == (0.25, 0, 0.0)
     assert {n: v["value"] for n, v in run["scores"].items()} == {"right_tools": True,
                                                                  "advice_ok": "yes"}  # fmt: skip
+    usage = {"mlflow.trace.tokenUsage": json.dumps({"total_tokens": 1234}),
+             "mlflow.trace.cost": json.dumps({"total_cost": 0.05})}  # fmt: skip
+    run = evals.per_run(SimpleNamespace(info=trace_info(usage, [])), None)
+    assert (run["tokens"], run["cost_usd"], run["judge_cost_usd"]) == (1234, 0.05, 0)
