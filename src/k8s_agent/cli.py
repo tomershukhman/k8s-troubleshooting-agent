@@ -282,8 +282,7 @@ def eval_(
 
 @app.command()
 def setup() -> None:
-    """Create the agent's identities and kubeconfigs, and install the tracking server. Safe to
-    re-run.
+    """Create the agent's identities and install the tracking server (safe to re-run).
 
     Applies deploy/rbac.yaml (the read-only `reader` and the fix-only `remediator` in
     namespace k8s-agent) and writes a short-lived kubeconfig for each; re-run to refresh
