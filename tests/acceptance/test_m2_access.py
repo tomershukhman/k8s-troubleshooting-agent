@@ -30,6 +30,7 @@ from .conftest import (
     eventually,
     mcp_call,
     namespace,
+    reusable,
 )
 
 with suppress_langchain_beta_warning():
@@ -336,7 +337,11 @@ def test_mcp_picks_up_a_rotated_token_without_restart(cluster, request):
     assert state() == before  # same process: not restarted
 
 
-def test_access_survives_down_and_up(reader, remediator):
+def test_access_survives_down_and_up(reader, remediator, cluster, request):
+    # if it fails midway, the selector scenario comes back up for the tests after it
+    request.addfinalizer(
+        lambda: reusable(cluster, "selector") or agent("scenario", "up", "selector")
+    )
     agent("scenario", "down", "selector")
     assert not can(reader, "list", "", "pods", ns=CHECKOUT)  # the RoleBindings went with it
     agent("scenario", "up", "selector")
