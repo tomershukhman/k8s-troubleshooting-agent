@@ -18,11 +18,18 @@ def test_every_scenario_loads_with_its_own_neutral_namespace():
     namespaces = [scn.namespace for scn in found.values()]
     assert len(set(namespaces)) == 4 and all(ns.startswith("shop-") for ns in namespaces)
     for name, scn in found.items():
-        # nothing the agent can see gives away the folder name, which describes the fault
+        # nothing the agent can see gives away the folder name, which describes the fault: as
+        # M1 checks on the cluster, each name, and each label and annotation as key=value
         for doc in scn.manifests:
-            meta = doc["metadata"]
-            visible = [meta["name"], *meta.get("labels", {}).values(), *meta.get("annotations", {})]
-            assert not any(name in v for v in visible), (name, doc["kind"], visible)
+            pods = doc.get("spec", {}).get("template", {}).get("metadata", {})  # its pods'
+            visible = [doc["metadata"]["name"]] + [
+                f"{k}={v}"
+                for meta in (doc["metadata"], pods)
+                for field in ("labels", "annotations")
+                for k, v in meta.get(field, {}).items()
+            ]
+            hints = [text for text in visible if name in text.lower()]
+            assert hints == [], (name, doc["kind"], hints)
         [ns] = [d for d in scn.manifests if d["kind"] == "Namespace"]
         assert ns["metadata"]["labels"] == {OWNER_LABEL: OWNER_VALUE}
 
