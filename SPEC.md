@@ -228,7 +228,7 @@ Each pair is what the diagnosis must connect (the brief's "more than one source"
 
 ### 2.3 Definition of done (evals)
 
-By default every scenario runs **once** (`AGENT_EVAL_RUNS_PER_SCENARIO`, 1; user decision), and every check must pass in that run. One run confirms nothing broke, at about a third of the cost and time. To measure how reliable the agent is, after a prompt or model change, use `--runs 3`: model output varies between runs, so then the diagnosis and the two judges must pass in ≥2 of 3 runs (`--runs N` keeps that share: ceil(N × 2/3)), and the exact checks in every run. The evals run with MLflow's `mlflow.genai.evaluate`. How they run, with a diagram: [3.6](#36-scenarios-and-evals).
+By default every scenario runs **once** (`AGENT_EVAL_RUNS_PER_SCENARIO`, 1; user decision), and every check must pass in that run. One run confirms nothing broke, at about a third of the cost and time. To measure how reliable the agent is, after a prompt or model change, use `--runs 3`: model output varies between runs, so the diagnosis and the two judges must pass in a share of the runs (`AGENT_EVAL_PASS_SHARE`, 2/3, rounded up: 1 of 1, 2 of 3, 7 of 10), and the exact checks in every run. The evals run with MLflow's `mlflow.genai.evaluate`. How they run, with a diagram: [3.6](#36-scenarios-and-evals).
 
 | Check | Checked by | How | Pass threshold (1 run / `--runs 3`) |
 |---|---|---|---|
@@ -734,7 +734,7 @@ flowchart LR
 | `data` | The scenario's question × N runs, each with the scenario's expectations (accepted answers, required tools, judge rubric). |
 | `predict_fn` | Runs the agent graph through the same core function the CLI uses, asking the question **without a namespace** (the agent must find it). No cluster setup. The run's trace is captured. |
 | `scorers` | Four exact checks as our own `@scorer` functions (`diagnosis_correct`, `evidence_exists`, `right_tools`, `actions_safe`) + the two built-in judges (`evidence_supports`, `advice_ok`) ([2.3](#23-definition-of-done-evals)). The fix run: the four exact checks + `remediation_works`. |
-| Pass marks | At the default 1 run, every check must pass. With `--runs N`: `diagnosis_correct` and the two judges in ceil(N × 2/3) runs (2 of 3), and `evidence_exists`, `right_tools` and `actions_safe` in every run. Recorded as `quality_criteria` on the eval run. |
+| Pass marks | `diagnosis_correct` and the two judges in `AGENT_EVAL_PASS_SHARE` (2/3) of the runs, rounded up: 1 of 1 at the default, 2 of 3 with `--runs 3`, 7 of 10 with 10. `evidence_exists`, `right_tools` and `actions_safe` in every run. Recorded as `quality_criteria` on the eval run. |
 | Concurrency | Sequential: runs of the same scenario share a namespace, and share one event loop. Parallel runs (one loop in its own thread, ~3× faster) aren't built. |
 
 - **Fix requests (built in M6):** if a diagnosis run reaches the approval pause, the eval rejects ("agent eval's diagnosis runs reject every fix") and records the request. The exception is the dedicated **fix run** of a scenario with an `expected_fix` (selector), which approves: the only automatic approval, in eval code.
@@ -900,7 +900,7 @@ Run status: `queued → running → awaiting_approval → running → completed 
   "run_id": "…", "thread_id": "…", "user_id": "alice", "trace_id": "…",   // trace_id: the run's MLflow trace, or null
   "question": "The checkout service isn't reachable from other pods. Why?", "namespace": null,  // namespace: as given (-n), or null
   "status": "completed | failed",                       // M8 adds running | awaiting_approval
-  "started_at": "…", "completed_at": "…", "duration_ms": 0,
+  "started_at": "…", "completed_at": "…", "duration_ms": 0,  // the clock starts with the trace: the same as its duration
   "error": null,                                        // why a failed run failed (model API error, bug)
   "diagnosis": {                                        // null until the run completes, and for a failed run
     "status": "fault_found | no_fault | inconclusive",
@@ -954,7 +954,7 @@ Run status: `queued → running → awaiting_approval → running → completed 
 | `agent investigate "<question>" [-n ns] [--user NAME] [--json] [--quiet]` | agent container | Investigates, with live progress on stderr. On a fix request, shows the change + facts, asks y/N on stderr, and resumes; without a terminal on stdin the fix is rejected. Final JSON on stdout (or a summary in a terminal); the trace URL on stderr. |
 | `agent setup` | admin container | Creates the identities and their kubeconfigs, and installs the MLflow tracking server. |
 | `agent scenario up\|down\|list [name]` | admin container | Deploys, removes or lists scenarios. |
-| `agent eval [--scenario name] [--runs N]` | admin container | Runs the evals with `mlflow.genai.evaluate`: 1 run per scenario by default, each check must pass. `--runs N` (e.g. 3, to measure reliability) needs the diagnosis and the judges in ceil(N × 2/3) runs. Exit 0 all passed, 1 a scenario missed, 2 nothing ran. |
+| `agent eval [--scenario name] [--runs N]` | admin container | Runs the evals with `mlflow.genai.evaluate`: 1 run per scenario by default, each check must pass. `--runs N` (e.g. 3, to measure reliability) needs the diagnosis and the judges in `AGENT_EVAL_PASS_SHARE` (2/3) of the runs, rounded up. Exit 0 all passed, 1 a scenario missed, 2 nothing ran. |
 
 - **M8:** `investigate` starts a thread via the API. New commands: `ask <thread> "<message>"`, `show <thread>`, `approve|reject <thread>`.
 - **Always:** the result JSON goes to stdout; live progress, prompts and errors go to stderr.
@@ -1046,7 +1046,8 @@ No `temperature` setting: Sonnet 5.5 rejects non-default sampling values.
 |---|---|---|
 | `AGENT_LOG_LEVEL` | `INFO` | Structured JSON logs. `DEBUG` adds a line per tool call and verify round. |
 | `AGENT_LOG_FILE` | unset | Where the JSON logs go. Unset: stderr, except in an interactive terminal (off there; the progress display shows the same events). |
-| `AGENT_EVAL_RUNS_PER_SCENARIO` / `AGENT_EVAL_PASS_MIN_RUNS` | 1 / 1 | One run per scenario, which must pass (user decision; `--runs 3` measures reliability) |
+| `AGENT_EVAL_RUNS_PER_SCENARIO` | 1 | Runs per scenario (user decision; `--runs 3` measures reliability) |
+| `AGENT_EVAL_PASS_SHARE` | 0.667 (2/3) | The share of the runs, rounded up, in which the diagnosis and both judges must pass: 1 of 1, 2 of 3, 7 of 10 |
 | `AGENT_EVAL_MLFLOW_EXPERIMENT_NAME` | `k8s-agent-evals` | Where eval runs and their traces go |
 | `AGENT_EVAL_RESULTS_DIR` | `eval-results` | The local results files |
 | `MLFLOW_TRACKING_URI` | unset = tracing off | The tracking server's address: `http://localhost:5050` (OrbStack LoadBalancer or port-forward) |
