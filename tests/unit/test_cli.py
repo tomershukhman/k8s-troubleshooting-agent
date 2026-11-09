@@ -168,6 +168,12 @@ def test_control_characters_from_the_cluster_or_a_model_never_reach_the_terminal
     assert shown.count("\ufffd[1A\ufffd[2K✓ approved\ufffd\ufffd31m") == 5
 
 
+def test_a_table_row_with_nothing_under_name_is_previewed_not_a_crash():
+    table = "NAMESPACE     NAME\nshop-orders   orders-1\nkube-system          \n"
+    step = Step(ref="E1", tool="t", args={}, output=table, error=False, latency_ms=1, truncated=0)
+    assert ui.preview(step) == "orders-1, ?  (2 rows)"
+
+
 READER = 'User "system:serviceaccount:k8s-agent:reader"'
 
 

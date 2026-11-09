@@ -17,7 +17,7 @@ import logging
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import cache
@@ -234,11 +234,14 @@ async def _run(
             # Two clocks: the agents' working time before and after a pause shares
             # AGENT_RUN_MAX_SECONDS; the wait for an answer has its own (approval.py).
             t0 = time.monotonic()
-            async with asyncio.timeout(budget):
-                async for part in graph.astream(
-                    command, config, context=context, stream_mode=["tasks", "updates"],
-                    subgraphs=True, version="v2",
-                ):  # fmt: skip
+            modes = ["tasks", "updates"]
+            parts = graph.astream(
+                command, config, context=context, stream_mode=modes, subgraphs=True, version="v2"
+            )
+            # aclosing: an error here (in on_event, say) stops the graph's tasks now, inside the
+            # run's trace, not whenever the suspended stream is collected.
+            async with asyncio.timeout(budget), aclosing(parts):
+                async for part in parts:
                     for event in stream.events(part):
                         on_event(event)
             budget -= time.monotonic() - t0

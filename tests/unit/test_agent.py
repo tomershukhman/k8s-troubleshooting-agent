@@ -12,7 +12,14 @@ from langchain_core.exceptions import ModelRateLimitError
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.serde import jsonplus
 
-from k8s_agent.agent import McpUnavailable, NotStarted, RunStatus, core, investigate
+from k8s_agent.agent import (
+    McpUnavailable,
+    NotStarted,
+    RunStatus,
+    ToolCalled,
+    core,
+    investigate,
+)
 from k8s_agent.agent.graph import system_prompt
 from k8s_agent.config import get_settings
 from k8s_agent.policy import READ_ONLY_TOOLS
@@ -595,6 +602,23 @@ def test_a_model_api_error_is_a_failed_result_and_logged(who, caplog):
         result.run_id,
         result.error,
     )
+
+
+def test_an_error_in_the_progress_callback_fails_the_run_and_stops_the_graph_at_once():
+    def broken(event):
+        if isinstance(event, ToolCalled):
+            raise IndexError("the display broke")
+
+    async def go():
+        model = ScriptedModel(script=[call(LIST), answer(diagnosis("E1"))])
+        record = await investigate("q", settings=get_settings(), model=model,
+                                   critic_model=critic(), remediator_model=remediator(),
+                                   mcp_target=FakeCluster().server, on_event=broken)  # fmt: skip
+        return record, [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+    record, left = asyncio.run(go())
+    assert record.result.error == "unexpected error: IndexError: the display broke"
+    assert left == []  # no graph task still running once the run has returned
 
 
 def test_an_unreachable_mcp_server_stops_the_run_before_any_model_call():

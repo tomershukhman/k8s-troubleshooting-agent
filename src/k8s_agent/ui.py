@@ -113,7 +113,7 @@ def preview(step: Step) -> str:
     header = lines[0]
     if column := re.search(r"(?<!\S)NAME(?!\S)", header):  # a table: list its NAME column
         at = column.start()
-        names = [row[at:].split()[0] for row in lines[1:] if len(row) > at]
+        names = [(row[at:].split() or ["?"])[0] for row in lines[1:] if len(row) > at]
         return f"{', '.join(names)}  ({len(names)} row{'s' * (len(names) != 1)})"
     if header.startswith("# The following events"):
         warnings = sum("Type: Warning" in line for line in lines)
