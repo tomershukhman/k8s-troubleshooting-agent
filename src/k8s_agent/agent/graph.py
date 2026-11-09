@@ -63,7 +63,7 @@ from k8s_agent.agent.records import (
     VerifyRound,
     steps_from_messages,
 )
-from k8s_agent.agent.remediator import Kube, build_remediator, fix_request, labels, remediation
+from k8s_agent.agent.remediator import Kube, build_remediator, fix_request, labels, read_remediation
 from k8s_agent.config import Settings
 from k8s_agent.schemas import (
     CATEGORY_HELP,
@@ -322,7 +322,7 @@ def remediate_node(remediator: Any) -> Callable:
         on."""
         fix = state["final"].proposed_fix
         values, stopped = await run_to_end(remediator, {"messages": [fix_request(fix)]})
-        done = remediation(
+        done = read_remediation(
             fix, values.get("messages", []), values.get("structured_response"), stopped
         )
         if done.outcome is not FixOutcome.applied:

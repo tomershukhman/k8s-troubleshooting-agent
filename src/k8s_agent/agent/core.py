@@ -283,7 +283,9 @@ async def _run(
     return outcome, values, asked
 
 
-def _remediation(values: dict[str, Any], asked: Asked, stopped: str | None) -> Remediation | None:
+def _complete_remediation(
+    values: dict[str, Any], asked: Asked, stopped: str | None
+) -> Remediation | None:
     """The fix as the graph recorded it, with what the person was shown and decided. A run
     stopped mid-fix (`stopped`) says so."""
     done, fix = values.get("remediation"), values["final"].proposed_fix if stopped else None
@@ -391,7 +393,7 @@ async def investigate(
             build = lambda: build_graph(model, tools, settings, remediator_llm, kube)  # noqa: E731
             outcome, values, asked = await _run(build, inputs, config, context, on_event, gate)
 
-        remediation = _remediation(values, asked, outcome.fix_stopped)
+        remediation = _complete_remediation(values, asked, outcome.fix_stopped)
         steps = steps_from_messages(values.get("messages", []))
         result = RunResult(
             run_id=run_id,

@@ -299,7 +299,7 @@ def fix_request(fix: ProposedFix) -> HumanMessage:
     )
 
 
-def remediation(
+def read_remediation(
     fix: ProposedFix,
     messages: list[BaseMessage],
     answer: RemediatorAnswer | None,
