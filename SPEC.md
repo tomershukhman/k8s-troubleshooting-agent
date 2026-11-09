@@ -694,7 +694,7 @@ Each role has its own short prompt file. Tool output is untrusted data in all th
 
 **Critic**
 - judge each finding against the tool output it cites, on its own, with a reason
-- check that the root cause and the recommended action state no fact that no cited output shows (linking cited facts, and advice with examples of what to try, are fine)
+- check that the root cause and the recommended action state no fact that no cited output shows. A fact is a claim about the cluster's current state; a recommendation of what to change or try is not one, even when it names a specific value. Linking cited facts is fine.
 - check that `proposed_fix` is backed by the evidence
 - return founded or not founded, with feedback for the investigator
 

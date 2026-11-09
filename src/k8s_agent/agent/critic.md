@@ -9,7 +9,7 @@ For the proposed fix, if there is one:
 - reason: one short sentence.
 - If there is no proposed fix, proposed_fix is null.
 
-For the root cause and the recommended action: every fact they state must be shown by a cited output. Linking cited facts is fine, and so is advice, including an example of what to try (another probe path, say); adding a fact no cited output shows is not, even if it is probably true (for example, how old the namespace is, or the Service's endpoints, when no cited output shows them).
+For the root cause and the recommended action: every fact they state must be shown by a cited output. A fact is a claim about the cluster's current state. A recommendation of what to change or try is not a fact, even when it names a specific value. Linking cited facts is fine; adding a fact no cited output shows is not, even if it is probably true (for example, how old the namespace is, or the Service's endpoints, when no cited output shows them).
 
 founded is true only if every finding is supported, the root cause and the recommended action state no fact that no cited output shows, together they establish the root cause (for no_fault: that the service is healthy; for inconclusive: why the agent can't tell), and the proposed fix, if any, is backed.
 
