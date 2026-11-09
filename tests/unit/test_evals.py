@@ -260,16 +260,32 @@ def test_only_the_fix_run_approves_a_fix(monkeypatch):
     assert [a.approved for a in answers] == [False, True]
 
 
-def test_the_fix_run_is_the_scenarios_question_marked_for_approval_and_must_pass():
+def test_the_fix_run_is_the_scenarios_question_marked_for_approval_and_must_pass(monkeypatch):
+    asked = []
+
+    def evaluate(name, data, checks, marks, _settings, _predict):  # what the fix run asks for
+        asked.append((name, data, checks, marks))
+        return evals.ScenarioResult(name, "f", {}, [], len(data), [])
+
+    monkeypatch.setattr(evals, "_evaluate", evaluate)
     scn = get_scenario(get_settings().scenarios_dir, "selector")
-    marks = {f"{c.name}/min": 1.0 for c in evals.FIX_CHECKS}
-    rules = parse_quality_criteria(list(evals.FIX_CHECKS), evals.criteria_line(marks))
-    assert {r.metric_key for r in rules} == set(marks)
-    assert "remediation_works/min" in marks and "advice_ok/min" not in marks  # no judges
+    evals.evaluate_fix(scn, get_settings(), SimpleNamespace())
+    [(name, [row], checks, marks)] = asked  # one run
+    assert name == "selector fix"
+    assert row["inputs"] == {"question": scn.spec.question, "approve_fix": True}
+    assert row["expectations"]["expected_fix"]["selector"] == {"app": "checkout"}
+    names = [c.name for c in checks]  # the exact checks, the fix's own included; no judges
+    assert names == [
+        "diagnosis_correct",
+        "evidence_exists",
+        "right_tools",
+        "actions_safe",
+        "remediation_works",
+    ]
+    assert marks == {f"{n}/min": 1.0 for n in names}  # each must pass
     passed = evals.ScenarioResult("selector", "r", {}, [], 3, [])
     passed.fix = evals.ScenarioResult("selector fix", "f", {}, ["remediation_works: 0 of 1"], 1, [])
     assert not passed.passed  # the scenario passes only if its fix run does
-    assert evals.expectations(scn)["expected_fix"]["selector"] == {"app": "checkout"}
 
 
 # --- the pass marks -------------------------------------------------------------------------
