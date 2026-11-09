@@ -145,7 +145,9 @@ def test_each_tool_calls_arguments_and_output(selector):
     for step in result["evidence_steps"]:
         span = by_ref[step["ref"]]
         assert span.inputs == step["args"]
-        assert span.outputs["content"][0]["text"].strip()  # the server's raw output
+        # the server's raw output; empty when the call found nothing (e.g. no NetworkPolicies),
+        # which is still evidence
+        assert "text" in span.outputs["content"][0]
         # and what the model saw: cleaned, capped and tagged, on the enclosing tools step
         seen = parent(trace, span).outputs["messages"][0]["content"]
         assert seen.startswith(f"[{step['ref']}] ")

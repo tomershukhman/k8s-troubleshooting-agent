@@ -362,7 +362,6 @@ async def investigate(
     run_id, thread_id = str(uuid4()), thread_id or str(uuid4())
     user_id = user_id or settings.effective_user_id
     log = run_log(run_id=run_id, thread_id=thread_id, user_id=user_id)
-    started_at, t0 = datetime.now(UTC), time.monotonic()
     log.info("run_started", extra={"question": question, "namespace": namespace})
     inputs = {"question": question, "namespace": namespace}
     # The whole run is one trace: its duration is the run's, and a run that can't start (no
@@ -374,6 +373,9 @@ async def investigate(
         session=thread_id,
         metadata={"run_id": run_id, **settings.model_settings},
     ) as span:
+        # The run's clock starts with its trace, so both give the same duration (MLflow takes
+        # a moment to set up the first trace in a process, before the span starts).
+        started_at, t0 = datetime.now(UTC), time.monotonic()
         try:
             model = model or make_model(settings, settings.model)
             critic_llm = critic_model or make_model(settings, settings.effective_critic_model)
