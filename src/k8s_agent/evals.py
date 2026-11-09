@@ -342,10 +342,11 @@ def dataset(scn: Scenario, runs: int) -> list[dict[str, Any]]:
     return [{"inputs": {"question": scn.spec.question}, "expectations": expectations(scn)}] * runs
 
 
-def answer(record: RunRecord) -> dict[str, Any]:
-    """What the scorers and judges read: the agent's answer and each cited tool call with its
-    full output (the result JSON carries excerpts). Not the critic's verdicts: the judges are
-    an independent check. `forced_reason`: why code replaced the agent's answer, if it did."""
+def outputs_of(record: RunRecord) -> dict[str, Any]:
+    """The run's `outputs`, what the scorers and judges read: the agent's answer and each cited
+    tool call with its full output (the result JSON carries excerpts). Not the critic's
+    verdicts: the judges are an independent check. `forced_reason`: why code replaced the
+    agent's answer, if it did."""
     r, by_ref = record.result, {s.ref: s for s in record.steps}
     return {
         "status": r.status.value,
@@ -370,7 +371,7 @@ async def fix_run_answer(_request: ApprovalRequest, *_: Any) -> Answer:
     return Answer(True, "agent eval's fix run approves its fix")
 
 
-class Agent:
+class PredictFn:
     """The `predict_fn`: one investigation per call, with `investigate()`'s keyword arguments
     (tests pass fakes). Every run shares one event loop, because langchain-anthropic's pooled
     connections belong to the loop that opened them; MLflow's own async support would start a
@@ -393,7 +394,7 @@ class Agent:
             self.not_started = e
             raise
         self.records[record.result.trace_id] = record
-        return answer(record)
+        return outputs_of(record)
 
     def close(self) -> None:
         self.loop.close()
@@ -429,25 +430,25 @@ def configure(settings: Settings) -> None:
     mlflow.anthropic.autolog(disable=True)
 
 
-def evaluate(scn: Scenario, settings: Settings, agent: Agent) -> ScenarioResult:
+def evaluate(scn: Scenario, settings: Settings, predict: PredictFn) -> ScenarioResult:
     """The scenario's diagnosis runs: one `mlflow.genai.evaluate` in its own MLflow run. Raises
     NotStarted if the agent couldn't run at all (e.g. no MCP server)."""
     data = dataset(scn, settings.eval_runs_per_scenario)
-    return _evaluate(scn.name, data, scorers(settings), criteria(settings), settings, agent)
+    return _evaluate(scn.name, data, scorers(settings), criteria(settings), settings, predict)
 
 
 # The fix run's checks: exact ones only (the judges grade the diagnosis runs), each must pass.
 FIX_CHECKS = (diagnosis_correct, evidence_exists, right_tools, actions_safe, remediation_works)
 
 
-def evaluate_fix(scn: Scenario, settings: Settings, agent: Agent) -> ScenarioResult:
+def evaluate_fix(scn: Scenario, settings: Settings, predict: PredictFn) -> ScenarioResult:
     """The scenario's fix run, in its own MLflow run: the agent's fix request is approved (the
     only automatic approval) and must be applied and verified. It changes the cluster: the
     caller rebuilds the scenario after it."""
     inputs = {"question": scn.spec.question, "approve_fix": True}
     data = [{"inputs": inputs, "expectations": expectations(scn)}]
     marks = {f"{check.name}/min": 1.0 for check in FIX_CHECKS}
-    return _evaluate(f"{scn.name} fix", data, list(FIX_CHECKS), marks, settings, agent)
+    return _evaluate(f"{scn.name} fix", data, list(FIX_CHECKS), marks, settings, predict)
 
 
 def _evaluate(
@@ -456,7 +457,7 @@ def _evaluate(
     checks: list[Any],
     marks: dict[str, float],
     settings: Settings,
-    agent: Agent,
+    predict: PredictFn,
 ) -> ScenarioResult:
     runs = len(data)
     with mlflow.start_run(run_name=name) as run:
@@ -468,10 +469,10 @@ def _evaluate(
         if commit := get_git_commit(os.getcwd()):
             mlflow.set_tag(MLFLOW_GIT_COMMIT, commit)
         result = mlflow.genai.evaluate(
-            data=data, predict_fn=agent, scorers=checks, quality_criteria=criteria_line(marks)
+            data=data, predict_fn=predict, scorers=checks, quality_criteria=criteria_line(marks)
         )
-    if agent.not_started is not None:
-        raise agent.not_started
+    if predict.not_started is not None:
+        raise predict.not_started
     ids = [] if result.result_df is None else list(result.result_df["trace_id"])
     traces = [mlflow.get_trace(trace_id) for trace_id in ids]  # with the scores logged on them
     found = verdicts(result, [metric.rsplit("/", 1)[0] for metric in marks])
@@ -481,7 +482,7 @@ def _evaluate(
         metrics={k: float(v) for k, v in result.metrics.items()},
         failures=missed(found, marks, runs),  # a run without a trace has no verdicts: failed
         planned=runs,
-        runs=[per_run(t, agent.records.get(t.info.trace_id)) for t in traces if t is not None],
+        runs=[per_run(t, predict.records.get(t.info.trace_id)) for t in traces if t is not None],
         passes={check: got.count(True) for check, got in found.items()},
     )
 
@@ -531,25 +532,25 @@ class Suite:
     def run(self, found: Iterable[Scenario]) -> list[ScenarioResult]:
         """Raises what stops it: NotStarted (the agent couldn't run), or a cluster or scenario
         error from a rebuild."""
-        s, agent = self.settings, Agent(self.settings)
+        s, predict = self.settings, PredictFn(self.settings)
         try:
             for scn in found:
                 self.up(scn)
                 self.progress(f"{scn.name}: {s.eval_runs_per_scenario} runs, then scoring")
-                result = evaluate(scn, s, agent)
+                result = evaluate(scn, s, predict)
                 self.scored = True
                 self.verdict(result)
                 if scn.spec.expected_fix is not None:
                     self.progress(f"{scn.name}: the fix run (it approves the fix), then a rebuild")
                     try:
-                        result.fix = evaluate_fix(scn, s, agent)
+                        result.fix = evaluate_fix(scn, s, predict)
                     finally:
                         self.up(scn)  # the fix changed the cluster: back to the scenario's fault
                     self.verdict(result.fix)
                 self.results.append(result)
                 self.save()
         finally:
-            agent.close()
+            predict.close()
         return self.results
 
     def up(self, scn: Scenario) -> None:

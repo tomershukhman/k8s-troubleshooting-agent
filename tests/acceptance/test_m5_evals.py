@@ -98,11 +98,11 @@ def test_a_fake_agent_that_always_answers_no_fault_fails(judges, env):
     env(eval_runs_per_scenario="1", eval_pass_min_runs="1")  # one run is enough to fail
     s = get_settings()
     scn = get_scenario(s.scenarios_dir, "crashloop")
-    agent = evals.Agent(s, model=ScriptedModel(then=always_no_fault), critic_model=critic())
+    predict = evals.PredictFn(s, model=ScriptedModel(then=always_no_fault), critic_model=critic())
     try:
-        got = evals.evaluate(scn, s, agent)
+        got = evals.evaluate(scn, s, predict)
     finally:
-        agent.close()
+        predict.close()
     print(f"\n  failures: {got.failures}")
     [run] = got.runs
     assert run["record"]["result"]["diagnosis"]["status"] == "no_fault"  # it ran, and was wrong

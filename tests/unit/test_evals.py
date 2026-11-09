@@ -252,11 +252,11 @@ def test_only_the_fix_run_approves_a_fix(monkeypatch):
         raise NotStarted("stop here")
 
     monkeypatch.setattr(evals, "investigate", investigate)
-    agent = evals.Agent(get_settings())
+    predict = evals.PredictFn(get_settings())
     for approve_fix in (False, True):
         with pytest.raises(NotStarted):
-            agent("q", approve_fix=approve_fix)
-    agent.close()
+            predict("q", approve_fix=approve_fix)
+    predict.close()
     assert [a.approved for a in answers] == [False, True]
 
 
@@ -385,7 +385,7 @@ def test_the_judges_read_the_answer_and_each_cited_call_in_full_not_the_critics_
         ),
         steps=steps,
     )  # fmt: skip
-    out = evals.answer(record)
+    out = evals.outputs_of(record)
     assert set(out) == {
         "status",
         "error",
@@ -443,7 +443,7 @@ def eval_run(monkeypatch, fail: str):
         if fail == f"{name} {steps[name]}":
             raise error
 
-    def evaluate(scn, _settings, _agent):  # noqa: ANN001
+    def evaluate(scn, _settings, _predict):  # noqa: ANN001
         step("evaluate", McpUnavailable("cannot use the MCP server"))
         return evals.ScenarioResult(scn.name, "run", {}, [], 1, [])
 
@@ -452,7 +452,7 @@ def eval_run(monkeypatch, fail: str):
 
     monkeypatch.setattr(tracing, "enable", lambda _s: tracing.Tracing("http://mlflow", "1"))
     monkeypatch.setattr(evals, "configure", lambda _s: None)
-    monkeypatch.setattr(evals, "Agent", lambda _s: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(evals, "PredictFn", lambda _s: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(evals, "evaluate", evaluate)
     monkeypatch.setattr(evals, "evaluate_fix", evaluate)
     monkeypatch.setattr(scenarios, "up", up)
