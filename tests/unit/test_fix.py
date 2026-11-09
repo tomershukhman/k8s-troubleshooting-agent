@@ -317,7 +317,8 @@ def test_only_the_remediator_holds_the_write_tool():
                     critic_model=judge, remediator_model=rem, mcp_target=FakeCluster().server,
                     remediator_kube=FakeServices().kube)
     )  # fmt: skip
-    assert all(set(tools) == READ_ONLY_TOOLS for tools in model.bound_tools)  # recheck included
+    # every binding, the recheck's included: exactly the read tools (an empty list fails too)
+    assert {frozenset(tools) for tools in model.bound_tools} == {READ_ONLY_TOOLS}
     assert judge.bound_tools == []
     assert {frozenset(t) for t in rem.bound_tools} == {REMEDIATOR_READ_TOOLS | {FIX_TOOL}}
 

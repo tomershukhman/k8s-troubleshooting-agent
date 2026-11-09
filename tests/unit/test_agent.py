@@ -96,12 +96,13 @@ def test_the_investigator_uses_native_structured_output_and_only_read_tools():
     cluster = FakeCluster()  # also offers pods_delete
     model = ScriptedModel(script=[call(("pods_delete", LOG)), answer(unsure("E1"))])
     record = run(model, cluster)
+    assert model.bind_kwargs  # the loop below checks something
     for kwargs in model.bind_kwargs:
         # ProviderStrategy: the schema goes to the provider as its response format. A
         # ToolStrategy would add an answer tool and force tool use, which Sonnet 5.5 rejects.
         assert kwargs["response_format"]["type"] == "json_schema"
         assert "tool_choice" not in kwargs
-    assert all(set(tools) == READ_ONLY_TOOLS for tools in model.bound_tools)
+    assert {frozenset(tools) for tools in model.bound_tools} == {READ_ONLY_TOOLS}
     assert cluster.calls == []  # the model asked for pods_delete; nothing ran
     assert seen(model, 1)[0].status == "error" and record.steps[0].error
 
