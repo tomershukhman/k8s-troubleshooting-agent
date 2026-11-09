@@ -254,7 +254,10 @@ def test_with_the_tracking_server_stopped_investigate_works_with_one_warning(
     uri, tracking_server_stopped
 ):
     healthy = get_scenario(get_settings().scenarios_dir, "healthy").spec.question
-    result, stderr, seconds = investigate_cli(healthy)
+    # One model call is enough to show tracing degrades cleanly; the run then stops at that
+    # limit, an inconclusive, still completed.
+    capped = {"AGENT_MAX_MODEL_CALLS": "1", "AGENT_RUN_MAX_MODEL_CALLS": "1"}
+    result, stderr, seconds = investigate_cli(healthy, env=capped)
     assert result["status"] == "completed" and result["trace_id"] is None
     [warning] = [line for line in stderr.splitlines() if line.startswith("warning:")]
     assert warning.startswith(f"warning: cannot use the MLflow tracking server at {uri}: ")
