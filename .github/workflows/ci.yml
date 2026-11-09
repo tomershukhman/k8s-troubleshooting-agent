@@ -105,12 +105,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-  # The check branch protection requires: the published image, both platforms.
+  # The check branch protection requires (the builder's checks are named publish / …). It runs
+  # even when the builder failed (a skipped check counts as passed), and fails then.
   publish-image:
     needs: publish
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: The builder published the image
+        run: test "${{ needs.publish.result }}" = success
       - run: docker buildx imagetools inspect "$IMAGE:$GITHUB_SHA"
 
   # The README's own docker compose commands, with the real model, on a throwaway kind cluster.
