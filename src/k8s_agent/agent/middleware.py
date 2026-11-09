@@ -1,6 +1,10 @@
-"""The investigator's tool-result middleware (SPEC §3.3). Each result is stripped of noise,
-capped, and tagged `[E3]`; the evidence record (ID, effective arguments, timing) goes into the
-ToolMessage's `artifact`, so the messages are the record of every step."""
+"""What the agents' middleware needs (SPEC §3.3):
+- `RunContext`, the per-run dependencies every node and middleware gets;
+- the tool-error policy for LangChain's ToolRetryMiddleware and ToolErrorMiddleware: which
+  failed calls are retried, and what the model sees when a call fails;
+- `EvidenceMiddleware`, the investigator's: each tool result is stripped of noise, capped, and
+  tagged `[E3]`; the evidence record (ID, effective arguments, timing) goes into the
+  ToolMessage's `artifact`, so the messages are the record of every step."""
 
 import logging
 import time

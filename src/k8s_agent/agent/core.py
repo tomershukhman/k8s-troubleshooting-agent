@@ -1,4 +1,4 @@
-"""`investigate()`: the one entry point the CLI (and later the evals and the API) call.
+"""`investigate()`: the one entry point the CLI and the evals call.
 
 It runs the investigation graph (graph.py) on its own thread and never raises for a run that
 started; every outcome becomes a `RunRecord`:

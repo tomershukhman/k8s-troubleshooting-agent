@@ -1,5 +1,5 @@
-"""The agent: an investigator, a critic and a remediator in one graph. The CLI, the evals and the
-API call `investigate()`; nothing here knows about any of them."""
+"""The agent: an investigator, a critic and a remediator in one graph. The CLI and the evals call
+`investigate()`; nothing here knows about either."""
 
 from k8s_agent.agent.approval import Approver
 from k8s_agent.agent.core import McpUnavailable, NotStarted, investigate
