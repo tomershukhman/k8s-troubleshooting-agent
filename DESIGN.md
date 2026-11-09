@@ -456,6 +456,11 @@ The last stage pulls the image just published, by its commit, and runs the full 
 - **Why Sonnet 5.5 at high effort:** strong at tool use, cheaper and faster than Opus for a loop of many calls. At medium effort it mostly skipped thinking, so traces lost the reasoning the brief asks for. The judges use Opus 5.5, so the system isn't graded by itself.
 - **Trade-off:** a few seconds more per run.
 
+**Prompts: one folder, and every rule tested**
+- **Why:** everything a model reads is in `prompts/`, one Markdown file per prompt, named for its agent, so a prompt change is a diff you can review. Text that only repeated the schema or a later message was cut: the investigator's prompt went from 638 to 480 words.
+- **Tested, not assumed:** nine questions were asked before and after each cut. Five were never used for tuning: a paraphrase, a vague question, a service that doesn't exist, and two with a wrong premise. Three cuts made answers worse and were reverted. Without the no-fault checklist, the agent called a broken Service healthy. With a vaguer rule for a missing service, the agent and the critic spent two rounds on it. With a neutral worked example for "one finding per result", first drafts needed a second round, where the selector-and-labels example avoids it.
+- **Trade-off:** that worked example resembles the selector scenario. It stays because comparing a selector with pod labels is the comparison a Service diagnosis makes most often.
+
 **CI grades the published image**
 - **Why:** only running the agent tests the agent, and grading the published image tests what ships.
 - **Rejected:** re-scoring saved answers (tests only the scoring code); evals on every push to every branch (costly, and answers vary).
@@ -490,7 +495,7 @@ Where each part lives, in `src/k8s_agent/`:
 | `agent/investigator.py`, `critic.py`, `remediator.py` | The three roles; the remediator's tools and the fix |
 | `agent/approval.py` | The gate between the pause and the resume |
 | `agent/middleware.py`, `tool_output.py` | Evidence IDs, retries, and what a tool result goes through |
-| `agent/prompt.md`, `critic.md`, `remediator.md` | The three prompts |
+| `prompts/` | Every prompt a model reads, one Markdown file each, named for its agent (`investigator_system.md`, `critic_system.md`, `remediator_system.md`, `judge_evidence.md`, …) |
 | `schemas.py`, `agent/records.py` | The answer schemas; the result and run records |
 | `kube.py`, `access.py` | The Kubernetes clients; `agent setup` |
 | `scenarios.py`, `evals.py` | The scenarios; the evals |

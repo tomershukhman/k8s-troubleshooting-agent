@@ -37,8 +37,7 @@ class FaultCategory(StrEnum):
     other = "other"
 
 
-# One line each, shared by the system prompt and the schema, so the model and the evals use
-# the same meaning.
+# One line each, for the investigator's system prompt.
 CATEGORY_DEFINITIONS = {
     "image_pull": "the container image can't be pulled (wrong name or tag, registry access)",
     "crash_on_start": "the container exits on start for a reason other than its configuration "
@@ -58,8 +57,6 @@ CATEGORY_DEFINITIONS = {
     "other": "a root cause none of the categories above describes",
 }
 CATEGORY_HELP = "\n".join(f"- {c}: {d}" for c, d in CATEGORY_DEFINITIONS.items())
-# The schema's description of the enum (Pydantic takes it from the docstring).
-FaultCategory.__doc__ = "Root cause, not symptom:\n" + CATEGORY_HELP
 
 
 class AffectedResource(Strict):
@@ -144,10 +141,7 @@ class FindingVerdict(Strict):
 
 
 class FixVerdict(Strict):
-    backed: bool = Field(
-        description="Do the cited outputs show the new selector matches the pods it should "
-        "select, and that changing it fixes the root cause?"
-    )
+    backed: bool
     reason: str
 
 
@@ -156,19 +150,15 @@ class CriticVerdict(Strict):
 
     findings: list[FindingVerdict] = Field(description="One entry per finding, same order")
     proposed_fix: FixVerdict | None = Field(description="null when the draft proposes no fix")
-    founded: bool = Field(
-        description="True only if every finding is supported, the root cause and the action "
-        "state no fact that no cited output shows, together the findings establish the "
-        "conclusion, and the proposed fix, if any, is backed"
-    )
-    feedback: str = Field(
-        description="When not founded: what is wrong and what evidence would settle it. "
-        "When founded: empty"
-    )
+    founded: bool
+    feedback: str = Field(description="Empty when founded")
 
 
 class RemediatorAnswer(Strict):
     """The remediator's final answer: after its fix request, or instead of one. Whether it
     requested the fix is in its tool calls; this says why it didn't, or what happened."""
 
-    reason: str = Field(description="Why you declined; otherwise what the fix tool reported")
+    reason: str = Field(
+        description="Why you declined; otherwise what the fix tool reported, or that the "
+        "request was rejected"
+    )

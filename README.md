@@ -313,7 +313,8 @@ scenarios/<folder>/   manifests/*.yaml + scenario.yaml, one folder per scenario
 deploy/rbac.yaml      the agent's identities
 mcp/config.toml       the MCP server's configuration (read-only, tool allowlist, Secrets denied)
 src/k8s_agent/        the `agent` CLI, settings, scenarios, setup, evals
-  agent/              the LangGraph workflow, critic, remediator, approval gate, the three prompts
+  agent/              the LangGraph workflow, critic, remediator, approval gate
+  prompts/            every prompt a model reads, one Markdown file each, named for its agent
 tests/unit/           fast tests, no cluster
 tests/acceptance/     tests against a real cluster, one file per area
 ```

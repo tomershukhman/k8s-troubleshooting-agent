@@ -4,7 +4,6 @@ and the middleware that tags each tool result as evidence, retries failed calls,
 the per-round and run-wide limits. The graph (graph.py) adds it as its `investigate` node."""
 
 import textwrap
-from importlib import resources
 from typing import Any
 
 from langchain.agents import create_agent
@@ -24,6 +23,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
+from k8s_agent import prompts
 from k8s_agent.agent.middleware import (
     EvidenceMiddleware,
     RunContext,
@@ -40,15 +40,10 @@ type Investigator = CompiledStateGraph[
 
 
 def system_prompt(settings: Settings) -> str:
-    return (
-        resources.files("k8s_agent.agent")
-        .joinpath("prompt.md")
-        .read_text()
-        .format(
-            categories=textwrap.indent(CATEGORY_HELP, "  "),
-            max_tool_calls=settings.max_tool_calls,
-            remediation_namespaces=", ".join(settings.remediation_namespaces),
-        )
+    return prompts.load("investigator_system").format(
+        categories=textwrap.indent(CATEGORY_HELP, "  "),
+        max_tool_calls=settings.max_tool_calls,
+        remediation_namespaces=", ".join(settings.remediation_namespaces),
     )
 
 

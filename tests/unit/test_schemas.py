@@ -4,7 +4,7 @@
 import pytest
 from pydantic import ValidationError
 
-from k8s_agent.schemas import CATEGORY_DEFINITIONS, Diagnosis, ProposedFix
+from k8s_agent.schemas import CATEGORY_DEFINITIONS, Diagnosis, FaultCategory, ProposedFix
 from tests.fakes import diagnosis, selector_fix
 
 
@@ -33,6 +33,5 @@ def test_proposed_fix_validates_its_shape(fix):
         ProposedFix.model_validate(fix)
 
 
-def test_every_category_definition_is_in_the_schema():
-    description = Diagnosis.model_json_schema()["$defs"]["FaultCategory"]["description"]
-    assert all(f"- {c}: {d}" in description for c, d in CATEGORY_DEFINITIONS.items())
+def test_every_category_has_a_definition_for_the_system_prompt():
+    assert set(CATEGORY_DEFINITIONS) == {c.value for c in FaultCategory}
