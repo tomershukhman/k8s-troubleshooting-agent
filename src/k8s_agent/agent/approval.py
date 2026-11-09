@@ -62,7 +62,9 @@ def read_facts(load_kube: Callable[[], Kube], args: FixArgs) -> Facts:
     )
 
 
-def why_differs(args: FixArgs, fix: ProposedFix) -> str | None:
+def why_differs(args: FixArgs, fix: ProposedFix | None) -> str | None:
+    if fix is None:  # the graph sends only a proposed fix to the remediator
+        return "no fix was proposed"
     if (args.namespace, args.service, args.selector) == (
         fix.namespace,
         fix.service,

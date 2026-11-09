@@ -215,6 +215,18 @@ def _stop_reason(e: Exception, s: Settings) -> str | None:
     return None
 
 
+def _ended_by(e: Exception, context: RunContext) -> Outcome:
+    """How a run that raised `e` ended: a stop (`_stop_reason`) gives a forced inconclusive,
+    anything else is a failure. Called while `e` is handled, so the log gets its traceback."""
+    if reason := _stop_reason(e, context.settings):
+        diagnosis = forced_inconclusive(reason)
+        return Outcome(RunStatus.completed, diagnosis=diagnosis, forced_reason=reason)
+    if isinstance(e, ModelError):
+        return Outcome(RunStatus.failed, error=f"model API error: {type(e).__name__}: {e}")
+    context.log.exception("run_crashed")
+    return Outcome(RunStatus.failed, error=f"unexpected error: {type(e).__name__}: {e}")
+
+
 async def _run(
     build: Callable[[], Any],
     inputs: dict[str, Any],
@@ -225,11 +237,14 @@ async def _run(
 ) -> tuple[Outcome, dict[str, Any], Asked]:
     """Build the graph and run it to the end, deciding each approval pause on the way: how it
     ended, its final state, and what was asked and decided."""
-    graph = outcome = None
+    outcome: Outcome | None = None
     asked: Asked = []
-    stream, command, budget = _Stream(), inputs, context.settings.run_max_seconds
     try:
         graph = build()
+    except Exception as e:  # nothing ran
+        return _ended_by(e, context), {}, asked
+    stream, command, budget = _Stream(), inputs, context.settings.run_max_seconds
+    try:
         while True:
             # Two clocks: the agents' working time before and after a pause shares
             # AGENT_RUN_MAX_SECONDS; the wait for an answer has its own (approval.py).
@@ -259,16 +274,7 @@ async def _run(
                 answers[pause.id] = approval.resume(decision)
             command = Command(resume=answers)  # the same thread: the graph goes on where it paused
     except Exception as e:
-        if reason := _stop_reason(e, context.settings):
-            diagnosis = forced_inconclusive(reason)
-            outcome = Outcome(RunStatus.completed, diagnosis=diagnosis, forced_reason=reason)
-        elif isinstance(e, ModelError):
-            outcome = Outcome(RunStatus.failed, error=f"model API error: {type(e).__name__}: {e}")
-        else:
-            context.log.exception("run_crashed")
-            outcome = Outcome(RunStatus.failed, error=f"unexpected error: {type(e).__name__}: {e}")
-    if graph is None:
-        return outcome, {}, asked
+        outcome = _ended_by(e, context)
     # A run cut off mid-round has that round's messages only in the investigator's own
     # checkpoint, so merge them in.
     snapshot = await graph.aget_state(config, subgraphs=True)

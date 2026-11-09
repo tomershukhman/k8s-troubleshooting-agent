@@ -264,7 +264,7 @@ async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext
         feedback=feedback,
     )
     ctx.log.debug("verify_round", extra=round_.model_dump(exclude={"findings"}))
-    if founded:
+    if feedback is None:  # founded (an unfounded round always says why)
         return Command(goto="result", update={"rounds": [round_]})
     if number < ctx.settings.max_verify_rounds:
         update = {"messages": [feedback_message(feedback)], "structured_response": None}
@@ -289,7 +289,9 @@ def forced_inconclusive(reason: str) -> Diagnosis:
 def final_diagnosis(state: InvestigationState) -> Diagnosis:
     if reason := state.get("forced_reason"):
         return forced_inconclusive(reason)
-    draft = state["structured_response"]
+    draft = state.get("structured_response")
+    if draft is None:  # verify_evidence gives a forced reason when there's no draft
+        raise RuntimeError("the result has neither a draft nor a forced reason")
     steps = steps_from_messages(state["messages"])
     if draft.status is DiagnosisStatus.inconclusive and any(
         s.error and tool_output.REFUSED.search(s.output) for s in steps
@@ -345,7 +347,10 @@ def remediate_node(remediator: Remediator) -> Callable[..., Awaitable[Command]]:
         fix goes back to the investigator for one more round, the recheck: it continues its
         own conversation, so its evidence IDs and its run-wide budget (`thread_limit`) carry
         on."""
-        fix = state["final"].proposed_fix
+        final = state.get("final")
+        fix = final.proposed_fix if final else None
+        if fix is None:  # `result` routes here only with a fix (fixable)
+            raise RuntimeError("remediate needs the final diagnosis's proposed fix")
         values, stopped = await run_to_end(remediator, {"messages": [fix_request(fix)]})
         done = read_remediation(
             fix, values.get("messages", []), values.get("structured_response"), stopped
@@ -392,13 +397,15 @@ def why_unverified(r: Remediation, check: PostFixCheck | None, fresh: list[Step]
 def recheck(state: InvestigationState) -> dict[str, Any]:
     """The recheck round's answer: its post_fix_check, citing only the tool calls made since the
     recheck was asked (the last message the investigator was sent). No critic round."""
-    fix, messages = state["remediation"], state["messages"]
+    fix, final, messages = state.get("remediation"), state.get("final"), state["messages"]
+    if fix is None or final is None:  # after_investigate routes here only after a fix
+        raise RuntimeError("recheck needs the final diagnosis and the fix")
     asked = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
     answer = state.get("structured_response")
     check = answer.post_fix_check if answer else None
     note = why_unverified(fix, check, steps_from_messages(messages[asked:]))
     return {
-        "final": state["final"].model_copy(update={"post_fix_check": check}),
+        "final": final.model_copy(update={"post_fix_check": check}),
         "remediation": fix.model_copy(update={"verified": note is None, "recheck_note": note}),
     }
 

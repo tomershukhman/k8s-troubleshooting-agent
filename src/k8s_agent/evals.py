@@ -124,8 +124,11 @@ def diagnosis_correct(outputs: dict[str, Any], expectations: dict[str, Any]) -> 
     res, namespace = d["affected_resource"], expectations["namespace"]
     accepted = {(r["kind"], r["name"]) for r in expectations["resources"]}
     if accepted:  # a fault: one of the accepted resources, in the scenario's namespace
-        named = res is not None and (res["kind"], res["name"]) in accepted
-        if not named or res["namespace"] != namespace:
+        if (
+            res is None
+            or (res["kind"], res["name"]) not in accepted
+            or res["namespace"] != namespace
+        ):
             problems.append(
                 f"affected resource {res}, expected one of {sorted(accepted)} in {namespace}"
             )
@@ -182,8 +185,9 @@ def right_tools(trace: Any, expectations: dict[str, Any]) -> Feedback:
     return _verdict([f"never called {m} in {namespace}" for m in missing], "looked at all of them")
 
 
-def _fix(namespace: str, service: str, labels: Any) -> dict[str, Any]:
-    """A fix, comparable: its selector as sorted label pairs (a duplicate key stays visible)."""
+def _fix(namespace: str | None, service: str | None, labels: Any) -> dict[str, Any]:
+    """A fix, comparable: its selector as sorted label pairs (a duplicate key stays visible).
+    None: a fix call that left the field out."""
     return {"namespace": namespace, "service": service, "selector": sorted(labels)}
 
 
@@ -240,16 +244,16 @@ def retrying(judge: Any, attempts: int) -> Any:
 
     @scorer(name=judge.name)
     def ask(inputs: Any, outputs: Any, expectations: dict[str, Any]) -> Feedback:
-        for attempt in range(1, attempts + 1):
+        for _ in range(attempts - 1):
             try:
                 feedback = judge(inputs=inputs, outputs=outputs, expectations=expectations)
             except Exception:
-                if attempt == attempts:
-                    raise  # MLflow records the error; the run counts as failed
                 continue
             if verdict_of(feedback.value) is not None:
-                break
-        return feedback
+                return feedback
+        # The last attempt: its verdict stands, readable or not, and an error is raised (MLflow
+        # records it; the run counts as failed).
+        return judge(inputs=inputs, outputs=outputs, expectations=expectations)
 
     return ask
 
@@ -299,9 +303,10 @@ def verdicts(result: Any, checks: Iterable[str]) -> Verdicts:
     and its table of scores. None: no readable verdict (a judge API error, an answer MLflow
     couldn't parse)."""
     df = result.result_df
-    columns = set() if df is None else set(df.columns)
+    if df is None:
+        return {name: [] for name in checks}
     return {
-        name: [verdict_of(v) for v in df[f"{name}/value"]] if f"{name}/value" in columns else []
+        name: [verdict_of(v) for v in df[f"{name}/value"]] if f"{name}/value" in df.columns else []
         for name in checks
     }
 

@@ -322,8 +322,8 @@ def _panel(d: Diagnosis, parts: list[RenderableType], footer: str | None = None)
     label, color = TITLES[d.status]
     # Text, not markup, wherever the model's words go: they may hold "[...]".
     title = Text(label, f"bold {color}")
-    if d.status == "fault_found":
-        r = d.affected_resource
+    r = d.affected_resource
+    if d.status == "fault_found" and r is not None:  # verified: a fault names its resource
         title.append(f" · {d.fault_category} · {r.kind}/{r.name} in {r.namespace}")
     return Panel(
         Group(*parts), title=title, title_align="left", subtitle=footer, border_style=color
