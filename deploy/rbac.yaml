@@ -42,8 +42,9 @@ metadata:
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: k8s-agent-list-namespaces}
 subjects: [{kind: ServiceAccount, name: reader, namespace: k8s-agent}]
 ---
-# remediator, bound only where fixes are allowed (shop-checkout). Used only by the fix tool
-# (M6): what fixing a selector and verifying it need, nothing more.
+# remediator, bound only where fixes are allowed (shop-checkout). Used by the remediator's read
+# tools and its fix tool, and for the facts read at the approval pause: what checking, fixing
+# and verifying a selector need, nothing more.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

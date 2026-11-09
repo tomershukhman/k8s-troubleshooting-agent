@@ -141,7 +141,7 @@ async def _load_tools(
     for tool in tools:
         # A failed call raises (by default the adapter turns it into a result), so the trace
         # marks its span as an error and ToolRetryMiddleware sees it; ToolErrorMiddleware then
-        # hands the model the server's own text, as before.
+        # hands the model the server's own text, just as the adapter would.
         tool.handle_tool_error = False
     return tools
 

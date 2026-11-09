@@ -119,8 +119,8 @@ def system_prompt(settings: Settings) -> str:
 
 
 def build_investigator(model: BaseChatModel, tools: list[BaseTool], settings: Settings):
-    # run_limit: per investigate round; thread_limit: the whole run, one thread per run. M8
-    # keeps a thread across questions, so it must reset this budget for each question.
+    # run_limit: per investigate round; thread_limit: the whole run, one thread per run. A
+    # thread reused across questions would need this budget reset per question.
     return create_agent(
         model,
         tools,

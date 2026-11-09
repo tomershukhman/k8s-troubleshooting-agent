@@ -107,7 +107,7 @@ class Settings(BaseSettings):
     mlflow_release: str = "mlflow"
     mlflow_namespace: str = "mlflow"
     mlflow_values_file: Path = Path("deploy/mlflow-values.yaml")
-    # The first install pulls a ~1.4 GB image (about 2.5 min on the M4 spike's machine).
+    # The first install pulls a ~1.4 GB image (it took about 2.5 min when measured).
     mlflow_install_timeout_seconds: PositiveInt = 600
 
     # Evals (SPEC 2.3, 3.6): each scenario's question, asked this many times. The diagnosis and
