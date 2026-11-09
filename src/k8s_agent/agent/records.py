@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from langchain_core.messages import BaseMessage, ToolMessage
+from langchain_core.messages import BaseMessage, ToolCall, ToolMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from k8s_agent.agent.tool_output import untag
@@ -130,6 +130,12 @@ class FixStep(BaseModel):
     args: dict[str, Any]
     output: str
     error: bool
+
+    @classmethod
+    def of(cls, call: ToolCall, result: ToolMessage) -> FixStep:
+        """The call, with the result it got."""
+        return cls(tool=call["name"], args=call["args"], output=result.text,
+                   error=result.status == "error")  # fmt: skip
 
 
 class Remediation(BaseModel):

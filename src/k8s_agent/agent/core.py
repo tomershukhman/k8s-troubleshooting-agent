@@ -189,9 +189,7 @@ class _Stream:
                 self.calls.update((c["id"], c) for c in m.tool_calls)
                 yield from (Reasoning(t) for t in thinking_of(m))
             elif isinstance(m, ToolMessage) and (c := self.calls.get(m.tool_call_id)):
-                step = FixStep(tool=c["name"], args=c["args"], output=m.text,
-                               error=m.status == "error")  # fmt: skip
-                yield FixCalled(step)
+                yield FixCalled(FixStep.of(c, m))
 
 
 def _stop_reason(e: Exception, s: Settings) -> str | None:

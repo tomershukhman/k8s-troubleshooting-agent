@@ -310,11 +310,7 @@ def remediation(
     early; what it did before still stands (an applied fix stays applied)."""
     calls = {c["id"]: c for m in messages if isinstance(m, AIMessage) for c in m.tool_calls}
     results = {m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)}
-    steps = [
-        FixStep(tool=calls[i]["name"], args=calls[i]["args"], output=m.text,
-                error=m.status == "error")
-        for i, m in results.items() if i in calls
-    ]  # fmt: skip
+    steps = [FixStep.of(calls[i], m) for i, m in results.items() if i in calls]
     request = next((c for c in calls.values() if c["name"] == FIX_TOOL), None)
     reply = results.get(request["id"]) if request else None
     result = FixResult(**reply.artifact) if reply and isinstance(reply.artifact, dict) else None
