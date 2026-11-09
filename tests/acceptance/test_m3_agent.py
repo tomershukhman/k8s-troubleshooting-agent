@@ -6,6 +6,7 @@ import subprocess
 
 import pytest
 
+from k8s_agent import evals
 from k8s_agent.agent import RunRecord, RunStatus, investigate, tool_output
 from k8s_agent.agent.core import make_model
 from k8s_agent.agent.critic import review, with_verdict
@@ -60,7 +61,7 @@ def retried(check):
 
 def problems(record: RunRecord, scn: Scenario) -> list[str]:
     """Why this run doesn't match the scenario's expected answer (empty = it does)."""
-    r, want = record.result, scn.spec.expected
+    r = record.result
     if r.status is not RunStatus.completed:
         return [f"run {r.status}: {r.error}"]
     d, found = r.diagnosis, []
@@ -70,19 +71,11 @@ def problems(record: RunRecord, scn: Scenario) -> list[str]:
         found.append(f"called tools outside the allowlist: {outside}")
     if r.duration_ms > get_settings().run_max_seconds * 1000:
         found.append(f"took {r.duration_ms} ms")
-    if (d.status, d.fault_category) not in {(want.status, c) for c in want.fault_categories}:
-        found.append(
-            f"{d.status}/{d.fault_category}, expected {want.status}/{want.fault_categories}"
-        )
-    res, accepted = d.affected_resource, {(x.kind, x.name) for x in want.resources}
-    if accepted and (
-        res is None or (res.kind, res.name) not in accepted or res.namespace != scn.namespace
-    ):
-        found.append(f"resource {res}, expected one of {accepted} in {scn.namespace}")
-    if not accepted and (
-        res or not any(s.args.get("namespace") == scn.namespace for s in r.evidence_steps)
-    ):
-        found.append(f"resource {res}, or no cited evidence from {scn.namespace}")
+    # status, category, resource, and for no fault evidence from its namespace: the evals' own
+    # check, so M3 and M5 can't drift apart (the evals' other checks read the run's trace)
+    out, expected = evals.outputs_of(record), evals.expectations(scn)
+    if not (correct := evals.diagnosis_correct(outputs=out, expectations=expected)).value:
+        found.append(correct.rationale)
     fix, want_fix = d.proposed_fix, scn.spec.expected_fix
     got = (fix.namespace, fix.service, fix.selector_dict()) if fix else None
     if got != ((want_fix.namespace, want_fix.service, want_fix.selector) if want_fix else None):
