@@ -43,7 +43,7 @@ Design: `SPEC.md`. Build order and per-milestone checks: `PLAN.md`.
 - A tool error carries no code, only the API server's text: refused / not found are recognised by
   `tool_output.REFUSED` / `PERMANENT`. The loaded MCP tools have `handle_tool_error=False`, so an
   error raises (the trace marks the span ERROR); `ToolRetryMiddleware(retry_on=worth_retrying)`
-  retries all but PERMANENT, and `ToolErrorAsResult` gives the model the text. The M3 acceptance
+  retries all but PERMANENT, and `ToolErrorMiddleware` gives the model the text. The M3 acceptance
   test checks the real server's wording.
 - On OrbStack, `pods_log` with `previous: true` on a crash-looping pod usually returns "unable to
   retrieve container logs for docker://…" as a *successful* result (the old container's log isn't

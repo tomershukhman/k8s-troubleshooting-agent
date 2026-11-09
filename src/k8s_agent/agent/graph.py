@@ -30,6 +30,7 @@ from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ModelRefusalMiddleware,
     ToolCallLimitMiddleware,
+    ToolErrorMiddleware,
     ToolRetryMiddleware,
 )
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
@@ -51,8 +52,8 @@ from k8s_agent.agent.critic import judge
 from k8s_agent.agent.middleware import (
     EvidenceMiddleware,
     RunContext,
-    ToolErrorAsResult,
     retries_exhausted,
+    tool_error_text,
     worth_retrying,
 )
 from k8s_agent.agent.records import (
@@ -131,7 +132,7 @@ def build_investigator(model: BaseChatModel, tools: list[BaseTool], settings: Se
             EvidenceMiddleware(),
             # A failed call raises: it is retried with backoff unless a retry can't fix it,
             # then comes back to the model as a tool error with the server's text.
-            ToolErrorAsResult(),
+            ToolErrorMiddleware(on_error=tool_error_text),
             ToolRetryMiddleware(
                 max_retries=settings.tool_max_retries,
                 initial_delay=settings.tool_retry_delay_seconds,

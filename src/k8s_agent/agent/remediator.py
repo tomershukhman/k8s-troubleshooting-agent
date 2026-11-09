@@ -25,6 +25,7 @@ from langchain.agents.middleware import (
     HumanInTheLoopMiddleware,
     ModelCallLimitMiddleware,
     ToolCallLimitMiddleware,
+    ToolErrorMiddleware,
 )
 from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.language_models import BaseChatModel
@@ -33,7 +34,7 @@ from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from pydantic import ValidationError
 from urllib3.exceptions import HTTPError
 
-from k8s_agent.agent.middleware import ToolErrorAsResult
+from k8s_agent.agent.middleware import tool_error_text
 from k8s_agent.agent.records import (
     Change,
     FixArgs,
@@ -212,7 +213,7 @@ def wait_for_endpoints(kube: Kube, namespace: str, service: str, settings: Setti
 
 def tools(kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
     """The remediator's tools, all through `kube()` (the remediator identity). A read that
-    fails raises, so its trace span is an error; ToolErrorAsResult gives the model the text.
+    fails raises, so its trace span is an error; ToolErrorMiddleware gives the model the text.
     A read's result has the investigator's safety cap (AGENT_TOOL_OUTPUT_MAX_CHARS)."""
 
     def capped(text: str) -> str:
@@ -285,7 +286,7 @@ def build_remediator(model: BaseChatModel, kube: Callable[[], Kube], settings: S
             HumanInTheLoopMiddleware(
                 {FIX_TOOL: {"allowed_decisions": ["approve", "reject"]}}, interrupt_mode="per_call"
             ),
-            ToolErrorAsResult(),
+            ToolErrorMiddleware(on_error=tool_error_text),
             ModelCallLimitMiddleware(thread_limit=settings.max_model_calls, exit_behavior="error"),
             ToolCallLimitMiddleware(thread_limit=settings.max_tool_calls, exit_behavior="continue"),
             ToolCallLimitMiddleware(tool_name=FIX_TOOL, thread_limit=1, exit_behavior="continue"),

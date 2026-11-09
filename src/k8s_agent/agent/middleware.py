@@ -77,21 +77,12 @@ def retries_exhausted(attempts: int) -> Callable[[Exception], str]:
     return message
 
 
-class ToolErrorAsResult(AgentMiddleware):
-    """A failed tool call raises (core.py turns off the adapter's own handling), so the trace
-    marks its span as an error. The model still gets the server's text as an error result:
-    ToolRetryMiddleware (inside this one) does that for retried errors, this for the rest."""
-
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
-    ) -> ToolMessage | Command:
-        try:
-            return await handler(request)
-        except ToolException as e:
-            call = request.tool_call
-            return ToolMessage(str(e), name=call["name"], tool_call_id=call["id"], status="error")
+def tool_error_text(exc: Exception, _request: ToolCallRequest) -> str | None:
+    """ToolErrorMiddleware's `on_error`. A failed tool call raises (core.py turns off the
+    adapter's own handling), so the trace marks its span as an error. The model still gets the
+    server's text as an error result: ToolRetryMiddleware (inside it) does that for retried
+    errors, this for the rest. Anything but a ToolException propagates (None)."""
+    return str(exc) if isinstance(exc, ToolException) else None
 
 
 class EvidenceMiddleware(AgentMiddleware):

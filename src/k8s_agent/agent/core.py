@@ -140,7 +140,7 @@ async def _load_tools(
         raise McpUnavailable(f"{where}: it offers none of the allowed tools")
     for tool in tools:
         # A failed call raises (by default the adapter turns it into a result), so the trace
-        # marks its span as an error and ToolRetryMiddleware sees it; ToolErrorAsResult then
+        # marks its span as an error and ToolRetryMiddleware sees it; ToolErrorMiddleware then
         # hands the model the server's own text, as before.
         tool.handle_tool_error = False
     return tools
