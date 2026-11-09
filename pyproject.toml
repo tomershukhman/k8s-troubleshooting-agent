@@ -39,6 +39,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "k8s-agent[eval]",
+    "pyright[nodejs]==1.1.414",
     "pytest>=9.2.0",
     "ruff>=0.17.4",
 ]
@@ -59,3 +60,10 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+# MLflow loads its submodules lazily (mlflow.genai, mlflow.entities, ...); this rule flags each one.
+reportPrivateImportUsage = false
