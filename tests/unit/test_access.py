@@ -38,8 +38,14 @@ def grants(kube: FakeKube) -> dict[str, dict[tuple[str, str], set[str]]]:
     return out
 
 
+ADMIN_CERT, ADMIN_KEY, ADMIN_TOKEN = "/admin/client.crt", "/admin/client.key", "admin-token"
+
+
 def test_setup_applies_the_identities_then_writes_a_kubeconfig_each(tmp_path, monkeypatch):
     kube = FakeKube()
+    admin = kube.clients.api.configuration  # the admin's client: a cert, a key and a token
+    admin.cert_file, admin.key_file = ADMIN_CERT, ADMIN_KEY
+    admin.api_key = {"authorization": f"Bearer {ADMIN_TOKEN}"}
     creds, paths = setup(kube, tmp_path, monkeypatch)
     assert kube.log[:2] == ["apply Namespace/k8s-agent", "apply ServiceAccount/reader"]
     assert kube.log[-2:] == ["token reader ttl=3600", "token remediator ttl=3600"]
@@ -48,9 +54,11 @@ def test_setup_applies_the_identities_then_writes_a_kubeconfig_each(tmp_path, mo
         "system:serviceaccount:tok-remediator",
     ]
     for sa, path in paths.items():
-        kubeconfig = yaml.safe_load(path.read_text())
+        text = path.read_text()
+        kubeconfig = yaml.safe_load(text)
         # only the token: never the admin's credentials, whatever the admin kubeconfig holds
         assert kubeconfig["users"] == [{"name": f"k8s-agent-{sa}", "user": {"token": f"tok-{sa}"}}]
+        assert not [c for c in (ADMIN_CERT, ADMIN_KEY, ADMIN_TOKEN) if c in text]
         assert kubeconfig["clusters"][0]["cluster"] == {"server": "https://127.0.0.1:6443"}
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
