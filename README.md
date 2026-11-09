@@ -142,6 +142,8 @@ Details: [DESIGN 3.6](DESIGN.md#36-remediation).
 
 Every run, fix included, is one MLflow trace: each stage, model call and tool call with its inputs, outputs, errors and latency, plus the critic's verdicts and your approval. With `MLFLOW_TRACKING_URI=http://localhost:5050` in `.env` (as in `.env.example`), the CLI prints its link after each run (`Trace: http://localhost:5050/#/experiments/…`); the UI is at http://localhost:5050. What each span holds: [DESIGN 3.9](DESIGN.md#39-observability).
 
+In a fix run's trace, the `remediate`, `remediator` and `tools` spans that end with `Interrupt` are marked as errors: that is the pause for your approval (LangGraph stops the graph there, and MLflow marks any stage that raises as an error). After the `approval` span, the run resumes in a second `remediate` span.
+
 ### Output and exit codes
 
 Piped, or with `--json`, stdout is the result JSON: the diagnosis (`fault_found`, `no_fault` or `inconclusive`), the evidence behind each finding, the verify rounds and the fix record ([an annotated example](DESIGN.md#what-comes-back)).
@@ -169,7 +171,7 @@ docker compose run --rm admin scenario up selector     # recreate it with the ag
 docker compose run --rm admin scenario down selector   # delete the namespace and wait until it's gone
 ```
 
-`up` waits until the fault can be observed (for `crashloop`, two restarts: about 40 seconds). Both commands refuse a namespace without the ownership label `app.kubernetes.io/part-of=k8s-agent-demo`.
+`up` waits until the fault can be observed (for `crashloop`, two restarts: under a minute). Both commands refuse a namespace without the ownership label `app.kubernetes.io/part-of=k8s-agent-demo`.
 
 ## How to run the evaluations
 
@@ -193,6 +195,17 @@ For each scenario, `agent eval` recreates it, asks its question without naming t
 **Pass rule:** `diagnosis_correct` and the two judges must pass in 2/3 of the runs, rounded up (`AGENT_EVAL_PASS_SHARE`): 1 of 1 by default, 2 of 3 with `--runs 3`. The other three checks must pass in every run. The fix run must pass all its checks.
 
 CI runs this full eval on every push to a pull request to `main`; each run's results file is kept as an artifact of that workflow run ([Actions](https://github.com/tomershukhman/k8s-troubleshooting-agent/actions/workflows/ci.yml)).
+
+## Clean up
+
+Everything this project created, on the cluster your kubeconfig points at (with `kubectl`, which OrbStack includes) and in Docker:
+
+```bash
+kubectl delete namespace -l app.kubernetes.io/part-of=k8s-agent-demo   # the scenarios
+kubectl delete namespace k8s-agent                                      # the agent's identities
+kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/managed-by=k8s-agent-setup
+docker compose down -v   # the containers, and MLflow's volume (its traces and eval results)
+```
 
 ## Design rationale
 
@@ -224,7 +237,7 @@ One pipeline, [`ci.yml`](.github/workflows/ci.yml), one stage after another:
 | `publish-image` | pushes the image (`linux/amd64`, `linux/arm64`) to `ghcr.io/tomershukhman/k8s-troubleshooting-agent` under its commit SHA; `latest` from `main`, a `v*` tag under its name | the same |
 | `mlflow-evals` | pulls that published image and runs this README's commands through `docker compose` on a throwaway kind cluster, with the real model: every scenario must meet its thresholds; `eval-results/` is kept as the run's artifact | pull requests to `main`, and the "Run workflow" button |
 
-`main` takes changes only through pull requests that pass all five stages and are up to date with it. A pull request from a fork gets no secrets, so it skips the publish and eval stages, which GitHub then counts as passed: run its evals from a branch of this repository before merging. A newer push to a pull request cancels its run in progress. Pull requests from forks get no secrets or write token, so they stop after `build-image`.
+`main` takes changes only through pull requests that pass all five stages and are up to date with it. A pull request from a fork gets no secrets, so it skips the publish and eval stages, which GitHub then counts as passed: run its evals from a branch of this repository before merging. A newer push to a pull request cancels its run in progress.
 
 ## Known limitations
 
