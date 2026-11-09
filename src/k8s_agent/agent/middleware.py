@@ -12,10 +12,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import ToolException
-from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from k8s_agent.agent import tool_output
