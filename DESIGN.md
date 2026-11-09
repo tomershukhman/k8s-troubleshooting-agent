@@ -240,7 +240,7 @@ A run ends when its answer is founded, or at the first limit. No limit produces 
 | Model calls, per round / per run | 20 / 40 | `inconclusive` |
 | Verify rounds | 2 | `inconclusive` |
 | Agent working time | 300 s, not counting the wait for you | `inconclusive` |
-| The remediator | 20 model calls, 15 tool calls, 1 fix request | The fix stops; the diagnosis stands |
+| The remediator | 20 model calls, 15 tool calls (the per-round settings), 1 fix request | The fix stops; the diagnosis stands |
 | Your approval | 600 s | Reject |
 | Output | 8,000 tokens per model call; 40,000 characters per tool result | A cut-off answer is `inconclusive`; a long output is cut with a marker |
 
@@ -259,15 +259,15 @@ The investigator's only access to the cluster is 7 read tools on an MCP server t
 | `resources_get`, `resources_list` | Any other object: Services, EndpointSlices, ConfigMaps, Deployments |
 
 - **The server** ([kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server), pinned) runs in read-only mode with Secrets denied and listens only on this machine, since it has no login. Its [config](mcp/config.toml) allows exactly the 7 tools, and the agent loads only those 7 again on its side.
-- **Each result is prepared before the model sees it:** noise is removed (`managedFields`, often half an object's YAML), an oversized output is cut with a marker, and the evidence ID is added.
-- **Failed calls** are retried unless a retry can't help (refused, not found). The model then sees the server's error text. If a refusal leaves the agent unable to tell, the answer is `inconclusive` and says how to grant access.
+- **Each result is prepared before the model sees it:** an oversized output is cut with a marker, and the evidence ID is added. The server already leaves out `managedFields`, often half an object's YAML.
+- **Failed calls** are retried unless a retry can't help (refused, not found). The model then sees the server's error text. If a refused read leaves the agent unable to tell, the answer is `inconclusive` and says how to grant access.
 - **The remediator's tools are separate:** small functions over the official Kubernetes client, using only the remediator's credentials.
 
 ### 3.5 Safety model
 
 | Threat | What limits it |
 |---|---|
-| **A manipulated model.** Logs, events and ConfigMaps can hold text aimed at the model. | Every prompt treats tool output as data. Text passed between agents is quoted so it can't break out of its quotes. The investigator can only read and the critic has no tools, so the worst case is a wrong diagnosis or a bad fix proposal, and a proposal still has to pass the code checks, the critic, your approval of the exact call, and RBAC. |
+| **A manipulated model.** Logs, events and ConfigMaps can hold text aimed at the model. | Every prompt treats tool output as data. Text passed between agents is wrapped in tags it can't close. The investigator can only read and the critic has no tools, so the worst case is a wrong diagnosis or a bad fix proposal, and a proposal still has to pass the code checks, the critic, your approval of the exact call, and RBAC. |
 | **A bug in our code.** | RBAC bounds whatever the code does: `reader` can't change anything or read Secrets, and `remediator` can change one Service in one namespace. The patch applies only if the Service is unchanged since it was read. The admin commands refuse a cluster that isn't local unless you name it, and `scenario up` / `down` delete only namespaces labelled as scenarios. |
 | **A leaked token.** | Tokens last 12 hours. Each kubeconfig is private to you and mounted read-only into the one runtime container that uses it, `agent` or `k8s-mcp` (`admin`, which writes them, holds both). A leaked `reader` token reads what the agent reads; a leaked `remediator` token can change one Service. |
 
@@ -298,7 +298,7 @@ One fix exists: replacing a Service's selector. Every step between the proposal 
 
 - **When a fix may be proposed:** only for a Service whose selector matches no pods, in a namespace where fixes are allowed (`shop-checkout`). The investigator's prompt, the code checks and the routing check this, and the critic checks that the evidence backs the fix. Every other diagnosis is advice only.
 - **The remediator** gets only the proposed fix. It reads the Service and the pods the new selector would match, and requests the patch only if ready pods match; otherwise it declines. The Service's version it read is part of the request, so you approve the version check too. It can request the fix once per run.
-- **The gate**, while the run is paused, reads facts as the remediator and rejects without asking any request that differs from the fix the critic verified. Otherwise it shows you:
+- **The gate**, while the run is paused, reads facts as the remediator and rejects, without asking you, any request that differs from the fix the critic verified. Otherwise it shows you:
   - the diagnosis the fix is based on, with its evidence;
   - the change, current selector → new selector, and the remediator's explanation;
   - the ready pods the new selector matches, each with its controller;
@@ -339,7 +339,7 @@ The evals run the real agent on the four scenarios and score every run on its ML
 - **The judges** run on Claude Opus 5.5, a stronger model than the agent, and see only the answer and the cited outputs, never the critic's verdicts.
 - **The pass rule:** the diagnosis and the two judges must pass in 2/3 of the runs, rounded up (1 of 1 by default, 2 of 3 with `--runs 3`). The other checks must pass in every run, and the fix run must pass all its checks.
 - **Each scenario adds only data:** the question, the accepted answers, the sources the agent must read, and a rubric for the advice judge. The scoring code is shared.
-- **The evals are proven able to fail:** a fake agent that always says "no fault" fails; the evidence judge rejects a correct answer with irrelevant citations; the advice judge rejects "delete the namespace and redeploy". The critic is held to the same standard.
+- **The evals are proven able to fail:** a fake agent that always says "no fault" fails; the evidence judge rejects a correct answer with irrelevant citations; the advice judge rejects "delete the namespace and redeploy". The critic is tested the same way: it must reject a finding whose cited output doesn't show it, and a fix the evidence doesn't back.
 - **CI runs the full eval** on every push to a pull request to `main`, and a merge needs it to pass.
 
 ### 3.9 Observability
@@ -394,7 +394,7 @@ Nothing carries over between runs: each run starts a fresh conversation. Re-runn
 
 The last stage pulls the image just published, by its commit, and runs the full eval on a fresh kind cluster through the README's own commands, so the artifact that ships is the one graded.
 
-**Each platform builds natively:** amd64 and arm64 build in parallel, each on a runner of its own architecture, and a last step joins them into one multi-arch image (arm64 emulated on an Intel runner took 6–8 minutes; now about 1). That last step is the required `publish-image` check. It runs even when a platform build failed, and then fails: GitHub skips a job whose prerequisite failed and counts a skipped required check as passed, so otherwise a failed build could merge.
+**Each platform builds natively:** amd64 and arm64 build in parallel, each on a runner of its own architecture, and a last step joins them into one multi-arch image (arm64 emulated on an Intel runner took 6–8 minutes; now about 1). That last step is the required `publish-image` check. It runs even when a platform build failed, and fails then, because GitHub would count a skipped required check as passed.
 
 **`main` is protected:** changes arrive only by pull request, all five stages must pass, the branch must be up to date, and admins are included. A pull request from a fork gets no secrets, so it skips the publish and eval stages, and GitHub counts a skipped check as passed: such a change needs its evals run from a branch of this repository before merging.
 
@@ -409,16 +409,17 @@ The last stage pulls the image just published, by its commit, and runs the full 
 
 **A three-role LangGraph workflow**
 - **Why:** each stage is explicit, traceable and least-privileged, and "evidence before conclusions" is enforced inside the agent, not only in the evals. LangChain's agents come with what the agent needs off the shelf: call limits, tool retries and the approval pause as middleware, native structured output, and one-line MLflow tracing; the model is a config string.
-- **Rejected:** one agent loop that also holds the fix tool (it would hold write rights and grade its own fix); a manager over several investigator agents (these faults are found by connecting facts across sources, which one context sees whole, and summaries passed between agents drop exactly those details); Deep Agents (adds planning, file and sub-agent tools we'd have to disable); Pydantic AI (a close second, but less widely used); single-provider SDKs such as the Claude Agent SDK (they tie the agent to one model provider).
+- **Rejected:** one agent loop that also holds the fix tool (it would hold write rights and grade its own fix); a manager over several investigator agents (these faults are found by connecting facts across sources, which one context sees whole, and summaries passed between agents drop exactly those details); Deep Agents (adds planning, file and sub-agent tools we'd have to disable); Pydantic AI (a close second that would also work; LangGraph's explicit graph, checkpointed approval pause and ready-made middleware covered everything here as they come); single-provider SDKs such as the Claude Agent SDK (they tie the agent to one model provider).
 - **Trade-off:** one extra model call per verify round.
 
 **A separate critic with no tools**
 - **Why:** an agent checking its own answer tends to agree with it. A reviewer that can't look anything up can only judge what the cited evidence shows.
-- **Trade-off:** on the same model it may be lenient, so it is tested to reject irrelevant evidence, and it can be switched to a stronger model.
+- **Measured:** in 118 recorded eval runs (8 and 9 November 2026), the critic sent 8 first drafts back for a claim its cited output didn't show. All 8 came back founded after one round of feedback.
+- **Trade-off:** on the same model it may be lenient, so it is tested to reject irrelevant evidence, and it can be switched to a stronger model. The eval judges, on a stronger model, caught three overreaches it had passed.
 
-**The remediator is an LLM agent**
-- **Why:** it is how the agent grows: a new fix type is a new remediator tool, while the same gates guard each call.
-- **Rejected:** code applying the fix, so no model holds a write tool; a generic "patch anything" tool behind approval.
+**The fix has its own agent, the remediator**
+- **Why:** the brief asks that the agent execute the approved change through a narrowly scoped tool. The remediator is the only agent that holds that tool. It is given only the proposed fix, never the logs and events the investigator reads, so write access stays out of the loop that reads untrusted text. The pause before its tool call is LangChain's human-in-the-loop middleware, not our code. A new fix type would be one more remediator tool behind the same gates.
+- **Rejected:** the fix tool in the investigator's hands (see above); code applying the fix with no agent (simpler, but then nothing executes the change through a tool, and each new fix would be new orchestration code); a generic "patch anything" tool behind approval.
 - **Trade-off:** for today's single fix, a code step would be simpler. We accept one model holding one narrow write tool, gated on every call.
 
 **Two identities, not one**
@@ -436,6 +437,11 @@ The last stage pulls the image just published, by its commit, and runs the full 
 - **Rejected:** editing the change at approval (what runs would differ from what was checked); a `--yes` flag.
 - **Trade-off:** fixes can't run from scripts or CI; outside the tests, the eval's fix run is the only automatic approval.
 
+**State in memory, no database**
+- **Why:** a CLI run is one process, from the question to the answer. The approval pause needs a checkpoint to resume from, and LangGraph's in-memory one is enough, because your answer arrives in the same process. What must outlive a run already has a home: the result on stdout, traces and scores in MLflow, eval reports as files.
+- **Rejected:** a Postgres checkpointer (needed only once an approval can arrive in a later request, as in the HTTP API under next steps); a run-history table (it would repeat the traces).
+- **Trade-off:** a run killed while it waits for your approval is lost. Nothing has changed in the cluster by then, because the patch runs only after you approve.
+
 **Evals: code checks plus LLM judges, in MLflow**
 - **Why:** code is free, instant and repeatable for what is exact. Judgment is needed for "does this output show that" and "is this advice safe", which matters because a person may run the advice with admin rights.
 - **Rejected:** keyword lists (they fail "no need to delete the pods" and pass "scale to 0"); a judge that explores the whole trace (about 5× the cost); a custom harness.
@@ -443,7 +449,7 @@ The last stage pulls the image just published, by its commit, and runs the full 
 
 **MLflow for tracing and evals**
 - **Why:** one small server, one-line LangGraph tracing, evals built in, and every score lands on its run's trace.
-- **Rejected:** Langfuse and Opik (they need ClickHouse: too heavy for a local setup); Arize Phoenix (light, but far less widely used); LangSmith (hosted, self-hosting is paid).
+- **Rejected:** Langfuse and Opik (they need ClickHouse: too heavy for a local setup); Arize Phoenix (also one light server and a fair alternative; we took the more established project); LangSmith (hosted, self-hosting is paid).
 - **Trade-off:** the tracking server has no login, and open-source MLflow doesn't enforce pass criteria, so `agent eval` checks them itself.
 
 **Models**
@@ -452,7 +458,7 @@ The last stage pulls the image just published, by its commit, and runs the full 
 
 **CI grades the published image**
 - **Why:** only running the agent tests the agent, and grading the published image tests what ships.
-- **Rejected:** re-scoring saved answers (tests only the scoring code); evals on every push (costly, and answers vary).
+- **Rejected:** re-scoring saved answers (tests only the scoring code); evals on every push to every branch (costly, and answers vary).
 - **Trade-off:** each push to a pull request pays for one eval, and CI's traces last only as long as the job.
 
 ---
@@ -460,11 +466,8 @@ The last stage pulls the image just published, by its commit, and runs the full 
 ## 5. Known limitations and future work
 
 **Limitations**
-- The remediator's permission is per object, not per field.
-- The evals use the four scenarios the prompts were tuned on, so they show the agent works on these faults, not how it does on unseen ones.
-- The MCP server and the tracking server have no login: a local, single-user setup.
-- Tokens expire after 12 hours and nothing renews them: run `agent setup` again.
-- One fix type.
+- The README lists them: [Known limitations](README.md#known-limitations). The safety-specific gaps are in [3.5](#35-safety-model).
+- Beyond those: one fix type, and one user at a time.
 
 **Next steps**
 - **A multi-user HTTP API** (not built): an API in front of the same entry point, with Postgres keeping the paused runs so an approval can arrive in a later request, and the run still one trace.
