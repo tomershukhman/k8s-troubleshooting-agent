@@ -3,10 +3,12 @@
 failure anywhere still removes what it created."""
 
 import asyncio
+import json
 import os
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +153,55 @@ def cluster(kube: AdminClients, request):
         print("starting k8s-mcp (stopped again afterwards)")
     compose("up", "-d", "--wait", "k8s-mcp")
     return kube
+
+
+def investigate_cli(
+    question: str, *args: str, env: dict[str, str] | None = None
+) -> tuple[dict[str, Any], str, float]:
+    """`agent investigate --json` as a user runs it: (result, stderr, seconds until exit). No
+    terminal on stdin, so a fix it requests (selector) is rejected instead of waiting for y/N.
+    `env`: environment variables to set for it."""
+    t0 = time.monotonic()
+    done = subprocess.run(
+        ["uv", "run", "agent", "investigate", question, "--json", *args],
+        cwd=ROOT, env={**os.environ, **(env or {})}, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=600,
+    )  # fmt: skip
+    seconds = time.monotonic() - t0
+    print(f"\n$ agent investigate {question!r} {' '.join(args)}  ({seconds:.1f} s)\n{done.stderr}")
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout), done.stderr, seconds
+
+
+def selector_question() -> str:
+    return get_scenario(get_settings().scenarios_dir, "selector").spec.question
+
+
+@dataclass(frozen=True)
+class SelectorRun:
+    """The selector scenario's question through `investigate_cli` as alice (no namespace
+    given), and its Service as it was just before and just after the run."""
+
+    result: dict[str, Any]
+    stderr: str
+    before: client.V1Service
+    after: client.V1Service
+
+
+def run_selector(kube: AdminClients) -> SelectorRun:
+    def checkout() -> client.V1Service:
+        return kube.core.read_namespaced_service("checkout", namespace("selector"))
+
+    before = checkout()
+    result, stderr, _ = investigate_cli(selector_question(), "--user", "alice")
+    return SelectorRun(result, stderr, before, checkout())
+
+
+@pytest.fixture(scope="session")
+def selector_run(cluster: AdminClients) -> SelectorRun:
+    """One real selector run, shared: M4 checks its trace, M6 its rejected fix request. Each
+    makes a run of its own only if this one misses what it checks."""
+    return run_selector(cluster)
 
 
 def stored(trace_id: str) -> Any:

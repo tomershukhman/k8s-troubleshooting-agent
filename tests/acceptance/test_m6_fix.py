@@ -1,14 +1,11 @@
 """M6: the fix on the real cluster, model and tracking server (PLAN.md M6). The selector
-scenario's question is asked without a namespace. The first test runs the real command with no
-terminal on stdin, so the fix request is rejected; the others decide the request with the test's
-own approver, inside the same call, as the CLI does. A test that changes the Service rebuilds the
-scenario afterwards. Model answers vary: a run that never reaches the fix request gets one
-retry."""
+scenario's question is asked without a namespace. The first test reads the real command's run
+with no terminal on stdin (shared with M4), so the fix request is rejected; the others decide the
+request with the test's own approver, inside the same call, as the CLI does. A test that changes
+the Service rebuilds the scenario afterwards. Model answers vary: a run that never reaches the fix
+request gets one retry."""
 
 import asyncio
-import json
-import os
-import subprocess
 
 import mlflow
 import pytest
@@ -22,7 +19,7 @@ from k8s_agent.config import get_settings
 from k8s_agent.policy import FIX_TOOL
 from k8s_agent.scenarios import get_scenario
 
-from .conftest import ROOT, agent, stored
+from .conftest import agent, run_selector, stored
 
 pytestmark = pytest.mark.usefixtures("cluster")
 ATTEMPTS = 2
@@ -84,21 +81,18 @@ def until_requested(question: str, approve) -> RunRecord:
     pytest.fail(f"no run reached the fix request in {ATTEMPTS} attempts")
 
 
-def test_the_right_fix_is_proposed_and_requested_and_without_a_terminal_rejected(kube, want):
-    before = service(kube)
-    for _ in range(ATTEMPTS):
-        done = subprocess.run(
-            ["uv", "run", "agent", "investigate", want.spec.question, "--json", "--user", "alice"],
-            cwd=ROOT, env=dict(os.environ), stdin=subprocess.DEVNULL, capture_output=True,
-            text=True, timeout=600,
-        )  # fmt: skip
-        print(done.stderr)
-        assert done.returncode == 0, done.stderr
-        result = json.loads(done.stdout)
-        if (r := result["remediation"]) and r["request"]:
+def test_the_right_fix_is_proposed_and_requested_and_without_a_terminal_rejected(
+    kube, want, selector_run
+):
+    run = selector_run  # `agent investigate --json --user alice`, stdin not a terminal
+    for attempt in range(ATTEMPTS):
+        if attempt:
+            run = run_selector(kube)
+        if (r := run.result["remediation"]) and r["request"]:
             break
     else:
         pytest.fail(f"no run reached the fix request in {ATTEMPTS} attempts")
+    result, before = run.result, run.before  # the Service just before that run
     fix, expected = result["diagnosis"]["proposed_fix"], want.spec.expected_fix
     selector = {label["key"]: label["value"] for label in fix["selector"]}
     assert (fix["namespace"], fix["service"], selector) == (NS, NAME, expected.selector)
@@ -111,7 +105,7 @@ def test_the_right_fix_is_proposed_and_requested_and_without_a_terminal_rejected
         "no interactive approval available",
     )
     assert r["outcome"] == "not_applied" and r["verified"] is False
-    after = service(kube)
+    after = run.after  # just after it
     assert (after.spec.selector, after.metadata.resource_version) == (
         BROKEN,
         before.metadata.resource_version,

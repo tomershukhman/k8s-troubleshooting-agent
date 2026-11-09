@@ -5,11 +5,8 @@ answers vary: a run that misses something the model decides (a reasoning summary
 call) gets one retry."""
 
 import json
-import os
 import subprocess
-import time
 import urllib.request
-from typing import Any
 
 import mlflow
 import pytest
@@ -19,7 +16,16 @@ from k8s_agent.config import get_settings
 from k8s_agent.policy import READ_ONLY_TOOLS
 from k8s_agent.scenarios import get_scenario
 
-from .conftest import ROOT, agent, eventually, mlflow_deployment, stored
+from .conftest import (
+    ROOT,
+    agent,
+    eventually,
+    investigate_cli,
+    mlflow_deployment,
+    run_selector,
+    selector_question,
+    stored,
+)
 
 pytestmark = pytest.mark.usefixtures("cluster")
 ATTEMPTS = 2
@@ -32,21 +38,6 @@ def uri() -> str:
         pytest.fail("set MLFLOW_TRACKING_URI (see .env.example) to run the tracing tests")
     mlflow.set_tracking_uri(uri)
     return uri
-
-
-def investigate(question: str, *args: str) -> tuple[dict[str, Any], str, float]:
-    """`agent investigate --json` as a user runs it: (result, stderr, seconds until exit). No
-    terminal on stdin, so a fix it requests (selector) is rejected instead of waiting for y/N."""
-    t0 = time.monotonic()
-    done = subprocess.run(
-        ["uv", "run", "agent", "investigate", question, "--json", *args],
-        cwd=ROOT, env=dict(os.environ), stdin=subprocess.DEVNULL, capture_output=True,
-        text=True, timeout=600,
-    )  # fmt: skip
-    seconds = time.monotonic() - t0
-    print(f"\n$ agent investigate {question!r} {' '.join(args)}  ({seconds:.1f} s)\n{done.stderr}")
-    assert done.returncode == 0, done.stderr
-    return json.loads(done.stdout), done.stderr, seconds
 
 
 def children(trace, span) -> list:
@@ -97,19 +88,17 @@ def ref_number(span) -> int:
     return int((ref_of(span) or "E0")[1:])
 
 
-def selector_question() -> str:
-    return get_scenario(get_settings().scenarios_dir, "selector").spec.question
-
-
 @pytest.fixture(scope="module")
-def selector(uri):
-    """The selector scenario, investigated once with a user (no namespace given). Retried if
-    the model returned no reasoning summary at all, which happens at any effort."""
+def selector(uri, cluster, selector_run):
+    """The selector scenario, investigated with a user (no namespace given): the run M6 shares.
+    Run again if the model returned no reasoning summary at all, which happens at any effort."""
+    run = selector_run
     for attempt in range(ATTEMPTS):
-        result, stderr, _ = investigate(selector_question(), "--user", "alice")
-        trace = stored(result["trace_id"])
+        if attempt:
+            run = run_selector(cluster)
+        trace = stored(run.result["trace_id"])
         if any(thinking(s) for s in model_calls(trace)) or attempt == ATTEMPTS - 1:
-            return result, stderr, trace
+            return run.result, run.stderr, trace
 
 
 # --- the brief's observability list, line by line, on a real stored trace (SPEC 3.7) --------
@@ -220,7 +209,7 @@ def test_the_trace_link_is_printed_and_the_result_has_the_trace_id(selector, uri
 
 def test_a_refused_tool_call_is_an_error_span_with_the_refusal(uri):
     for attempt in range(ATTEMPTS):
-        result, _, _ = investigate("Is the payments service healthy?", "-n", "default")
+        result, _, _ = investigate_cli("Is the payments service healthy?", "-n", "default")
         trace = stored(result["trace_id"])
         refused = [s for s in tool_calls(trace) if "forbidden" in (s.status.description or "")]
         if refused or attempt == ATTEMPTS - 1:
@@ -265,7 +254,7 @@ def test_with_the_tracking_server_stopped_investigate_works_with_one_warning(
     uri, tracking_server_stopped
 ):
     healthy = get_scenario(get_settings().scenarios_dir, "healthy").spec.question
-    result, stderr, seconds = investigate(healthy)
+    result, stderr, seconds = investigate_cli(healthy)
     assert result["status"] == "completed" and result["trace_id"] is None
     [warning] = [line for line in stderr.splitlines() if line.startswith("warning:")]
     assert warning.startswith(f"warning: cannot use the MLflow tracking server at {uri}: ")
