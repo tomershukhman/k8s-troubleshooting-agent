@@ -1,6 +1,7 @@
 """`agent setup` (SPEC 3.5): what it applies and the kubeconfigs it writes. Fake API."""
 
 import base64
+import os
 import stat
 from types import SimpleNamespace
 
@@ -102,3 +103,18 @@ def test_whoami_closes_its_client(monkeypatch):
     monkeypatch.setattr(access.client, "AuthenticationV1Api", lambda _client: api)
     kubeconfig = access.kubeconfig_for(FakeKube().clients.api.configuration, "reader", "t")
     assert access.whoami(kubeconfig) == "u" and len(closed) == 1
+
+
+def test_an_existing_file_is_made_private_before_the_new_text_is_written(tmp_path, monkeypatch):
+    path = tmp_path / "reader.kubeconfig"
+    path.write_text("old")
+    path.chmod(0o644)
+    modes, fdopen = [], os.fdopen
+
+    def opened(fd, *args, **kwargs):  # noqa: ANN001
+        modes.append(stat.S_IMODE(os.fstat(fd).st_mode))
+        return fdopen(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", opened)
+    access.write_private(path, "new token")
+    assert modes == [0o600] and path.read_text() == "new token"

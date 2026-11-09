@@ -50,9 +50,9 @@ def write_private(path: Path, text: str) -> None:
     container on the old token."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # the mode above applies only to a new file: private before writing
     with os.fdopen(fd, "w") as f:
         f.write(text)
-    path.chmod(0o600)
 
 
 def request_token(c: AdminClients, service_account: str, ttl_seconds: int) -> tuple[str, datetime]:
