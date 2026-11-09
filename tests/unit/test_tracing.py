@@ -1,6 +1,6 @@
 """Tracing (SPEC §3.7) with no tracking server: off unless configured, and a server that can't be
 reached neither fails a run nor holds up exit. The traces themselves are checked on the real
-server in tests/acceptance/test_m4_tracing.py."""
+server in tests/acceptance/test_tracing.py."""
 
 import json
 import os

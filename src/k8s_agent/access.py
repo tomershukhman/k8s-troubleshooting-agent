@@ -11,16 +11,17 @@ from typing import Any, NamedTuple
 import yaml
 from kubernetes import client, config
 
-from k8s_agent.kube import AdminClients, Progress, apply, load_yaml, present
+from k8s_agent.kube import AdminClients, Progress, apply, load_yaml, present, unretried
 from k8s_agent.policy import AGENT_NAMESPACE
 
 READER = "reader"
 REMEDIATOR = "remediator"
+# Where k8s-mcp's compose mount reads the reader's kubeconfig: not a setting, nothing else uses it.
+READER_KUBECONFIG = Path(".kube-agent/reader.kubeconfig")
 
 
 class Credential(NamedTuple):
     username: str
-    path: Path
     expires: datetime
 
 
@@ -70,7 +71,8 @@ def request_token(c: AdminClients, service_account: str, ttl_seconds: int) -> tu
 
 def whoami(kubeconfig: dict, timeout: float) -> str:
     """The username the API server sees for a kubeconfig (proves the token and CA work)."""
-    with config.new_client_from_config_dict(kubeconfig) as api:  # closes its connections
+    api = config.new_client_from_config_dict(kubeconfig, client_configuration=unretried())
+    with api:  # closes its connections
         review = client.AuthenticationV1Api(api).create_self_subject_review(
             client.V1SelfSubjectReview(), _request_timeout=timeout
         )
@@ -96,5 +98,5 @@ def setup(
         username = whoami(kubeconfig, c.timeout)
         write_private(path, yaml.safe_dump(kubeconfig, sort_keys=False))
         progress(f"wrote {path} ({username}, expires {expires.isoformat()})")
-        creds.append(Credential(username, path, expires))
+        creds.append(Credential(username, expires))
     return creds

@@ -1,9 +1,11 @@
-"""What every tool result goes through before the model sees it (SPEC §3.3): strip noise
-fields, apply the safety cap, prefix the evidence ID. And how to read a failed call: the MCP
-server gives no error code, only the Kubernetes API server's message (kubernetes-mcp-server
-v0.1.2; tests/acceptance checks these against the real server). And how to quote untrusted
-text (tool output, or a model's words that may repeat it) to another model: inside tags it can't
-close."""
+"""Tool output, and text that may repeat it (SPEC §3.3):
+- what every tool result goes through before the model sees it: noise fields stripped, the
+  safety cap, the evidence ID prefixed;
+- how to read a failed call: the MCP server gives no error code, only the Kubernetes API
+  server's message (kubernetes-mcp-server v0.1.2; tests/acceptance checks these patterns
+  against the real server);
+- how to quote untrusted text (tool output, or a model's words that may repeat it) to another
+  model: inside tags it can't close."""
 
 import re
 from typing import Any

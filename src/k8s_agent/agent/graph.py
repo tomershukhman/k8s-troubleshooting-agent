@@ -4,7 +4,7 @@
                    ^               |               |          |        (a round that
                    +-- feedback ---+               +-> end    +-> end   rechecks the fix)
 
-- investigate: the investigator agent (`create_agent`), added directly as a node. It shares
+- investigate: the investigator agent (investigator.py), added directly as a node. It shares
   `messages` and `structured_response` with this graph and is compiled with per-thread
   persistence, so a feedback round, and the recheck round after a fix, continue its own
   conversation and its call-limit counters carry over (their `thread_limit` is the run-wide
@@ -15,30 +15,19 @@
 - remediate: the remediator agent (remediator.py) on that fix. Its fix tool pauses the whole
   graph for a person's approval; the caller resumes it on the same thread. An applied fix sends
   the investigator a recheck request.
-- recheck: code, no critic: the recheck round's `post_fix_check` must cite only its own fresh
-  tool calls, and decides with the fix tool's endpoint count whether the fix is verified.
+- recheck (code, no critic): the fix is verified only if the recheck round's `post_fix_check`
+  says resolved, citing only its own fresh tool calls, and the fix tool counted ready endpoints.
 """
 
 import operator
-import textwrap
 from collections.abc import Awaitable, Callable
-from importlib import resources
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from langchain.agents import create_agent
 from langchain.agents.middleware import (
-    AgentMiddleware,
-    AgentState,
     InputAgentState,
-    ModelCallLimitMiddleware,
-    ModelRefusalMiddleware,
-    OutputAgentState,
-    ToolCallLimitMiddleware,
-    ToolErrorMiddleware,
-    ToolRetryMiddleware,
 )
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
-from langchain.agents.structured_output import ProviderStrategy, StructuredOutputValidationError
+from langchain.agents.structured_output import StructuredOutputValidationError
 from langchain_core.exceptions import ModelError, OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, HumanMessage
@@ -54,49 +43,48 @@ from langgraph.types import Command
 
 from k8s_agent.agent import tool_output
 from k8s_agent.agent.critic import review
+from k8s_agent.agent.investigator import build_investigator
 from k8s_agent.agent.middleware import (
-    EvidenceMiddleware,
     RunContext,
-    retries_exhausted,
-    tool_error_text,
-    worth_retrying,
 )
 from k8s_agent.agent.records import (
+    Change,
     FixOutcome,
+    FixStep,
     Remediation,
     Step,
     VerifyRound,
     steps_from_messages,
 )
 from k8s_agent.agent.remediator import (
-    Kube,
     Remediator,
     build_remediator,
     fix_request,
-    labels,
     read_remediation,
 )
 from k8s_agent.config import Settings
+from k8s_agent.kube import Kube, labels
 from k8s_agent.schemas import (
-    CATEGORY_HELP,
+    AffectedResource,
     CriticVerdict,
     Diagnosis,
     DiagnosisStatus,
+    Evidence,
     FaultCategory,
+    FindingVerdict,
     PostFixCheck,
+    ProposedFix,
+    RemediatorAnswer,
+    SelectorLabel,
 )
 
 RERUN = "Re-run the investigation; the steps it took are in the run record."
 UNREADABLE = "The critic's verdict could not be read."
 # Our types in the checkpointed state: LangGraph's serializer wants them listed.
 CHECKPOINT_TYPES = [
-    ("k8s_agent.schemas", name)
-    for name in ("Diagnosis", "AffectedResource", "Evidence", "ProposedFix", "SelectorLabel",
-                 "DiagnosisStatus", "FaultCategory", "FindingVerdict", "PostFixCheck",
-                 "RemediatorAnswer")
-] + [
-    ("k8s_agent.agent.records", name)
-    for name in ("VerifyRound", "Remediation", "Change", "FixStep", "FixOutcome")
+    Diagnosis, AffectedResource, Evidence, ProposedFix, SelectorLabel, DiagnosisStatus,
+    FaultCategory, FindingVerdict, PostFixCheck, RemediatorAnswer,
+    VerifyRound, Remediation, Change, FixStep, FixOutcome,
 ]  # fmt: skip
 # How the remediator or the recheck can stop early. Neither undoes the verified diagnosis: the
 # stop is recorded with the fix. (A pause for approval isn't one of these: it propagates.)
@@ -119,75 +107,15 @@ class InvestigationState(TypedDict):
     remediation: NotRequired[Remediation]  # the fix, once the remediator is done
 
 
-type Investigator = CompiledStateGraph[
-    AgentState[Diagnosis], RunContext, InputAgentState, OutputAgentState[Diagnosis]
-]
 type InvestigationGraph = CompiledStateGraph[
     InvestigationState, RunContext, InvestigationState, InvestigationState
 ]
 
 
-def system_prompt(settings: Settings) -> str:
-    return (
-        resources.files("k8s_agent.agent")
-        .joinpath("prompt.md")
-        .read_text()
-        .format(
-            categories=textwrap.indent(CATEGORY_HELP, "  "),
-            max_tool_calls=settings.max_tool_calls,
-            remediation_namespaces=", ".join(settings.remediation_namespaces),
-        )
-    )
-
-
-def build_investigator(
-    model: BaseChatModel, tools: list[BaseTool], settings: Settings
-) -> Investigator:
-    # run_limit: per investigate round; thread_limit: the whole run, one thread per run. A
-    # thread reused across questions would need this budget reset per question.
-    # Each middleware has its own state and context types, which create_agent merges; its
-    # signature wants one of each for the whole list.
-    middleware: list[AgentMiddleware[Any, Any]] = [
-        EvidenceMiddleware(),
-        # A failed call raises: it is retried with backoff unless a retry can't fix it,
-        # then comes back to the model as a tool error with the server's text.
-        ToolErrorMiddleware(on_error=tool_error_text),
-        ToolRetryMiddleware(
-            max_retries=settings.tool_max_retries,
-            initial_delay=settings.tool_retry_delay_seconds,
-            retry_on=worth_retrying,
-            on_failure=retries_exhausted(settings.tool_max_retries + 1),
-        ),
-        ModelRefusalMiddleware(),
-        ModelCallLimitMiddleware(  # "error": the run stops, and the core says which limit
-            run_limit=settings.max_model_calls,
-            thread_limit=settings.run_max_model_calls,
-            exit_behavior="error",
-        ),
-        ToolCallLimitMiddleware(  # "continue": further calls refused, the model concludes
-            run_limit=settings.max_tool_calls,
-            thread_limit=settings.run_max_tool_calls,
-            exit_behavior="continue",
-        ),
-    ]
-    return create_agent(
-        model,
-        tools,
-        system_prompt=system_prompt(settings),
-        # Native structured output, set explicitly: a bare schema lets LangChain fall back to a
-        # forced tool call, which Sonnet 5.5 rejects (SPEC §3.2).
-        response_format=ProviderStrategy(Diagnosis),
-        middleware=middleware,
-        context_schema=RunContext,
-        checkpointer=True,
-        name="investigator",
-    )
-
-
 def intake(state: InvestigationState) -> dict[str, Any]:
     namespace = state.get("namespace")
     question = f"{state['question']}\n\nNamespace: {namespace}" if namespace else state["question"]
-    return {"messages": [HumanMessage(question)], "rounds": []}
+    return {"messages": [HumanMessage(question)]}
 
 
 def code_checks(d: Diagnosis, steps: list[Step], settings: Settings) -> list[str]:
@@ -212,6 +140,8 @@ def code_checks(d: Diagnosis, steps: list[Step], settings: Settings) -> list[str
     if fix := d.proposed_fix:
         res = d.affected_resource
         target = (res.kind, res.namespace, res.name) if res else None
+        if d.status is not DiagnosisStatus.fault_found:
+            problems.append("A fix may be proposed only with status fault_found.")
         if d.fault_category is not FaultCategory.selector_mismatch:
             problems.append("A fix may be proposed only for a selector mismatch.")
         elif target != ("Service", fix.namespace, fix.service):
@@ -257,6 +187,21 @@ async def read_verdict(
         return None
 
 
+def what_failed(verdict: CriticVerdict, draft: Diagnosis) -> str:
+    """Why a round is unfounded when the critic gave no feedback: it said "founded" while its own
+    findings, its fix verdict or its coverage of the draft's evidence say otherwise."""
+    reasons = [f"{f.ref}: {f.reason}" for f in verdict.findings if not f.supported]
+    judged = {f.ref for f in verdict.findings}
+    if unjudged := [ref for ref in draft.refs if ref not in judged]:
+        reasons.append(f"These findings couldn't be checked: {', '.join(unjudged)}.")
+    if draft.proposed_fix is not None:
+        if verdict.proposed_fix is None:
+            reasons.append("The proposed fix couldn't be checked.")
+        elif not verdict.proposed_fix.backed:
+            reasons.append(f"The proposed fix isn't backed: {verdict.proposed_fix.reason}")
+    return " ".join(reasons) or "The critic's verdict didn't cover the draft's evidence exactly."
+
+
 async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext]) -> Command:
     ctx, draft = runtime.context, state.get("structured_response")  # unset: no answer yet
     if draft is None:
@@ -279,7 +224,7 @@ async def verify_evidence(state: InvestigationState, runtime: Runtime[RunContext
         covered = sorted(f.ref for f in findings) == sorted(draft.refs)  # one per finding
         supported = covered and all(f.supported for f in findings)
         founded = verdict.founded and supported and fix_backed is not False
-        feedback = None if founded else (verdict.feedback.strip() or "Not every finding held up.")
+        feedback = None if founded else (verdict.feedback.strip() or what_failed(verdict, draft))
     round_ = VerifyRound(
         round=number,
         founded=founded,
@@ -348,9 +293,10 @@ def result(state: InvestigationState, runtime: Runtime[RunContext]) -> Command:
 
 
 def fixable(d: Diagnosis, settings: Settings) -> bool:
-    """Routing (code): only a proposed fix of the supported type (a selector mismatch on the
-    affected Service), in an allowed namespace, reaches the remediator. Anything else stays
-    advice. verify_evidence already sent back a fix proposed elsewhere; this is the gate."""
+    """Routing (code): on to the remediator only for a fault_found selector_mismatch whose
+    proposed fix is in an allowed namespace; anything else stays advice. code_checks (in
+    verify_evidence) already sent back any other fix, one that doesn't target the affected
+    Service included, so only a checked draft gets here."""
     fix = d.proposed_fix
     return (
         fix is not None
@@ -360,13 +306,13 @@ def fixable(d: Diagnosis, settings: Settings) -> bool:
     )
 
 
-async def run_to_end(agent: Any, inputs: dict[str, Any], **kwargs: Any) -> tuple[dict, str | None]:
+async def run_to_end(agent: Remediator, inputs: InputAgentState) -> tuple[dict, str | None]:
     """Run an agent to its end: its last state, and why it stopped early if it did (kept: what
     it did before the stop still counts). A pause for approval propagates: LangGraph's rules
     forbid catching it."""
     values: dict[str, Any] = {}
     try:
-        async for chunk in agent.astream(inputs, stream_mode="values", **kwargs):
+        async for chunk in agent.astream(inputs, stream_mode="values"):
             values = chunk
     except AGENT_STOPS as e:
         return values, f"{type(e).__name__}: {e}"
@@ -386,13 +332,13 @@ def remediate_node(remediator: Remediator) -> Callable[..., Awaitable[Command]]:
         if fix is None:  # `result` routes here only with a fix (fixable)
             raise RuntimeError("remediate needs the final diagnosis's proposed fix")
         values, stopped = await run_to_end(remediator, {"messages": [fix_request(fix)]})
-        done = read_remediation(
+        remediation = read_remediation(
             fix, values.get("messages", []), values.get("structured_response"), stopped
         )
-        if done.outcome is not FixOutcome.applied:
-            return Command(goto=END, update={"remediation": done})
-        ask = {"messages": [recheck_request(done)], "structured_response": None}
-        return Command(goto="investigate", update={"remediation": done, **ask})
+        if remediation.outcome is not FixOutcome.applied:
+            return Command(goto=END, update={"remediation": remediation})
+        ask = {"messages": [recheck_request(remediation)], "structured_response": None}
+        return Command(goto="investigate", update={"remediation": remediation, **ask})
 
     return remediate
 
@@ -431,16 +377,18 @@ def why_unverified(r: Remediation, check: PostFixCheck | None, fresh: list[Step]
 def recheck(state: InvestigationState) -> dict[str, Any]:
     """The recheck round's answer: its post_fix_check, citing only the tool calls made since the
     recheck was asked (the last message the investigator was sent). No critic round."""
-    fix, final, messages = state.get("remediation"), state.get("final"), state["messages"]
-    if fix is None or final is None:  # after_investigate routes here only after a fix
+    remediation, final, messages = state.get("remediation"), state.get("final"), state["messages"]
+    if remediation is None or final is None:  # after_investigate routes here only after a fix
         raise RuntimeError("recheck needs the final diagnosis and the fix")
-    asked = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
+    recheck_start = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
     answer = state.get("structured_response")
     check = answer.post_fix_check if answer else None
-    note = why_unverified(fix, check, steps_from_messages(messages[asked:]))
+    note = why_unverified(remediation, check, steps_from_messages(messages[recheck_start:]))
     return {
         "final": final.model_copy(update={"post_fix_check": check}),
-        "remediation": fix.model_copy(update={"verified": note is None, "recheck_note": note}),
+        "remediation": remediation.model_copy(
+            update={"verified": note is None, "recheck_note": note}
+        ),
     }
 
 

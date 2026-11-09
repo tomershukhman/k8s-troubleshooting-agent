@@ -1,6 +1,9 @@
-"""The run record (SPEC §3.7) and the result JSON (SPEC §4.2). `investigate()` returns the
-full record in memory; the CLI prints `RunRecord.result`, which carries only the cited steps.
-Steps are read back from the agent's messages, never tracked separately."""
+"""The agent's records, all plain data:
+- the run record (SPEC §3.7) and the result JSON (SPEC §4.2): `investigate()` returns the full
+  `RunRecord`; the CLI prints `RunRecord.result`, which carries only the cited steps. Steps are
+  read back from the agent's messages, never tracked separately;
+- the fix (SPEC 3.4): its arguments, the approval request and decision, and its outcome;
+- the live progress events `investigate()` sends its caller (`ProgressEvent`)."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -80,9 +83,9 @@ class Facts(BaseModel):
 
     current_selector: dict[str, str] | None = None
     resource_version: str | None = None
-    ready_pods: list[str] = []  # ready pods the exact new selector matches
-    # Each of those pods' managing controller (`ReplicaSet/checkout-69db948c9f`); None: no
-    # controller manages it (a standalone pod, perhaps planted to receive the traffic).
+    # The ready pods the exact new selector matches, each with its managing controller
+    # (`ReplicaSet/checkout-69db948c9f`); None: no controller manages it (a standalone pod,
+    # perhaps planted to receive the traffic).
     owners: dict[str, str | None] = {}
     error: str | None = None  # why they couldn't be read
 

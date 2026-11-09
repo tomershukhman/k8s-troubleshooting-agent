@@ -1,7 +1,7 @@
 """`investigate()`: the one entry point the CLI and the evals call.
 
-It runs the investigation graph (graph.py) on its own thread and never raises for a run that
-started; every outcome becomes a `RunRecord`:
+It runs the investigation graph (graph.py) under its own LangGraph thread (`thread_id`, the
+checkpoint key) and never raises for a run that started; every outcome becomes a `RunRecord`:
 - a diagnosis that passed verification (`fault_found`, `no_fault` or `inconclusive`)
 - an `inconclusive` forced by code: a limit or budget, a refusal, an invalid answer, or
   evidence that stayed unfounded after the last verify round
@@ -9,18 +9,19 @@ started; every outcome becomes a `RunRecord`:
 Only `NotStarted` is raised (e.g. `McpUnavailable`): nothing ran.
 
 A fix the remediator requests pauses the graph; the pause is decided here, inside the same call
-(approval.py), and the graph resumes on the same thread. So a run is one trace, fix included.
+(approval.py), and the graph resumes from its checkpoint on the same thread_id. So a run is one
+trace, fix included.
 """
 
 import asyncio
 import logging
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from functools import cache
 from typing import Any
 from uuid import uuid4
 
@@ -69,9 +70,9 @@ from k8s_agent.agent.records import (
     steps_from_messages,
     thinking_of,
 )
-from k8s_agent.agent.remediator import Kube
 from k8s_agent.agent.tool_output import cap
 from k8s_agent.config import Settings
+from k8s_agent.kube import Kube, token_expiry
 from k8s_agent.logs import run_log
 from k8s_agent.policy import READ_ONLY_TOOLS
 from k8s_agent.schemas import Diagnosis
@@ -80,7 +81,6 @@ from k8s_agent.schemas import Diagnosis
 with suppress_langchain_beta_warning():
     from langchain.mcp import MCPAdapter
 
-STAGES = ("intake", "investigate", "verify_evidence", "result", "remediate", "recheck")
 Asked = list[tuple[ApprovalRequest, Decision]]
 
 
@@ -98,19 +98,22 @@ class Outcome:
     diagnosis: Diagnosis | None = None
     error: str | None = None
     forced_reason: str | None = None
-    fix_stopped: str | None = None  # why it stopped after the result (in the fix), if it did
+    # set when the run stopped in the fix or its recheck, after the diagnosis was final: why
+    fix_stopped: str | None = None
 
 
 def make_model(settings: Settings, model: str) -> BaseChatModel:
-    """A chat model from a LangChain model string (AGENT_MODEL, AGENT_CRITIC_MODEL)."""
+    """A chat model from a LangChain model string (AGENT_MODEL, AGENT_CRITIC_MODEL,
+    AGENT_REMEDIATOR_MODEL)."""
     kwargs: dict[str, Any] = {
         "max_tokens": settings.max_output_tokens,
         "max_retries": settings.model_max_retries,  # the provider SDK retries 429/5xx/network
     }
     if model.startswith("anthropic:"):
         kwargs["effort"] = settings.effort
-        # Readable reasoning summaries in the trace and progress lines; the default
-        # ("omitted") returns thinking blocks with empty text.
+        # Readable reasoning summaries in the trace and progress lines. langchain-anthropic
+        # turns them on with `effort` only for models whose profile has the xhigh level (Sonnet
+        # 5.5 does, Haiku 5.5 doesn't); the API's own default ("omitted") gives empty text.
         kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
         if settings.anthropic_api_key is not None:
             kwargs["api_key"] = settings.anthropic_api_key.get_secret_value()
@@ -161,8 +164,8 @@ class _Stream:
         inner = bool(part["ns"])
         if part["type"] == "tasks":
             data = part["data"]
-            if not inner and "input" in data and data["name"] in STAGES:
-                name = data["name"]  # a node starts (a task's result has no "input")
+            if not inner and "input" in data:  # a node starts (a task's result has no "input")
+                name = data["name"]
                 self.started[name] += 1
                 self.rechecking = name == "investigate" and bool(data["input"].get("remediation"))
                 yield Stage(name, self.started[name], recheck=self.rechecking)
@@ -170,8 +173,9 @@ class _Stream:
         for node, update in part["data"].items():
             if not isinstance(update, dict):
                 continue
-            if inner:
-                yield from self.messages(update.get("messages", []))
+            if inner:  # an agent's own step: the investigator's, or the remediator's
+                remediator = part["ns"][0].startswith("remediate:")
+                yield from self.messages(update.get("messages", []), remediator)
             elif node == "investigate" and update.get("structured_response"):
                 if not self.rechecking:  # the recheck's answer: see Rechecked
                     yield Drafted(update["structured_response"])
@@ -182,14 +186,18 @@ class _Stream:
             elif node == "recheck":
                 yield Rechecked(update["final"].post_fix_check, update["remediation"])
 
-    def messages(self, messages: list[Any]) -> Iterator[ProgressEvent]:
+    def messages(self, messages: list[Any], remediator: bool) -> Iterator[ProgressEvent]:
+        """Progress events for one agent step's new messages. An investigator ToolMessage with
+        no evidence record is a call the tool-call limit refused, so it yields no event."""
         for m in messages:
             if evidence_of(m) is not None:
                 yield ToolCalled(steps_from_messages([m])[0])
             elif isinstance(m, AIMessage):
                 self.calls.update((c["id"], c) for c in m.tool_calls)
                 yield from (Reasoning(t) for t in thinking_of(m))
-            elif isinstance(m, ToolMessage) and (c := self.calls.get(m.tool_call_id)):
+            elif (
+                remediator and isinstance(m, ToolMessage) and (c := self.calls.get(m.tool_call_id))
+            ):
                 yield FixCalled(FixStep.of(c, m))
 
 
@@ -297,24 +305,28 @@ def _complete_remediation(
 ) -> Remediation | None:
     """The fix as the graph recorded it, with what the person was shown and decided. A run
     stopped mid-fix (`stopped`) says so."""
-    done = values.get("remediation")
+    remediation = values.get("remediation")
     fix = values["final"].proposed_fix if stopped else None
-    if stopped and done is None and fix is not None:  # in the remediator: it may have applied it
+    if (
+        stopped and remediation is None and fix is not None
+    ):  # in the remediator: it may have applied it
         maybe = "; it was approved, so check the Service" if asked and asked[-1][1].approved else ""
         change = Change(namespace=fix.namespace, service=fix.service, before=None,
                         after=fix.selector_dict())  # fmt: skip
         detail = f"the run stopped before the fix finished: {stopped}{maybe}"
-        done = Remediation(change=change, outcome=FixOutcome.failed, detail=detail)
-    elif stopped and done is not None and not done.verified:  # in the recheck
+        remediation = Remediation(change=change, outcome=FixOutcome.failed, detail=detail)
+    elif stopped and remediation is not None and not remediation.verified:  # in the recheck
         note = f"the run stopped in the recheck: {stopped}"
-        done = done.model_copy(update={"recheck_note": note})
-    if done is not None and asked:
+        remediation = remediation.model_copy(update={"recheck_note": note})
+    if remediation is not None and asked:
         request, decision = asked[-1]
-        change = done.change
+        change = remediation.change
         if change.before is None:  # the fix tool never ran: the selector read at the pause
             change = change.model_copy(update={"before": request.facts.current_selector})
-        done = done.model_copy(update={"request": request, "decision": decision, "change": change})
-    return done
+        remediation = remediation.model_copy(
+            update={"request": request, "decision": decision, "change": change}
+        )
+    return remediation
 
 
 def _evidence_steps(d: Diagnosis | None, steps: list[Step], s: Settings) -> list[EvidenceStep]:
@@ -333,10 +345,25 @@ def _evidence_steps(d: Diagnosis | None, steps: list[Step], s: Settings) -> list
     ]
 
 
-def _close_if_loaded(load_kube: Any) -> None:
-    """At the end of a run, the remediator's client, if the run loaded it (`load_kube`: cached)."""
-    if load_kube.cache_info().currsize:
-        load_kube().close()
+@dataclass
+class _OwnKube:
+    """The remediator's client, loaded on first use (a run that proposes no fix never needs it)
+    and only once, though the remediator's tools may first ask for it from parallel threads."""
+
+    settings: Settings
+    kube: Kube | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __call__(self) -> Kube:
+        with self.lock:
+            if self.kube is None:
+                s = self.settings
+                self.kube = Kube.load(s.remediator_kubeconfig, s.remediator_timeout_seconds)
+            return self.kube
+
+    def close(self) -> None:
+        if self.kube is not None:
+            self.kube.close()
 
 
 async def investigate(
@@ -345,21 +372,20 @@ async def investigate(
     settings: Settings,
     namespace: str | None = None,
     user_id: str | None = None,
-    thread_id: str | None = None,
     on_event: Callable[[ProgressEvent], None] = lambda _: None,
     approve: Approver | None = None,
     model: BaseChatModel | None = None,
     critic_model: BaseChatModel | None = None,
     remediator_model: BaseChatModel | None = None,
     mcp_target: Any = None,
-    remediator_kube: Callable[[], Kube] | None = None,
+    load_remediator_kube: Callable[[], Kube] | None = None,
 ) -> RunRecord:
     """Investigate `question` and return the full run record. `approve` answers a fix request
     (the CLI asks in the terminal); without it a request is rejected, "no interactive approval
     available". The models, `mcp_target` (any target `MCPAdapter` accepts) and
-    `remediator_kube` (the remediator's cluster access) default to the settings; tests pass
+    `load_remediator_kube` (the remediator's cluster access) default to the settings; tests pass
     fakes."""
-    run_id, thread_id = str(uuid4()), thread_id or str(uuid4())
+    run_id, thread_id = str(uuid4()), str(uuid4())  # a fresh conversation per run
     user_id = user_id or settings.effective_user_id
     log = run_log(run_id=run_id, thread_id=thread_id, user_id=user_id)
     log.info("run_started", extra={"question": question, "namespace": namespace})
@@ -376,6 +402,15 @@ async def investigate(
         # The run's clock starts with its trace, so both give the same duration (MLflow takes
         # a moment to set up the first trace in a process, before the span starts).
         started_at, t0 = datetime.now(UTC), time.monotonic()
+        # Nothing renews the agent's tokens; once expired, every cluster read would fail. Both
+        # are minted together, and this container may hold only the remediator's.
+        expiry = token_expiry(settings.remediator_kubeconfig)
+        if expiry is not None and expiry <= started_at:
+            log.error("tokens_expired", extra={"expired_at": expiry.isoformat()})
+            raise NotStarted(
+                f"the agent's tokens expired at {expiry:%Y-%m-%d %H:%M} UTC: run "
+                "`docker compose run --rm admin setup` (or `uv run agent setup`)"
+            )
         try:
             model = model or make_model(settings, settings.model)
             critic_llm = critic_model or make_model(settings, settings.effective_critic_model)
@@ -386,11 +421,8 @@ async def investigate(
         except Exception as e:
             log.error("model_unavailable", extra={"error": f"{type(e).__name__}: {e}"})
             raise NotStarted(f"cannot create the models: {type(e).__name__}: {e}") from e
-        # Loaded on first use: a run that proposes no fix never needs it.
-        load_own_kube = cache(
-            lambda: Kube.load(settings.remediator_kubeconfig, settings.remediator_timeout_seconds)
-        )
-        load_kube = remediator_kube or load_own_kube
+        own_kube = _OwnKube(settings)
+        load_kube = load_remediator_kube or own_kube
         context = RunContext(settings=settings, log=log, critic=critic)
         gate = Gate(settings, load_kube, approve, user_id, log)
         config = {
@@ -400,7 +432,7 @@ async def investigate(
             "run_name": "graph",  # its trace span (default: "LangGraph")
         }
         async with AsyncExitStack() as stack:
-            stack.callback(_close_if_loaded, load_own_kube)
+            stack.callback(own_kube.close)
             tools = await _load_tools(stack, mcp_target or mcp_client(settings), settings, log)
             build = lambda: build_graph(model, tools, settings, remediator_llm, load_kube)  # noqa: E731
             outcome, values, asked = await _run(build, inputs, config, context, on_event, gate)
@@ -425,8 +457,8 @@ async def investigate(
             remediation=remediation,
         )
         tracing.finish(span, result.model_dump(mode="json"), result.error)
-    level = "error" if outcome.status is RunStatus.failed else "info"
-    getattr(log, level)(
+    log.log(
+        logging.ERROR if outcome.status is RunStatus.failed else logging.INFO,
         "run_finished",
         extra={
             "status": outcome.status,

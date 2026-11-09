@@ -1,6 +1,6 @@
-"""M2: the identities and the MCP server hold the safety boundary (PLAN.md M2). Checked two
-ways: through the MCP server, with the client the agent uses, and directly at Kubernetes, with
-each identity's own kubeconfig."""
+"""The identities and the MCP server hold the safety boundary. Checked two ways: through the MCP
+server, with the client the agent uses, and directly at Kubernetes, with each identity's own
+kubeconfig."""
 
 import asyncio
 import base64
@@ -54,7 +54,7 @@ def identity(path: Path) -> client.ApiClient:
 # Per test, from the current file: `agent setup` rotates the tokens.
 @pytest.fixture
 def reader() -> client.ApiClient:
-    return identity(get_settings().reader_kubeconfig)
+    return identity(access.READER_KUBECONFIG)
 
 
 @pytest.fixture
@@ -185,7 +185,7 @@ def test_mcp_container_is_pinned_hardened_and_holds_only_the_reader_credentials(
     assert all(m["RW"] is False for m in mounts.values())
     assert (
         Path(mounts["/kube/reader.kubeconfig"]["Source"]).resolve()
-        == get_settings().reader_kubeconfig.resolve()
+        == access.READER_KUBECONFIG.resolve()
     )
 
 
@@ -232,14 +232,15 @@ OTHER = [  # never: credentials, a shell, who-may-do-what
     ("rbac.authorization.k8s.io", "rolebindings", None),
 ]
 REMEDIATE = {  # (verb, group, resource) the remediator may do in shop-checkout (SPEC 3.5)
-    ("get", "", "services"), ("patch", "", "services"), ("get", "", "pods"), ("list", "", "pods"),
-    ("get", "discovery.k8s.io", "endpointslices"), ("list", "discovery.k8s.io", "endpointslices"),
+    ("get", "", "services"), ("patch", "", "services"), ("list", "", "pods"),
+    ("list", "discovery.k8s.io", "endpointslices"),
 }  # fmt: skip
+SERVICE = "checkout"  # the only Service it may get or patch (resourceNames)
 
 
-def can(api: client.ApiClient, verb, group, resource, sub=None, ns=None) -> bool:
+def can(api: client.ApiClient, verb, group, resource, sub=None, ns=None, name=None) -> bool:
     attrs = client.V1ResourceAttributes(
-        verb=verb, group=group, resource=resource, subresource=sub, namespace=ns
+        verb=verb, group=group, resource=resource, subresource=sub, namespace=ns, name=name
     )
     review = client.V1SelfSubjectAccessReview(
         spec=client.V1SelfSubjectAccessReviewSpec(resource_attributes=attrs)
@@ -265,9 +266,14 @@ def assert_reader_boundary(reader: client.ApiClient, namespaces: list[str]) -> N
 def assert_remediator_boundary(remediator: client.ApiClient) -> None:
     for ns in NS:
         for group, res, sub in READABLE + OTHER:
+            name = SERVICE if res == "services" else None
             for verb in READ + WRITE:
                 want = ns == CHECKOUT and sub is None and (verb, group, res) in REMEDIATE
-                assert can(remediator, verb, group, res, sub, ns) is want, (verb, res, sub, ns)
+                allowed = can(remediator, verb, group, res, sub, ns, name)
+                assert allowed is want, (verb, res, sub, ns)
+    for verb in ("get", "patch"):  # no other Service, not even in shop-checkout
+        assert not can(remediator, verb, "", "services", ns=CHECKOUT, name="orders")
+        assert not can(remediator, verb, "", "services", ns=CHECKOUT)
 
 
 def test_reader_reads_every_scenario_namespace_and_changes_nothing(reader):
@@ -281,7 +287,7 @@ def test_reader_reads_every_scenario_namespace_and_changes_nothing(reader):
 def test_remediator_can_only_fix_and_verify_in_checkout(remediator, cluster):
     assert_remediator_boundary(remediator)
     for ns in ["default", "kube-system", AGENT_NAMESPACE]:
-        assert not any(can(remediator, v, g, r, ns=ns) for v, g, r in REMEDIATE), ns
+        assert not any(can(remediator, v, g, r, ns=ns, name=SERVICE) for v, g, r in REMEDIATE), ns
     assert not can(remediator, "list", "", "namespaces")
     # the one fix it exists for, as a dry run: allowed, and nothing changed
     core = client.CoreV1Api(remediator)
@@ -305,7 +311,7 @@ def mcp_reads_the_checkout_service():
 def test_setup_again_is_harmless():
     agent("setup")  # again, with the scenarios and k8s-mcp up
     s = get_settings()
-    assert_reader_boundary(identity(s.reader_kubeconfig), NS)
+    assert_reader_boundary(identity(access.READER_KUBECONFIG), NS)
     assert_remediator_boundary(identity(s.remediator_kubeconfig))
     eventually(mcp_reads_the_checkout_service)
 
@@ -313,7 +319,7 @@ def test_setup_again_is_harmless():
 def test_mcp_picks_up_a_rotated_token_without_restart(cluster, request):
     """Re-running `agent setup` refreshes the running server's token (README claim)."""
     request.addfinalizer(lambda: agent("setup"))  # recreates the reader if this test fails
-    old = yaml.safe_load(get_settings().reader_kubeconfig.read_text())
+    old = yaml.safe_load(access.READER_KUBECONFIG.read_text())
 
     def state():
         c = inspect_mcp()

@@ -1,23 +1,21 @@
-"""M3: the investigation graph on the real model and the real cluster (PLAN.md M3). Model
-answers vary, so each real-model check gets one retry; every attempt is printed."""
+"""The agent's parts against the real cluster and model: real tool output through the
+middleware, the real critic's verdicts, the MCP server's own error wording, and one real run in a
+namespace the agent can't read. Model answers vary, so each real-model check gets one retry;
+every attempt is printed."""
 
 import asyncio
-import subprocess
 
 import pytest
 
-from k8s_agent import evals
-from k8s_agent.agent import RunRecord, RunStatus, investigate, tool_output
+from k8s_agent.agent import RunRecord, investigate, tool_output
 from k8s_agent.agent.core import make_model
 from k8s_agent.agent.critic import review, with_verdict
 from k8s_agent.agent.records import Step
 from k8s_agent.config import get_settings
-from k8s_agent.policy import READ_ONLY_TOOLS
-from k8s_agent.scenarios import Scenario, get_scenario
 from k8s_agent.schemas import Diagnosis
 from tests.fakes import ScriptedModel, answer, call, critic, diagnosis, selector_fix
 
-from .conftest import FOLDERS, ROOT, compose, crash_pod, mcp_call
+from .conftest import CONFIGMAP, CRASH, MISSPELT, ORDERS, crash_pod, mcp_call
 
 pytestmark = pytest.mark.usefixtures("cluster")
 ATTEMPTS = 2
@@ -57,54 +55,6 @@ def retried(check):
         if not attempts[-1]:
             return
     pytest.fail(f"no attempt passed: {attempts}")
-
-
-def problems(record: RunRecord, scn: Scenario) -> list[str]:
-    """Why this run doesn't match the scenario's expected answer (empty = it does)."""
-    r = record.result
-    if r.status is not RunStatus.completed:
-        return [f"run {r.status}: {r.error}"]
-    d, found = r.diagnosis, []
-    if missing := set(d.refs) - {s.ref for s in record.steps}:
-        found.append(f"cited refs that don't exist: {missing}")
-    if outside := {s.tool for s in record.steps} - READ_ONLY_TOOLS:
-        found.append(f"called tools outside the allowlist: {outside}")
-    if r.duration_ms > get_settings().run_max_seconds * 1000:
-        found.append(f"took {r.duration_ms} ms")
-    # status, category, resource, and for no fault evidence from its namespace: the evals' own
-    # check, so M3 and M5 can't drift apart (the evals' other checks read the run's trace)
-    out, expected = evals.outputs_of(record), evals.expectations(scn)
-    if not (correct := evals.diagnosis_correct(outputs=out, expectations=expected)).value:
-        found.append(correct.rationale)
-    fix, want_fix = d.proposed_fix, scn.spec.expected_fix
-    got = (fix.namespace, fix.service, fix.selector_dict()) if fix else None
-    if got != ((want_fix.namespace, want_fix.service, want_fix.selector) if want_fix else None):
-        found.append(f"proposed fix {got}, expected {want_fix}")
-    return found
-
-
-@pytest.fixture(scope="module")
-def first_attempts(cluster) -> dict[str, RunRecord]:
-    """Every scenario's question, asked once, all at the same time: they're independent (each
-    in its own namespace), so the wait is the slowest run, not the sum."""
-    get_settings.cache_clear()
-    s = get_settings()
-    questions = [get_scenario(s.scenarios_dir, f).spec.question for f in FOLDERS]
-
-    async def all_at_once():
-        return await asyncio.gather(*(investigate(q, settings=s) for q in questions))
-
-    return dict(zip(FOLDERS, LOOP.run(all_at_once()), strict=True))
-
-
-@pytest.mark.parametrize("folder", FOLDERS)
-def test_the_graph_diagnoses_each_scenario_without_a_namespace(folder, first_attempts):
-    scn = get_scenario(get_settings().scenarios_dir, folder)
-    # no namespace given: it must find it. A failed attempt is retried, alone.
-    attempts = [problems(report(first_attempts[folder]), scn)]
-    while attempts[-1] and len(attempts) < ATTEMPTS:
-        attempts.append(problems(run(scn.spec.question), scn))
-    assert not attempts[-1], f"no attempt passed: {attempts}"
 
 
 def test_a_real_deployment_reaches_the_agent_with_status_and_without_managed_fields(cluster):
@@ -151,16 +101,7 @@ def verdict_on(draft: dict, steps: list[Step], question: str):
     return verdict
 
 
-ORDERS = {"namespace": "shop-orders"}
-CONFIGMAP = {"apiVersion": "v1", "kind": "ConfigMap", "name": "orders-config", **ORDERS}
-MISSPELT = "The ConfigMap key is misspelled: DATABSE_URL instead of DATABASE_URL."
 CRASH_Q = "The orders service keeps restarting. What's wrong?"
-CRASH = diagnosis(
-    fault_category="bad_config",
-    affected_resource={"kind": "ConfigMap", "namespace": "shop-orders", "name": "orders-config"},
-    root_cause=MISSPELT,
-    recommended_action="Rename the key to DATABASE_URL in ConfigMap orders-config.",
-)
 
 
 def test_the_critic_rejects_an_irrelevant_citation():
@@ -260,17 +201,3 @@ def test_a_namespace_the_agent_cannot_read_gives_inconclusive_not_a_guess():
         return [] if ok else [d]
 
     retried(check)
-
-
-def test_with_the_mcp_server_stopped_the_cli_fails_with_the_clear_message(request):
-    request.addfinalizer(lambda: compose("up", "-d", "--wait", "k8s-mcp"))
-    compose("stop", "k8s-mcp")
-    # the real command, so a traceback would show on its stderr
-    result = subprocess.run(
-        ["uv", "run", "agent", "investigate", "Is the inventory service healthy?"],
-        cwd=ROOT, capture_output=True, text=True,
-    )  # fmt: skip
-    print(result.stderr)
-    assert (result.returncode, result.stdout) == (2, "")
-    assert f"error: cannot use the MCP server at {get_settings().mcp_endpoint}: " in result.stderr
-    assert "docker compose up -d k8s-mcp" in result.stderr and "Traceback" not in result.stderr

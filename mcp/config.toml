@@ -10,7 +10,7 @@ bind_address = "127.0.0.1"
 read_only = true
 
 # The tool allowlist. Must equal READ_ONLY_TOOLS in src/k8s_agent/policy.py, which the agent
-# enforces again when it loads the tools (test_m2_access.py checks what the server offers).
+# enforces again when it loads the tools (tests/acceptance/test_access.py checks what the server offers).
 toolsets = ["core"]
 enabled_tools = [
   "namespaces_list",

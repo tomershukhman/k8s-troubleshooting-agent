@@ -14,12 +14,9 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from importlib import resources
-from pathlib import Path
 from typing import Any
 
-from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
-from kubernetes.config.config_exception import ConfigException
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -49,108 +46,14 @@ from k8s_agent.agent.records import (
 )
 from k8s_agent.agent.tool_output import cap, quoted
 from k8s_agent.config import Settings
-from k8s_agent.kube import KubeError, pod_ready, present
+from k8s_agent.kube import KUBE_ERRORS, Kube, KubeError, error_text, labels, pod_ready, present
 from k8s_agent.policy import FIX_TOOL
 from k8s_agent.schemas import ProposedFix, RemediatorAnswer
 
 PROMPT = resources.files("k8s_agent.agent").joinpath("remediator.md").read_text()
-SERVICE_NAME_LABEL = "kubernetes.io/service-name"  # on each of a Service's EndpointSlices
-# What a call through the Kubernetes client can raise: the API server's error, or no answer at
-# all (urllib3: a timeout, a refused or broken connection; only SSL errors become ApiException).
-KUBE_ERRORS = (ApiException, HTTPError)
-
 type Remediator = CompiledStateGraph[
     AgentState[RemediatorAnswer], None, InputAgentState, OutputAgentState[RemediatorAnswer]
 ]
-
-
-def labels(selector: dict[str, str] | None) -> str:
-    """A selector as `kubectl` writes it: `app=checkout,tier=web`."""
-    return ",".join(f"{k}={v}" for k, v in sorted((selector or {}).items())) or "(none)"
-
-
-@dataclass(frozen=True)
-class Kube:
-    """The remediator's cluster access. Every call has a time limit."""
-
-    core: client.CoreV1Api
-    discovery: client.DiscoveryV1Api
-    timeout: float
-
-    @classmethod
-    def load(cls, kubeconfig: Path, timeout: float) -> Kube:
-        """From the remediator kubeconfig only: never $KUBECONFIG, ~/.kube/config or an
-        in-cluster account, so a missing file is an error, not another identity."""
-        try:
-            api = config.new_client_from_config(config_file=str(kubeconfig))
-        except ConfigException as e:
-            raise KubeError(
-                f"cannot load the remediator kubeconfig {kubeconfig}: {e} (run `agent setup`)"
-            ) from e
-        return cls(client.CoreV1Api(api), client.DiscoveryV1Api(api), timeout)
-
-    def close(self) -> None:
-        """Close the connections of the client both APIs share."""
-        self.core.api_client.close()
-
-    def service(self, namespace: str, name: str) -> client.V1Service:
-        return self.core.read_namespaced_service(name, namespace, _request_timeout=self.timeout)
-
-    def pods(self, namespace: str, selector: dict[str, str] | None = None) -> list[client.V1Pod]:
-        found = self.core.list_namespaced_pod(
-            namespace,
-            label_selector=labels(selector) if selector else None,  # None: every pod
-            _request_timeout=self.timeout,
-        )
-        return [p for p in found.items if present(p.metadata).deletion_timestamp is None]
-
-    def ready_pods(self, namespace: str, selector: dict[str, str]) -> list[str]:
-        """The ready pods the exact `selector` matches (as a Service's: an empty one, none)."""
-        return sorted(self.ready_pod_owners(namespace, selector))
-
-    def ready_pod_owners(self, namespace: str, selector: dict[str, str]) -> dict[str, str | None]:
-        """The same pods, by name, each with the controller that manages it, from its
-        ownerReferences (`ReplicaSet/checkout-69db948c9f`); None when none does."""
-        if not selector:
-            return {}
-        pods = [p for p in self.pods(namespace, selector) if pod_ready(p)]
-        return dict(sorted((present(present(p.metadata).name), controller(p)) for p in pods))
-
-    def ready_endpoints(self, namespace: str, service: str) -> int:
-        """Ready endpoints across the Service's EndpointSlices, by the API's rules: an unset
-        `ready` means ready, and one endpoint may be in several slices, so each counts once."""
-        slices = self.discovery.list_namespaced_endpoint_slice(
-            namespace,
-            label_selector=f"{SERVICE_NAME_LABEL}={service}",
-            _request_timeout=self.timeout,
-        )
-        return len({
-            e.target_ref.uid if e.target_ref and e.target_ref.uid else tuple(e.addresses)
-            for s in slices.items for e in s.endpoints or []
-            if e.conditions is None or e.conditions.ready is not False
-        })  # fmt: skip
-
-    def replace_selector(
-        self, namespace: str, name: str, selector: dict[str, str], version: str
-    ) -> client.V1Service:
-        """One JSON Patch, applied atomically by the API server: the test fails (422) if the
-        Service is no longer at `version`, and then nothing is applied. `replace` sets the
-        whole selector, so no old key survives (a merge patch would keep them)."""
-        ops = [
-            {"op": "test", "path": "/metadata/resourceVersion", "value": version},
-            {"op": "replace", "path": "/spec/selector", "value": selector},
-        ]
-        return self.core.patch_namespaced_service(
-            name, namespace, ops,
-            _content_type="application/json-patch+json", _request_timeout=self.timeout,
-        )  # fmt: skip
-
-
-def controller(pod: client.V1Pod) -> str | None:
-    """The pod's managing controller, as `Kind/name`; None for a pod no controller manages."""
-    refs = present(pod.metadata).owner_references or []
-    ref = next((r for r in refs if r.controller), None)
-    return f"{ref.kind}/{ref.name}" if ref else None
 
 
 # --- the fix ---------------------------------------------------------------------------------
@@ -179,7 +82,7 @@ def apply_fix(kube: Kube, args: FixArgs, settings: Settings) -> FixResult:
         before, version = present(svc.spec).selector, present(svc.metadata).resource_version
         if version != args.resource_version:
             return stale(args, version, before)
-        if not kube.ready_pods(ns, args.selector):
+        if not kube.ready_pod_owners(ns, args.selector):
             return FixResult(FixOutcome.invalid, f"no ready pod matches {want}", before)
     except ApiException as e:
         return failure(kube, args, e, before)
@@ -196,7 +99,7 @@ def apply_fix(kube: Kube, args: FixArgs, settings: Settings) -> FixResult:
         endpoints = wait_for_endpoints(kube, ns, name, settings)
         counted = f"{endpoints} ready endpoint{'s' * (endpoints != 1)}"
     except KUBE_ERRORS as e:
-        endpoints, counted = 0, f"couldn't count the endpoints: {e}"
+        endpoints, counted = 0, f"couldn't count the endpoints: {error_text(e)}"
     detail = f"selector {labels(before)} → {want}; {counted}"
     return FixResult(FixOutcome.applied, detail, before, endpoints)
 
@@ -248,7 +151,7 @@ def tools(load_kube: Callable[[], Kube], settings: Settings) -> list[BaseTool]:
         except KubeError as e:
             raise ToolException(str(e)) from e
         except ApiException as e:
-            raise ToolException(f"{e.status} {e.reason}: {e.body}") from e
+            raise ToolException(error_text(e)) from e
         except HTTPError as e:
             raise ToolException(f"no answer from the API server: {e}") from e
 
@@ -341,7 +244,7 @@ def read_remediation(
     fix: ProposedFix,
     messages: Sequence[BaseMessage],
     answer: RemediatorAnswer | None,
-    stopped: str | None = None,
+    stopped: str | None,
 ) -> Remediation:
     """What the remediator did, read from its conversation: its fix request (if any), the fix
     tool's result (or the reject in its place), and every tool call. `stopped`: why it ended

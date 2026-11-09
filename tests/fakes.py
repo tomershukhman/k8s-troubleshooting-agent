@@ -16,7 +16,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
 from pydantic import Field
 
-from k8s_agent.kube import AdminClients
+from k8s_agent.kube import AdminClients, Kube
 
 # --- the model -----------------------------------------------------------------------------
 
@@ -314,10 +314,8 @@ class FakeServices:
         self.unowned: set[str] = set()  # pods no controller manages (others: OWNER's)
         self.patches: list[tuple[str, str, Any, str]] = []
 
-    def kube(self) -> Any:
-        from k8s_agent.agent.remediator import Kube
-
-        return Kube(self, self, timeout=1)
+    def kube(self) -> Kube:
+        return Kube(self, self, timeout=1)  # self: the core and the discovery API
 
     def edit(self) -> None:
         """Someone changes the Service (any field): a new resourceVersion."""

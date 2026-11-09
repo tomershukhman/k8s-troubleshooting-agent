@@ -18,8 +18,8 @@ def test_every_scenario_loads_with_its_own_neutral_namespace():
     namespaces = [scn.namespace for scn in found.values()]
     assert len(set(namespaces)) == 4 and all(ns.startswith("shop-") for ns in namespaces)
     for name, scn in found.items():
-        # nothing the agent can see gives away the folder name, which describes the fault: as
-        # M1 checks on the cluster, each name, and each label and annotation as key=value
+        # nothing the agent can see gives away the folder name, which describes the fault:
+        # each name, and each label and annotation as key=value
         for doc in scn.manifests:
             pods = doc.get("spec", {}).get("template", {}).get("metadata", {})  # its pods'
             visible = [doc["metadata"]["name"]] + [
@@ -46,10 +46,15 @@ def test_live_state_counts_live_pods_only():
     assert live_state(pods) == ReadyWhen(pods_ready=1, pods_not_ready=1, restarts=3)
 
 
-def up(kube: FakeKube, name: str = "selector", ready_timeout: float = 1) -> None:
-    scn = scenarios.get_scenario(get_settings().scenarios_dir, name)
-    scenarios.up(scn, kube.clients, ready_timeout=ready_timeout, delete_timeout=1, poll=0.01,
-                 progress=print)  # fmt: skip
+@pytest.fixture(autouse=True)
+def quick(env):
+    env(scenario_ready_timeout_seconds="1", scenario_delete_timeout_seconds="1",
+        scenario_poll_seconds="0.01")  # fmt: skip
+
+
+def up(kube: FakeKube, name: str = "selector") -> None:
+    s = get_settings()
+    scenarios.up(scenarios.get_scenario(s.scenarios_dir, name), kube.clients, s, print)
 
 
 def test_up_recreates_the_namespace_then_its_access_then_the_app():
@@ -68,9 +73,10 @@ def test_up_recreates_the_namespace_then_its_access_then_the_app():
     assert kube.timeouts and set(kube.timeouts) == {FakeKube.TIMEOUT}  # every call is limited
 
 
-def test_up_waits_until_the_fault_is_live():
+def test_up_waits_until_the_fault_is_live(env):
+    env(scenario_ready_timeout_seconds="0.05")
     with pytest.raises(TimeoutError, match="fault not live"):
-        up(FakeKube(pods=[pod()]), "crashloop", ready_timeout=0.05)  # no restarts yet
+        up(FakeKube(pods=[pod()]), "crashloop")  # no restarts yet
     up(FakeKube(pods=[pod(ready=False, restarts=2)]), "crashloop")
 
 
@@ -83,7 +89,8 @@ def test_up_and_down_refuse_a_namespace_that_is_not_ours():
 
 
 def test_down_on_an_absent_namespace_is_a_no_op():
-    scn = scenarios.get_scenario(get_settings().scenarios_dir, "selector")
-    kube = FakeKube()
-    assert not scenarios.down(scn, kube.clients, timeout=1, poll=0.01, progress=print)
+    s, kube = get_settings(), FakeKube()
+    assert not scenarios.down(
+        scenarios.get_scenario(s.scenarios_dir, "selector"), kube.clients, s, print
+    )
     assert kube.log == []

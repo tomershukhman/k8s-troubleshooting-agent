@@ -2,6 +2,7 @@
 
 import getpass
 import math
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -21,7 +22,7 @@ class Settings(BaseSettings):
 
     # Admin access, used only by `agent scenario`, `agent setup` and `agent eval` (it rebuilds
     # the scenarios). Unset = the standard kubeconfig lookup ($KUBECONFIG, then ~/.kube/config)
-    # and its current context.
+    # and its current context, which must then be a local cluster (kube.LOCAL_CONTEXTS).
     kubeconfig: Path | None = None
     kube_context: str | None = None
     kube_timeout_seconds: PositiveFloat = 30  # per Kubernetes API call with the admin kubeconfig
@@ -35,7 +36,6 @@ class Settings(BaseSettings):
     # Agent identities (SPEC §3.5)
     rbac_file: Path = Path("deploy/rbac.yaml")
     token_ttl_hours: float = Field(default=12, ge=MIN_TOKEN_TTL_HOURS)
-    reader_kubeconfig: Path = Path(".kube-agent/reader.kubeconfig")
     remediator_kubeconfig: Path = Path(".kube-agent/remediator.kubeconfig")
     # Where the agent may propose a fix (the remediator's RoleBinding grants the same).
     remediation_namespaces: NameList = ["shop-checkout"]
@@ -97,15 +97,13 @@ class Settings(BaseSettings):
     mlflow_experiment_name: str = Field(
         default="k8s-agent", validation_alias="MLFLOW_EXPERIMENT_NAME"
     )
+    # Seconds per call to the tracking server (the compose service, on this machine): room for
+    # the evals to fetch a large trace (the selector run's ~85 spans took ~3 s locally).
     mlflow_http_request_timeout: PositiveInt = Field(
-        default=3, validation_alias="MLFLOW_HTTP_REQUEST_TIMEOUT"
-    )  # seconds per call to the tracking server (it runs on this machine's cluster)
+        default=10, validation_alias="MLFLOW_HTTP_REQUEST_TIMEOUT"
+    )
     mlflow_http_request_max_retries: int = Field(
         default=0, ge=0, validation_alias="MLFLOW_HTTP_REQUEST_MAX_RETRIES"
-    )
-    # MLflow's usage telemetry to its own servers (on by default in MLflow); traces never go.
-    mlflow_disable_telemetry: bool = Field(
-        default=True, validation_alias="MLFLOW_DISABLE_TELEMETRY"
     )
     # The code's git commit, recorded on traces and eval runs (it pins the prompts). Unset = the
     # working directory's .git; the image has none, so its build sets this.
@@ -122,20 +120,10 @@ class Settings(BaseSettings):
     # Tries per judge verdict: a judge call that fails or gives no readable verdict is asked
     # again. Still none: that run fails the check.
     judge_attempts: PositiveInt = 3
-    eval_mlflow_experiment_name: str = (
-        "k8s-agent-evals"  # so MLFLOW_EXPERIMENT_NAME shows real runs
-    )
+    # The evals trace to their own experiment, so the one users open (MLFLOW_EXPERIMENT_NAME)
+    # holds only real runs.
+    eval_mlflow_experiment_name: str = "k8s-agent-evals"
     eval_results_dir: Path = Path("eval-results")  # one JSON file per `agent eval`
-
-    # Acceptance tests: how long an assertion may keep retrying for state that flips between
-    # polls (e.g. CrashLoopBackOff).
-    accept_assert_timeout_seconds: PositiveFloat = 30
-    # M2+ acceptance setup keeps scenarios already up (ours, manifests re-applied cleanly, fault
-    # live) and leaves them up afterwards; a test that changes one (M6's, on the selector
-    # Service) rebuilds it. False = fresh, removed after.
-    accept_reuse_scenarios: bool = True
-    # Test runs trace here, so the experiment users open (MLFLOW_EXPERIMENT_NAME) shows real runs.
-    accept_mlflow_experiment_name: str = "k8s-agent-tests"
 
     @field_validator("remediation_namespaces", "tool_output_strip_fields", mode="before")
     @classmethod
@@ -157,8 +145,9 @@ class Settings(BaseSettings):
 
     @property
     def eval_pass_min_runs(self) -> int:
-        """Runs in which a "most runs" check must pass: the share of the runs, rounded up."""
-        return math.ceil(self.eval_runs_per_scenario * self.eval_pass_share - 1e-9)
+        """Runs in which a "most runs" check must pass: the share of the runs, rounded up. Within
+        0.01 of a whole run counts as that run, so a rounded share (0.667 for 2/3) means 2 of 3."""
+        return math.ceil(self.eval_runs_per_scenario * self.eval_pass_share - 0.01)
 
     @property
     def mcp_endpoint(self) -> str:
@@ -174,7 +163,12 @@ class Settings(BaseSettings):
 
     @property
     def effective_user_id(self) -> str:
-        return self.user_id or getpass.getuser()
+        if self.user_id:
+            return self.user_id
+        try:
+            return getpass.getuser()
+        except OSError:  # no USER/LOGNAME and no passwd entry: the image's uid under `docker run`
+            return f"uid-{os.getuid()}"
 
     @property
     def model_settings(self) -> dict[str, str]:

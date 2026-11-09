@@ -27,15 +27,17 @@ def setup(kube: FakeKube, tmp_path, monkeypatch):
     return creds, paths
 
 
-def grants(kube: FakeKube) -> dict[str, dict[tuple[str, str], set[str]]]:
-    """{ClusterRole: {(apiGroup, resource): verbs}} for the roles setup applied."""
+def grants(kube: FakeKube) -> dict[str, dict[tuple[str, str, tuple[str, ...]], set[str]]]:
+    """{ClusterRole: {(apiGroup, resource, resourceNames): verbs}} for the roles setup applied
+    (no resourceNames: every object of the type)."""
     out: dict = {}
     for role in (d for d in kube.applied if d["kind"] == "ClusterRole"):
         for rule in role["rules"]:
+            names = tuple(rule.get("resourceNames", []))
             for group in rule["apiGroups"]:
                 for res in rule["resources"]:
                     out.setdefault(role["metadata"]["name"], {}).setdefault(
-                        (group, res), set()
+                        (group, res, names), set()
                     ).update(rule["verbs"])
     return out
 
@@ -72,14 +74,14 @@ def test_the_roles_setup_applies_are_the_boundary(tmp_path, monkeypatch):
     roles = grants(kube)
     # the reader's per-namespace access is Kubernetes' built-in `view` (scenario RoleBindings)
     assert set(roles) == {"k8s-agent-list-namespaces", "k8s-agent-remediate"}
-    assert roles["k8s-agent-list-namespaces"] == {("", "namespaces"): {"list"}}
+    assert roles["k8s-agent-list-namespaces"] == {("", "namespaces", ()): {"list"}}
     assert roles["k8s-agent-remediate"] == {
-        ("", "services"): {"get", "patch"},
-        ("", "pods"): {"get", "list"},
-        ("discovery.k8s.io", "endpointslices"): {"get", "list"},
+        ("", "services", ("checkout",)): {"get", "patch"},  # that one Service only
+        ("", "pods", ()): {"list"},
+        ("discovery.k8s.io", "endpointslices", ()): {"list"},
     }
     for granted in roles.values():
-        for (group, res), verbs in granted.items():
+        for (group, res, _), verbs in granted.items():
             assert "secrets" not in res and "*" not in {group, res, *verbs}
             assert res.split("/")[-1] not in {"exec", "attach", "portforward", "proxy"}
     [crb] = [d for d in kube.applied if d["kind"] == "ClusterRoleBinding"]
@@ -95,15 +97,22 @@ def test_a_ca_file_is_embedded(tmp_path):
     assert cluster["certificate-authority-data"] == base64.b64encode(b"PEM").decode()
 
 
-def test_credentials_are_rewritten_in_place_and_kept_private(tmp_path):
+def test_credentials_are_rewritten_in_place_and_made_private_before_writing(tmp_path, monkeypatch):
     # k8s-mcp bind-mounts the single file: a new inode would leave it on the old token
     path = tmp_path / "creds" / "reader.kubeconfig"
     access.write_private(path, "old")
     inode = path.stat().st_ino
     path.chmod(0o644)
-    access.write_private(path, "new")
-    assert path.read_text() == "new" and path.stat().st_ino == inode
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    modes, fdopen = [], os.fdopen
+
+    def opened(fd, *args, **kwargs):  # the mode when the new text is about to be written
+        modes.append(stat.S_IMODE(os.fstat(fd).st_mode))
+        return fdopen(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", opened)
+    access.write_private(path, "new token")
+    assert path.read_text() == "new token" and path.stat().st_ino == inode
+    assert modes == [0o600] and stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_whoami_closes_its_client(monkeypatch):
@@ -121,18 +130,3 @@ def test_whoami_closes_its_client(monkeypatch):
     kubeconfig = access.kubeconfig_for(FakeKube().clients.api.configuration, "reader", "t")
     assert access.whoami(kubeconfig, 5) == "u" and len(closed) == 1
     assert timeouts == [5]  # a time limit on its call too
-
-
-def test_an_existing_file_is_made_private_before_the_new_text_is_written(tmp_path, monkeypatch):
-    path = tmp_path / "reader.kubeconfig"
-    path.write_text("old")
-    path.chmod(0o644)
-    modes, fdopen = [], os.fdopen
-
-    def opened(fd, *args, **kwargs):
-        modes.append(stat.S_IMODE(os.fstat(fd).st_mode))
-        return fdopen(fd, *args, **kwargs)
-
-    monkeypatch.setattr(os, "fdopen", opened)
-    access.write_private(path, "new token")
-    assert modes == [0o600] and path.read_text() == "new token"

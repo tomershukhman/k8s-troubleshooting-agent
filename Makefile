@@ -11,9 +11,9 @@ lint:
 test:
 	uv run pytest tests/unit -q
 
-# Acceptance tests against the real cluster. `make accept M=3` runs milestone 3's tests only;
-# `make accept` runs every milestone's. Run only the relevant ones (CLAUDE.md, Checks).
-ACCEPT_FILES = $(if $(M),$(or $(wildcard tests/acceptance/test_m$(M)_*.py),$(error no acceptance tests for milestone $(M))),tests/acceptance)
+# Acceptance tests against the real cluster. `make accept SUITE=remediate` runs tests/acceptance/test_remediate.py
+# only; `make accept` runs every suite. Run only the relevant ones (CLAUDE.md, Checks).
+ACCEPT_FILES = $(if $(SUITE),$(or $(wildcard tests/acceptance/test_$(SUITE).py),$(error no acceptance suite $(SUITE))),tests/acceptance)
 
 accept:
 	uv run pytest $(ACCEPT_FILES) -v -s

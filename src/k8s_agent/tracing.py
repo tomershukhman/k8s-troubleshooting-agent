@@ -49,8 +49,9 @@ def mlflow_env(settings: Settings) -> None:
     hint) on import: call before anything imports mlflow. Set here so `.env` works too."""
     os.environ["MLFLOW_HTTP_REQUEST_TIMEOUT"] = str(settings.mlflow_http_request_timeout)
     os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] = str(settings.mlflow_http_request_max_retries)
-    os.environ["MLFLOW_DISABLE_TELEMETRY"] = str(settings.mlflow_disable_telemetry).lower()
-    # The full mlflow package (installed for the evals) logs a hint for coding agents on import.
+    # Off unless set in the environment: MLflow's usage telemetry to its own servers (traces
+    # never go), and the hint for coding agents the full mlflow package (the evals') logs.
+    os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
     os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "true")
 
 
@@ -125,7 +126,8 @@ def span(name: str, inputs: Any, span_type: str) -> Iterator[Any]:
 
 
 def finish(span: Any, outputs: Any, error: str | None) -> None:
-    """Record the run's result on its root span; a failed run marks the trace as an error."""
+    """Record a span's outputs (the run's root span, or one from `span()`); an error marks that
+    span failed, and for the root span the whole trace."""
     if span is None:
         return
     from mlflow.entities import SpanStatus, SpanStatusCode

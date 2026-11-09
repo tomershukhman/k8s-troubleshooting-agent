@@ -13,10 +13,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
-*.egg-info/
 dist/
-build/
 
 # OS / editors
 .DS_Store
@@ -26,4 +23,6 @@ build/
 # `agent eval` results (the scores are also in MLflow)
 eval-results/*
 !eval-results/.gitkeep
+
+# Claude Code's worktrees
 .claude/worktrees/

@@ -1,6 +1,6 @@
-"""M6, the fix (PLAN.md M6, SPEC 3.4): the remediator, the approval pause, the fix tool and the
+"""The fix (SPEC 3.4): the remediator, the approval pause, the fix tool and the
 recheck, with fake models, the in-process fake cluster and a fake Kubernetes API for the
-remediator (tests/fakes.py). The real cluster and model: tests/acceptance/test_m6_fix.py."""
+remediator (tests/fakes.py). The real cluster and model: tests/acceptance/test_remediate.py."""
 
 import asyncio
 import logging
@@ -21,14 +21,14 @@ from langgraph.types import Command
 from pydantic import ValidationError
 from rich.console import Console
 
-from k8s_agent import tracing, ui
+from k8s_agent import ui
 from k8s_agent.agent import Answer, investigate
 from k8s_agent.agent.graph import InvestigationState, fixable, remediate_node
 from k8s_agent.agent.records import Change, Facts, FixArgs, FixOutcome
-from k8s_agent.agent.remediator import Kube, apply_fix, build_remediator
+from k8s_agent.agent.remediator import apply_fix, build_remediator
 from k8s_agent.agent.remediator import tools as remediator_tools
 from k8s_agent.config import get_settings
-from k8s_agent.kube import KubeError
+from k8s_agent.kube import Kube, KubeError
 from k8s_agent.policy import FIX_TOOL, READ_ONLY_TOOLS, REMEDIATOR_READ_TOOLS
 from k8s_agent.schemas import Diagnosis
 from tests.fakes import (
@@ -99,7 +99,7 @@ def fix(approve=None, *, services=None, model=None, remediator_model=None):
             critic_model=critic(),
             remediator_model=remediator_model or remediator(READS, fix_call()),
             mcp_target=FakeCluster().server,
-            remediator_kube=(services or FakeServices()).kube,
+            load_remediator_kube=(services or FakeServices()).kube,
         )
     )
 
@@ -122,7 +122,6 @@ def test_the_run_pauses_before_the_fix_runs_and_approving_applies_exactly_that_c
     owner = "ReplicaSet/checkout-69db948c9f"
     assert request.facts == Facts(  # read as the remediator, while the run waited
         current_selector={"app": "check-out"}, resource_version="100",
-        ready_pods=["checkout-a", "checkout-b"],
         owners={"checkout-a": owner, "checkout-b": owner},
     )  # fmt: skip
     assert services.patches == [("shop-checkout", "checkout", PATCH, "application/json-patch+json")]
@@ -157,32 +156,29 @@ def test_the_approver_gets_the_verified_diagnosis_and_the_tool_calls_behind_it()
                                                 ("E2", "pods_list_in_namespace")]  # fmt: skip
 
 
-def test_the_approval_shows_each_pods_owner_and_warns_of_a_pod_no_controller_manages():
+@pytest.mark.parametrize("planted", [True, False])
+def test_the_approval_shows_each_pods_owner_and_warns_of_a_pod_no_controller_manages(planted):
     # A standalone pod carrying the new selector's labels (planted, say) would get traffic.
     services, seen = FakeServices(), []
-    services.pods["planted"] = ({"app": "checkout"}, True)
-    services.unowned.add("planted")
+    if planted:
+        services.pods["planted"] = ({"app": "checkout"}, True)
+        services.unowned.add("planted")
     fix(approver(yes=False, seen=seen), services=services)
     [request] = seen
-    assert request.facts.owners == {"checkout-a": "ReplicaSet/checkout-69db948c9f",
-                                    "checkout-b": "ReplicaSet/checkout-69db948c9f",
-                                    "planted": None}  # fmt: skip
+    owner = "ReplicaSet/checkout-69db948c9f"
+    assert request.facts.owners == {"checkout-a": owner, "checkout-b": owner} | (
+        {"planted": None} if planted else {}
+    )
     console = Console(width=300, record=True)
     console.print(ui.approval(request))
     text = console.export_text()
-    assert (
-        "3 ready pods match app=checkout: checkout-a (ReplicaSet/checkout-69db948c9f), "
-        "checkout-b (ReplicaSet/checkout-69db948c9f), planted (no controller)"
-    ) in text
-    assert "A pod no controller manages would receive traffic: planted." in text
-
-
-def test_with_every_pod_managed_there_is_no_owner_warning():
-    seen = []
-    fix(approver(yes=False, seen=seen))
-    console = Console(width=300, record=True)
-    console.print(ui.approval(seen[0]))
-    assert "no controller" not in console.export_text()
+    pods = f"checkout-a ({owner}), checkout-b ({owner})"
+    if planted:
+        assert f"3 ready pods match app=checkout: {pods}, planted (no controller)" in text
+        assert "A pod no controller manages would receive traffic: planted." in text
+    else:
+        assert f"2 ready pods match app=checkout: {pods}" in text
+        assert "no controller" not in text
 
 
 def test_a_reject_applies_nothing_and_there_is_no_recheck():
@@ -193,17 +189,6 @@ def test_a_reject_applies_nothing_and_there_is_no_recheck():
     assert (r.outcome, r.decision.approved, r.verified) == ("not_applied", False, False)
     assert "with reason: rejected in a test" in r.steps[-1].output  # the remediator was told why
     assert len(model.received) == 2 and record.result.diagnosis.post_fix_check is None
-
-
-def test_without_an_approver_the_fix_is_rejected_by_the_agent():
-    services = FakeServices()
-    r = fix(services=services).result.remediation
-    assert (r.decision.approved, r.decision.reason, r.decision.by) == (
-        False,
-        "no interactive approval available",
-        "k8s-agent",
-    )
-    assert services.patches == [] and r.outcome == "not_applied"
 
 
 def test_only_approve_or_reject_are_accepted():
@@ -240,15 +225,6 @@ def test_the_wait_for_approval_does_not_count_toward_the_run_time_budget(env):
     record = fix(approver(delay=3))
     assert record.result.duration_ms > 3000 and record.forced_reason is None
     assert record.result.remediation.verified
-
-
-def test_an_approval_that_does_not_come_in_time_is_a_reject(env):
-    env(approval_timeout_seconds="0.4")
-    services, t0 = FakeServices(), time.monotonic()
-    r = fix(approver(delay=30), services=services).result.remediation
-    assert time.monotonic() - t0 < 10
-    assert (r.decision.approved, r.decision.reason) == (False, "the approval timed out after 0.4 s")
-    assert services.patches == [] and r.outcome == "not_applied"
 
 
 def test_a_time_budget_that_runs_out_in_the_fix_keeps_the_diagnosis(env):
@@ -350,14 +326,11 @@ def test_a_request_other_than_the_proposed_fix_is_rejected_without_asking():
     assert not r.decision.approved and "differs from the proposed fix" in r.decision.reason
 
 
-@pytest.mark.parametrize(
-    "bad", [{"resource_version": None}, {"selector": [{"key": "app", "value": "checkout"}]}]
-)
-def test_a_malformed_request_is_rejected_without_asking(bad):
+def test_a_malformed_request_is_rejected_without_asking():
+    # The wrong shape: a list of labels where the tool takes a mapping. (A missing field: the
+    # decision test on the trace, below.)
     seen, services = [], FakeServices()
-    call_ = fix_call()
-    call_.tool_calls[0]["args"] = {k: v for k, v in (call_.tool_calls[0]["args"] | bad).items()
-                                   if v is not None}  # fmt: skip
+    call_ = fix_call(selector=[{"key": "app", "value": "checkout"}])
     record = fix(approver(seen=seen), services=services, remediator_model=remediator(call_))
     r = record.result.remediation
     assert seen == [] and services.patches == []
@@ -391,7 +364,7 @@ def test_only_the_remediator_holds_the_write_tool():
     asyncio.run(
         investigate("q", settings=get_settings(), approve=approver(), model=model,
                     critic_model=judge, remediator_model=rem, mcp_target=FakeCluster().server,
-                    remediator_kube=FakeServices().kube)
+                    load_remediator_kube=FakeServices().kube)
     )  # fmt: skip
     # every binding, the recheck's included: exactly the read tools (an empty list fails too)
     assert {frozenset(tools) for tools in model.bound_tools} == {READ_ONLY_TOOLS}
@@ -512,12 +485,18 @@ def test_ready_endpoints_are_counted_once_each_and_an_unset_ready_is_ready():
 
 
 @pytest.mark.parametrize("proposes_fix", [True, False])
-def test_the_remediators_own_client_is_closed_when_a_run_that_loaded_it_ends(
+def test_the_remediators_own_client_is_loaded_once_and_closed_when_the_run_ends(
     monkeypatch, proposes_fix
 ):
-    services, closed = FakeServices(), []
+    services, loads, closed = FakeServices(), [], []
     services.api_client = SimpleNamespace(close=lambda: closed.append(True))  # its Kube's client
-    monkeypatch.setattr(Kube, "load", classmethod(lambda _cls, _path, _timeout: services.kube()))
+
+    def load(_cls, _path, _timeout):  # slow, so READS' two parallel calls both wait for it
+        loads.append(True)
+        time.sleep(0.1)
+        return services.kube()
+
+    monkeypatch.setattr(Kube, "load", classmethod(load))
     no_fix = ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(diagnosis("E1"))])
     asyncio.run(
         investigate("q", settings=get_settings(), approve=approver(yes=False),
@@ -525,7 +504,7 @@ def test_the_remediators_own_client_is_closed_when_a_run_that_loaded_it_ends(
                     remediator_model=remediator(READS, fix_call()),
                     mcp_target=FakeCluster().server)
     )  # fmt: skip
-    assert closed == ([True] if proposes_fix else [])
+    assert loads == closed == ([True] if proposes_fix else [])
 
 
 def broken_connection(*_args, **_kwargs):
@@ -600,33 +579,12 @@ def test_the_checkpointer_knows_every_type_a_run_stores(caplog):
     assert [r.getMessage() for r in caplog.records if r.name.startswith("langgraph")] == []
 
 
-@pytest.fixture
-def traced(monkeypatch, tmp_path):
-    """Tracing to a local MLflow store, no server. MLflow loads a trace only once every span
-    it counted is stored, so a span lost on the way fails the read."""
-    import mlflow
-
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path / 'mlflow.db'}")
-    get_settings.cache_clear()
-    tracing.enable(get_settings())
-
-    def read(result):
-        tracing.flush()
-        trace = mlflow.get_trace(result.trace_id)
-        assert trace is not None and all(s.name for s in trace.data.spans)
-        session = f"metadata.`mlflow.trace.session` = '{result.thread_id}'"
-        assert len(mlflow.search_traces(filter_string=session, return_type="list")) == 1
-        return trace
-
-    return read
-
-
 def test_a_run_with_a_fix_is_one_complete_trace(traced):
     result = fix(approver()).result
     trace = traced(result)
     [approval] = trace.search_spans(name="approval")  # what was shown, then the decision
     assert approval.inputs["args"]["selector"] == {"app": "checkout"}
-    assert approval.inputs["facts"]["ready_pods"] == ["checkout-a", "checkout-b"]
+    assert list(approval.inputs["facts"]["owners"]) == ["checkout-a", "checkout-b"]
     assert (approval.outputs["approved"], approval.outputs["by"]) == (True, "alice")
     [patch] = trace.search_spans(name=FIX_TOOL)
     [recheck] = trace.search_spans(name="recheck")
@@ -648,11 +606,15 @@ def malformed() -> ScriptedModel:
         (approver(), malformed, "the request is malformed: resource_version", "k8s-agent"),
     ],
 )
-def test_every_decision_is_on_the_trace_with_who_and_when(
+def test_every_reject_applies_nothing_and_is_on_the_trace_with_who_and_when(
     approve, make_remediator, reason, by, traced, env
 ):
     env(approval_timeout_seconds="0.4")
-    result = fix(approve, remediator_model=make_remediator and make_remediator()).result
+    services, t0 = FakeServices(), time.monotonic()
+    result = fix(approve, services=services,
+                 remediator_model=make_remediator and make_remediator()).result  # fmt: skip
+    assert time.monotonic() - t0 < 10  # a timed-out approval doesn't wait for the answer
+    assert services.patches == [] and result.remediation.outcome == "not_applied"
     [approval] = traced(result).search_spans(name="approval")
     decision = approval.outputs
     assert (decision["approved"], decision["by"]) == (False, by)
@@ -663,8 +625,11 @@ def test_every_decision_is_on_the_trace_with_who_and_when(
 
 def test_the_summary_says_what_was_decided_done_and_verified():
     console = Console(width=200, record=True)
-    console.print(ui.summary(fix(approver()).result))
+    panel = ui.summary(fix(approver()).result)
+    console.print(panel)
     text = console.export_text()
+    assert text.startswith("╭─ Fixed · selector_mismatch · Service/checkout in shop-checkout")
+    assert panel.border_style == "green"  # a verified fix: not the red of a live fault
     assert "Fix: approved: approved in a test (by alice, " in text
     assert (
         "Applied: selector app=check-out → app=checkout; 2 ready endpoints. "
