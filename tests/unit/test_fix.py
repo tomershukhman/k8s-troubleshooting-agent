@@ -540,8 +540,9 @@ def test_post_fix_check_in_the_investigation_is_sent_back():
     assert isinstance(model.received[-1][-1], HumanMessage)  # the feedback round
 
 
-def test_the_checkpointer_knows_every_type_a_fix_stores(caplog):
-    # LangGraph warns once per process per type, so forget what earlier tests triggered.
+def test_the_checkpointer_knows_every_type_a_run_stores(caplog):
+    # A run through every stage, the fix and its recheck included. LangGraph warns once per
+    # process per type, so forget what earlier tests triggered.
     jsonplus._warned_unregistered_types.clear()
     jsonplus._warned_blocked_types.clear()
     caplog.set_level(logging.WARNING)

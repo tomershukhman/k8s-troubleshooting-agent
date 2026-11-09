@@ -11,7 +11,6 @@ import select
 import sys
 import threading
 from contextlib import contextmanager
-from types import SimpleNamespace
 
 import pytest
 from langchain_core.exceptions import ModelRateLimitError
@@ -303,11 +302,6 @@ def test_without_a_terminal_on_stdin_a_fix_is_rejected_and_the_run_says_so(fake)
         "node     remediate · resumed",
         "  → not_applied: the request was rejected, so nothing was applied",
     ]
-
-
-def test_with_no_terminal_on_stdin_there_is_no_prompt(monkeypatch):
-    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
-    assert cli._approver(Console(), None) is None  # the agent then rejects the fix
 
 
 @pytest.fixture

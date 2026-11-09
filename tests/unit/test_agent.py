@@ -11,7 +11,6 @@ from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
 from langchain_core.exceptions import ModelRateLimitError, OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.checkpoint.serde import jsonplus
 
 from k8s_agent.agent import (
     McpUnavailable,
@@ -696,16 +695,3 @@ def test_every_log_line_carries_the_run_ids(level, events, caplog):
     assert {(r.run_id, r.thread_id, r.user_id) for r in ours} == {
         (record.result.run_id, "t-1", "bob")
     }
-
-
-def test_the_checkpointer_knows_every_type_it_stores(caplog):
-    # LangGraph warns once per process per type, so forget what earlier tests triggered.
-    jsonplus._warned_unregistered_types.clear()
-    jsonplus._warned_blocked_types.clear()
-    caplog.set_level(logging.WARNING)
-    judge = critic(verdict("E1", "E2", founded=False))
-    model = ScriptedModel(
-        script=[call(LIST, LIST), *[answer(diagnosis("E1", "E2", proposed_fix=selector_fix()))] * 2]
-    )
-    run(model, judge=judge)
-    assert [r.getMessage() for r in caplog.records if r.name.startswith("langgraph")] == []
