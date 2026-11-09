@@ -259,7 +259,8 @@ async def _run(
             command = Command(resume=answers)  # the same thread: the graph goes on where it paused
     except Exception as e:
         if reason := _stop_reason(e, context.settings):
-            outcome = Outcome(RunStatus.completed, forced_inconclusive(reason), None, reason)
+            diagnosis = forced_inconclusive(reason)
+            outcome = Outcome(RunStatus.completed, diagnosis=diagnosis, forced_reason=reason)
         elif isinstance(e, ModelError):
             outcome = Outcome(RunStatus.failed, error=f"model API error: {type(e).__name__}: {e}")
         else:
@@ -276,10 +277,11 @@ async def _run(
             values["messages"] = add_messages(values["messages"], task.state.values["messages"])
     final = values.get("final")
     if outcome is None:
-        outcome = Outcome(RunStatus.completed, final, None, values.get("forced_reason"))
+        reason = values.get("forced_reason")
+        outcome = Outcome(RunStatus.completed, diagnosis=final, forced_reason=reason)
     elif final is not None:  # it stopped in the fix: the verified diagnosis stands
         stopped = outcome.forced_reason or outcome.error
-        outcome = Outcome(RunStatus.completed, final, fix_stopped=stopped)
+        outcome = Outcome(RunStatus.completed, diagnosis=final, fix_stopped=stopped)
     return outcome, values, asked
 
 
@@ -288,7 +290,8 @@ def _complete_remediation(
 ) -> Remediation | None:
     """The fix as the graph recorded it, with what the person was shown and decided. A run
     stopped mid-fix (`stopped`) says so."""
-    done, fix = values.get("remediation"), values["final"].proposed_fix if stopped else None
+    done = values.get("remediation")
+    fix = values["final"].proposed_fix if stopped else None
     if stopped and done is None and fix is not None:  # in the remediator: it may have applied it
         maybe = "; it was approved, so check the Service" if asked and asked[-1][1].approved else ""
         change = Change(namespace=fix.namespace, service=fix.service, before=None,

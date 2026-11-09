@@ -49,6 +49,7 @@ ACTIVITY = {
     "recheck": "Checking the recheck's evidence…",
 }
 # The label in front of each progress line: what kind of thing it is, at its depth.
+LABEL_WIDTH = 9  # the longest label and a space
 LABELS = {
     "node": ("node", "bold blue", 0),
     "agent": ("agent", "bold cyan", 2),
@@ -58,6 +59,7 @@ LABELS = {
     "check": ("check", "bold magenta", 2),
     "approval": ("approval", "bold magenta", 2),
     "verdict": ("", "", 4),
+    "output": ("", "", 4 + LABEL_WIDTH),  # a tool call's result, under the call
     "next": ("", "", 2),
 }
 # ANSI escape sequences, such as the colours in a pod's log.
@@ -138,6 +140,15 @@ def preview(step: Step) -> str:
     return f"{lines[-1].strip()}  ({len(lines)} lines)"
 
 
+def _which_time(node: str, n: int, recheck: bool) -> str:
+    """A node that runs again: which time it is."""
+    if recheck:
+        return "recheck after the fix"
+    if node == "remediate":  # it starts again only to resume after the approval
+        return "resumed"
+    return f"round {n}"
+
+
 class Progress:
     """Live progress on stderr: a spinner for what's happening now and, as it happens, the
     graph's nodes and, inside them, each agent's work: the investigator's tool calls,
@@ -167,7 +178,9 @@ class Progress:
     def line(self, kind: str, *parts: str | tuple[str, str]) -> None:
         label, style, depth = LABELS[kind]
         shown = [(safe(p[0]), p[1]) if isinstance(p, tuple) else safe(p) for p in parts]
-        text = Text.assemble(" " * depth, (f"{label:<9}" if label else "", style), *shown)
+        text = Text.assemble(
+            " " * depth, (label.ljust(LABEL_WIDTH) if label else "", style), *shown
+        )
         text.truncate(self.console.width, overflow="ellipsis")
         self.console.print(text)
 
@@ -177,10 +190,8 @@ class Progress:
                 self.status.update(
                     "Investigator checking that the fix worked…" if again else ACTIVITY[name]
                 )
-                # remediate starts again only to resume after the approval
-                which = "resumed" if name == "remediate" else f"round {n}"
-                which = "recheck after the fix" if again else which
-                self.line("node", (name, "bold"), (f" · {which}" if n > 1 else "", "dim"))
+                which = f" · {_which_time(name, n, again)}" if n > 1 else ""
+                self.line("node", (name, "bold"), (which, "dim"))
                 if name == "investigate" or (name == "remediate" and n == 1):
                     agent = "remediator" if name == "remediate" else "investigator"
                     self.line("agent", agent, (f" · {self.models[agent]}", "dim"))
@@ -188,9 +199,9 @@ class Progress:
                 call = f"({describe_call(s.args)})  "
                 self.line("tool", (s.tool, "bold"), call, (f"{s.ref} · {s.latency_ms} ms", "dim"))
                 if denied := refused(s):  # expected outside granted namespaces: not a failure
-                    self.line("verdict", " " * 9, (denied, "yellow"))
+                    self.line("output", (denied, "yellow"))
                 else:
-                    self.line("verdict", " " * 9, (preview(s), "red" if s.error else "dim"))
+                    self.line("output", (preview(s), "red" if s.error else "dim"))
             case Reasoning(text=text):
                 self.line("thinking", (" ".join(text.split())[: self.summary_chars], "italic dim"))
             case Drafted(diagnosis=d):
@@ -202,7 +213,7 @@ class Progress:
             case FixCalled(step=s) if s.tool != FIX_TOOL:  # the fix: the approval lines below
                 self.line("tool", (s.tool, "bold"), f"({describe_fix_call(s)})")
                 first = (s.output.strip().splitlines() or ["(empty)"])[0]
-                self.line("verdict", " " * 9, (first, "red" if s.error else "dim"))
+                self.line("output", (first, "red" if s.error else "dim"))
             case Decided(request=q, decision=d):
                 a, now = q.args, q.facts.current_selector
                 change = f"{labels(now)} → " if now is not None else ""

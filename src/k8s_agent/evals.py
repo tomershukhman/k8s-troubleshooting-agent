@@ -123,17 +123,18 @@ def diagnosis_correct(outputs: dict[str, Any], expectations: dict[str, Any]) -> 
         problems.append(f"category {d['fault_category']}, expected one of {accepted}")
     res, namespace = d["affected_resource"], expectations["namespace"]
     accepted = {(r["kind"], r["name"]) for r in expectations["resources"]}
-    if accepted and (
-        res is None or (res["kind"], res["name"]) not in accepted or res["namespace"] != namespace
-    ):
-        problems.append(
-            f"affected resource {res}, expected one of {sorted(accepted)} in {namespace}"
-        )
-    if not accepted and res is not None:
-        problems.append(f"affected resource {res}, expected none")
-    looked = {step["args"].get("namespace") for step in outputs["evidence_steps"]}
-    if not accepted and namespace not in looked:  # "healthy" from evidence of another namespace
-        problems.append(f"no cited evidence from {namespace}")
+    if accepted:  # a fault: one of the accepted resources, in the scenario's namespace
+        named = res is not None and (res["kind"], res["name"]) in accepted
+        if not named or res["namespace"] != namespace:
+            problems.append(
+                f"affected resource {res}, expected one of {sorted(accepted)} in {namespace}"
+            )
+    else:  # no fault (the healthy scenario): no resource, and evidence from its namespace
+        if res is not None:
+            problems.append(f"affected resource {res}, expected none")
+        looked = {step["args"].get("namespace") for step in outputs["evidence_steps"]}
+        if namespace not in looked:  # "healthy" from evidence of another namespace
+            problems.append(f"no cited evidence from {namespace}")
     return _verdict(problems, f"{d['status']} / {d['fault_category']}, as expected")
 
 
