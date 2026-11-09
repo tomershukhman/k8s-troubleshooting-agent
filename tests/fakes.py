@@ -30,12 +30,16 @@ async def _next(model: ScriptedModel, messages: list[BaseMessage]) -> Any:
         raise item
     if callable(item):
         item = await item(messages) if inspect.iscoroutinefunction(item) else item(messages)
-    return item
+    # A copy: LangChain and LangGraph write an id into the message they get, and a reply that
+    # carries an id already replaces the message with that id instead of adding a turn. So a
+    # message object scripted twice, or shared between tests, still makes a new turn each time.
+    return item.model_copy(deep=True) if isinstance(item, BaseMessage) else item
 
 
 class ScriptedModel(BaseChatModel):
     """Replies from `script`, one item per call: an AIMessage (or, as the critic, a verdict
-    dict), an exception to raise, or a function of the messages. Then `then`, repeatedly."""
+    dict), an exception to raise, or a function of the messages. Then `then`, repeatedly. A
+    script is used up as it replies: build a new model for each run."""
 
     script: list[Any] = Field(default_factory=list)
     then: Any = None

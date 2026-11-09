@@ -520,17 +520,20 @@ def test_the_full_summary_prints_when_stdout_is_not_the_terminal_the_prompt_used
 
 
 @pytest.mark.parametrize(
-    "fixer",
+    "make_fixer",  # a factory: a model's script is used up by one run
     [
         None,  # no fix proposed
-        remediator(fix_call(selector={"app": "other"})),  # code rejects it without asking
+        lambda: remediator(fix_call(selector={"app": "other"})),  # code rejects it unasked
     ],
+    ids=["no fix proposed", "another fix requested"],
 )
-def test_a_run_whose_fix_nobody_is_asked_about_shows_only_the_summary(fixer, fake, investigate_in):
-    if fixer is None:
+def test_a_run_whose_fix_nobody_is_asked_about_shows_only_the_summary(
+    make_fixer, fake, investigate_in
+):
+    if make_fixer is None:
         fake(ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(diagnosis("E1"))]))
     else:
-        proposing(fake, fixer)
+        proposing(fake, make_fixer())
     terminal = Terminal()
     investigate_in(terminal)
     shown = terminal.shown()

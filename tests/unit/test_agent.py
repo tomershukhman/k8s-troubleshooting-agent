@@ -472,17 +472,15 @@ def test_a_backed_fix_comes_through_in_the_result():
     )
 
 
-def test_an_investigator_that_stops_without_an_answer_ends_inconclusive():
-    # In the feedback round the model repeats a turn already answered: nothing left to run,
-    # so the agent ends with no answer.
-    first = call(LIST)
-    model = ScriptedModel(script=[first, answer(diagnosis("E1")), first])
-    record = run(model, judge=critic(verdict("E1", founded=False)))
-    assert forced_reason(record) == "The investigator stopped without a final answer."
-
-
-def test_a_first_round_that_never_answered_ends_inconclusive_too():
-    state = {"question": "q", "messages": [], "rounds": []}  # LangGraph leaves an unset key out
+@pytest.mark.parametrize(
+    "draft",
+    [
+        {},  # the first round never answered: LangGraph leaves an unset key out
+        {"structured_response": None},  # a feedback round (which clears the draft) didn't either
+    ],
+)
+def test_an_investigator_that_stops_without_an_answer_ends_inconclusive(draft):
+    state = {"question": "q", "messages": [], "rounds": [], **draft}
     command = asyncio.run(verify_evidence(state, SimpleNamespace(context=None)))
     assert (command.goto, command.update) == (
         "result",

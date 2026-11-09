@@ -541,19 +541,19 @@ def malformed() -> ScriptedModel:
 
 
 @pytest.mark.parametrize(
-    ("approve", "remediator_model", "reason", "by"),
-    [
+    ("approve", "make_remediator", "reason", "by"),
+    [  # a model is built per run (its script is used up), so the parameter is its factory
         (approver(yes=False), None, "rejected in a test", "alice"),
         (approver(delay=30), None, "the approval timed out after 0.2 s", "k8s-agent"),
         (None, None, "no interactive approval available", "k8s-agent"),
-        (approver(), malformed(), "the request is malformed: resource_version", "k8s-agent"),
+        (approver(), malformed, "the request is malformed: resource_version", "k8s-agent"),
     ],
 )
 def test_every_decision_is_on_the_trace_with_who_and_when(
-    approve, remediator_model, reason, by, traced, env
+    approve, make_remediator, reason, by, traced, env
 ):
     env(approval_timeout_seconds="0.2")
-    result = fix(approve, remediator_model=remediator_model).result
+    result = fix(approve, remediator_model=make_remediator and make_remediator()).result
     [approval] = traced(result).search_spans(name="approval")
     decision = approval.outputs
     assert (decision["approved"], decision["by"]) == (False, by)
