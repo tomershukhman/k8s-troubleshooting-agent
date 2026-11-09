@@ -22,6 +22,7 @@ from k8s_agent.agent.records import Facts, RunResult, Step
 from k8s_agent.cli import app
 from k8s_agent.config import get_settings
 from tests.fakes import (
+    SERVICE,
     SERVICE_ARGS,
     FakeCluster,
     ScriptedModel,
@@ -131,6 +132,18 @@ def test_the_summary_says_what_is_wrong_the_evidence_and_what_to_do(fake):
     flat = " ".join(text.replace("│", " ").split())  # the panel wraps lines
     assert "Fix: rejected: no interactive approval available (by k8s-agent," in flat
     assert "Nothing was changed." in flat
+
+
+def test_the_summary_shows_the_models_words_verbatim_not_as_markup(fake):
+    finding = "[/] The selector [app=check-out] matches no pod."  # "[/]" alone breaks Rich markup
+    d = diagnosis("E1", affected_resource={**SERVICE, "name": "check[out]"},
+                  evidence=[{"ref": "E1", "finding": finding}])  # fmt: skip
+    fake(ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(d)]))
+    out = json.loads(agent("investigate", "q", "--quiet").stdout)
+    console = Console(width=200, record=True)
+    console.print(ui.summary(RunResult.model_validate(out)))
+    text = console.export_text()
+    assert "Service/check[out] in shop-checkout" in text and finding in text
 
 
 READER = 'User "system:serviceaccount:k8s-agent:reader"'

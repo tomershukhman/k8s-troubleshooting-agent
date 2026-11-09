@@ -222,10 +222,11 @@ def summary(result: RunResult) -> RenderableType:
         body = Text(result.error or "unknown error")
         return Panel(body, title="[bold red]Run failed", subtitle=footer, border_style="red")
     label, color = TITLES[d.status]
-    title = f"[bold {color}]{label}[/]"
+    # Text, not markup, wherever the model's words go: they may hold "[...]".
+    title = Text(label, f"bold {color}")
     if d.status == "fault_found":
         r = d.affected_resource
-        title += f" · {d.fault_category} · {r.kind}/{r.name} in {r.namespace}"
+        title.append(f" · {d.fault_category} · {r.kind}/{r.name} in {r.namespace}")
     parts: list[RenderableType] = [Text(d.root_cause)]
     if d.evidence:
         steps = {s.ref: s for s in result.evidence_steps}
@@ -235,7 +236,8 @@ def summary(result: RunResult) -> RenderableType:
         table.add_column("From", style="dim", ratio=2)
         for e in d.evidence:
             s = steps.get(e.ref)
-            table.add_row(e.ref, e.finding, f"{s.tool} {describe_call(s.args)}" if s else "")
+            source = f"{s.tool} {describe_call(s.args)}" if s else ""
+            table.add_row(Text(e.ref), Text(e.finding), Text(source))
         parts += [Text(), table]
     parts += [Text(), Text.assemble(("Next step: ", "bold"), d.recommended_action)]
     rem = result.remediation
