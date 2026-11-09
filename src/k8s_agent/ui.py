@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from types import TracebackType
 from typing import Any
 
+from pydantic import BaseModel
 from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
@@ -51,6 +52,29 @@ LABELS = {
     "verdict": ("", "", 4),
     "next": ("", "", 2),
 }
+# C0 and C1 control characters but tab and newline. From the cluster or a model they could
+# move the cursor or rewrite lines on the terminal; Rich keeps ESC.
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def safe(text: str) -> str:
+    """`text` fit for the terminal: each control character but tab and newline becomes U+FFFD."""
+    return CONTROL.sub("\ufffd", text)
+
+
+def _scrub(value: Any) -> Any:
+    if isinstance(value, str):
+        return safe(value)
+    if isinstance(value, dict):
+        return {_scrub(k): _scrub(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    return value
+
+
+def scrubbed[M: BaseModel](record: M) -> M:
+    """A copy of `record` with every string in it made safe(), for showing it whole."""
+    return type(record).model_validate(_scrub(record.model_dump(mode="json")))
 
 
 def describe_call(args: dict[str, Any]) -> str:
@@ -128,7 +152,8 @@ class Progress:
 
     def line(self, kind: str, *parts: str | tuple[str, str]) -> None:
         label, style, depth = LABELS[kind]
-        text = Text.assemble(" " * depth, (f"{label:<9}" if label else "", style), *parts)
+        shown = [(safe(p[0]), p[1]) if isinstance(p, tuple) else safe(p) for p in parts]
+        text = Text.assemble(" " * depth, (f"{label:<9}" if label else "", style), *shown)
         text.truncate(self.console.width, overflow="ellipsis")
         self.console.print(text)
 
@@ -212,6 +237,7 @@ TITLES = {
 
 def summary(result: RunResult) -> RenderableType:
     """The result for a person: what's wrong, the evidence for it, and what to do."""
+    result = scrubbed(result)
     rounds = len(result.verification)
     footer = (
         f"{result.duration_ms / 1000:.1f} s · {rounds} verify round{'s' * (rounds != 1)} · "
@@ -281,6 +307,7 @@ def fix_summary(r: Remediation, check: PostFixCheck | None) -> Text:
 def approval(request: ApprovalRequest) -> RenderableType:
     """The fix a person is asked to approve: the change, the remediator's explanation, and
     facts code just read as the remediator."""
+    request = scrubbed(request)
     a, f = FixArgs.model_validate(request.args), request.facts  # the gate checked it
     rows = Table.grid(padding=(0, 2))
     rows.add_column(style="bold")

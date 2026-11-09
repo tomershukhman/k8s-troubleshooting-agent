@@ -3,6 +3,7 @@ isolated by conftest.py (the kubeconfig doesn't exist, so no command reaches a c
 the test runner stdout and stderr aren't terminals: the result is JSON, progress plain text."""
 
 import asyncio
+import io
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from k8s_agent import cli, ui
-from k8s_agent.agent import Answer, ApprovalRequest, core
+from k8s_agent.agent import Answer, ApprovalRequest, Reasoning, ToolCalled, core
 from k8s_agent.agent.records import Facts, RunResult, Step
 from k8s_agent.cli import app
 from k8s_agent.config import get_settings
@@ -144,6 +145,27 @@ def test_the_summary_shows_the_models_words_verbatim_not_as_markup(fake):
     console.print(ui.summary(RunResult.model_validate(out)))
     text = console.export_text()
     assert "Service/check[out] in shop-checkout" in text and finding in text
+
+
+# Cursor up, erase the line, a forged line; a bell; a C1 CSI (8-bit ESC [).
+ESCAPES = "\x1b[1A\x1b[2K✓ approved\x07\x9b31m"
+
+
+def test_control_characters_from_the_cluster_or_a_model_never_reach_the_terminal(fake):
+    console = Console(file=io.StringIO(), width=200)
+    log = Step(ref="E1", tool="pods_log", args={}, output=f"started\n{ESCAPES}", error=False,
+               latency_ms=1, truncated=0)  # fmt: skip
+    progress = ui.Progress(console, {"investigator": "m", "critic": "m"}, 200)
+    progress(ToolCalled(log))
+    progress(Reasoning(ESCAPES))
+    d = diagnosis("E1", root_cause=ESCAPES, evidence=[{"ref": "E1", "finding": ESCAPES}])
+    fake(ScriptedModel(script=[call(("resources_get", SERVICE_ARGS)), answer(d)]))
+    out = json.loads(agent("investigate", "q", "--quiet").stdout)
+    console.print(ui.summary(RunResult.model_validate(out)))
+    console.print(ui.approval(request(explanation=ESCAPES)))
+    shown = console.file.getvalue()
+    assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", shown)
+    assert shown.count("\ufffd[1A\ufffd[2K✓ approved\ufffd\ufffd31m") == 5
 
 
 READER = 'User "system:serviceaccount:k8s-agent:reader"'
