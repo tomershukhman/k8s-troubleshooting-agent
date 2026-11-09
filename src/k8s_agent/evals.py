@@ -472,7 +472,8 @@ def _evaluate(
         )
         # The commit pins the prompts and the scorers. MLflow looks for it where the `agent`
         # script is (the virtualenv, which git ignores); traces look in the working directory.
-        if commit := get_git_commit(os.getcwd()):
+        # The image has no .git: its build sets AGENT_GIT_COMMIT.
+        if commit := settings.git_commit or get_git_commit(os.getcwd()):
             mlflow.set_tag(MLFLOW_GIT_COMMIT, commit)
         result = mlflow.genai.evaluate(
             data=data, predict_fn=predict, scorers=checks, quality_criteria=criteria_line(marks)

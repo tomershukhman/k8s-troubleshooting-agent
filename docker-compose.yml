@@ -1,40 +1,87 @@
-# Containers that talk to the Kubernetes API use host networking (SPEC §3.10), so the
-# kubeconfig's 127.0.0.1 address works unchanged. Settings come from .env (see .env.example).
+# Settings come from .env (see .env.example). Each container holds only the credentials it needs
+# (SPEC §3.5). Host networking (SPEC §3.10): the kubeconfig's 127.0.0.1 address works unchanged.
 
 name: k8s-agent
 
+# Shared by agent and admin: the one app image, pulled from ghcr.io or built here (on admin).
+x-app: &app
+  image: ghcr.io/tomershukhman/k8s-troubleshooting-agent:latest
+  network_mode: host
+  # OrbStack and Docker Desktop map file ownership to the container user; on native Linux set
+  # AGENT_CONTAINER_USER to your `id -u`:`id -g`, to read and write the 0600 kubeconfigs.
+  user: "${AGENT_CONTAINER_USER:-65532:65532}"
+  env_file: .env
+  environment: [USER]  # who's asking, recorded on traces
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
 services:
-  # The only way the agent sees the cluster: read-only tools, as the `reader` identity.
-  # Needs `uv run agent setup` first (it writes the reader kubeconfig).
+  # docker compose run --rm agent "<question>"
+  agent:
+    <<: *app
+    entrypoint: [agent, investigate]
+    volumes:  # the remediator's credentials only; never your kubeconfig
+      - {type: bind, source: ./.kube-agent/remediator.kubeconfig,
+         target: /app/.kube-agent/remediator.kubeconfig, read_only: true,
+         bind: {create_host_path: false}}
+    depends_on: {k8s-mcp: {condition: service_healthy}}
+
+  # docker compose run --rm admin setup | scenario … | eval
+  admin:
+    <<: *app
+    build: .
+    entrypoint: [agent]
+    environment: [USER, AGENT_KUBECONFIG=/kube/config]
+    volumes:  # your kubeconfig (read-only), and what admin writes
+      - {type: bind, source: "${KUBECONFIG:-~/.kube/config}", target: /kube/config,
+         read_only: true, bind: {create_host_path: false}}
+      - ./.kube-agent:/app/.kube-agent
+      - ./eval-results:/app/eval-results
+
+  # The agent's only view of the cluster: read-only tools, as the `reader` identity. Needs
+  # `admin setup` first (it writes the reader kubeconfig).
   k8s-mcp:
     image: quay.io/containers/kubernetes_mcp_server:v0.1.2@sha256:c289505b06079d7f265a6fef977ce1abbfbbb4271772db17db5b58edbf44c255
     network_mode: host
-    # Must be able to read the 0600 reader kubeconfig. OrbStack and Docker Desktop map file
-    # ownership to the container user; on native Linux set AGENT_CONTAINER_USER to your
-    # `id -u`:`id -g`.
     user: "${AGENT_CONTAINER_USER:-65532:65532}"
-    command: ["--config", "/etc/k8s-mcp/config.toml", "--config-dir", "/etc/k8s-mcp/conf.d"]
+    command: [--config, /etc/k8s-mcp/config.toml, --config-dir, /etc/k8s-mcp/conf.d]
     volumes:
       - {type: bind, source: ./mcp/config.toml, target: /etc/k8s-mcp/config.toml, read_only: true}
-      # Only the reader's credentials; the remediator's never enter this container. Fails
-      # (instead of Docker creating an empty directory) when `agent setup` hasn't run.
-      - type: bind
-        source: ${AGENT_READER_KUBECONFIG:-./.kube-agent/reader.kubeconfig}
-        target: /kube/reader.kubeconfig
-        read_only: true
-        bind: {create_host_path: false}
-    configs:
-      - source: k8s-mcp-port
-        target: /etc/k8s-mcp/conf.d/10-port.toml
-    # Not read_only: compose writes the port config above into the container at start.
+      - {type: bind, source: ./.kube-agent/reader.kubeconfig, target: /kube/reader.kubeconfig,
+         read_only: true, bind: {create_host_path: false}}
+    configs:  # compose writes it into the container at start, so no read_only root filesystem
+      - {source: k8s-mcp-port, target: /etc/k8s-mcp/conf.d/10-port.toml}
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${AGENT_MCP_PORT:-8080}/healthz"]
+      test: [CMD, curl, -fsS, "http://127.0.0.1:${AGENT_MCP_PORT:-8080}/healthz"]
       interval: 5s
-      timeout: 3s
-      retries: 6
+
+  # The MLflow tracking server: traces and eval results, at http://localhost:5050 (not 5000:
+  # macOS's AirPlay Receiver often holds it).
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.18.0@sha256:257204c77980b0f3450a26eb6089e487603fcdd4509529eadaf88f90669f5c13
+    command: [mlflow, server, --host, 0.0.0.0, --workers, "1",
+              --backend-store-uri, "sqlite:////mlflow/mlflow.db",
+              --artifacts-destination, /mlflow/artifacts]
+    environment:
+      # Its job runner (UI-launched judges, prompt optimization) starts ~8 workers of ~230 MB;
+      # the evals score client-side. No usage telemetry to MLflow's servers.
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+      MLFLOW_DISABLE_TELEMETRY: "true"
+    ports: ["127.0.0.1:5050:5000"]  # this machine only: it has no login
+    volumes: [mlflow:/mlflow]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')"]
+      interval: 5s
+      start_period: 60s
+
+volumes:
+  mlflow:
 
 configs:
   k8s-mcp-port:

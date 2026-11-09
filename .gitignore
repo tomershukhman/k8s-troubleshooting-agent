@@ -1,6 +1,8 @@
-# Secrets and local credentials
+# Secrets and local credentials. The two folders are kept (.gitkeep) so they exist, owned by
+# you, before compose mounts them: on native Linux Docker would create them as root.
 .env
-.kube-agent/
+.kube-agent/*
+!.kube-agent/.gitkeep
 
 # Assignment brief (employer's document; kept out of the repo)
 *.pdf
@@ -22,5 +24,6 @@ build/
 .vscode/
 
 # `agent eval` results (the scores are also in MLflow)
-eval-results/
+eval-results/*
+!eval-results/.gitkeep
 .claude/worktrees/

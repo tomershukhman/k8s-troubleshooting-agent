@@ -4,19 +4,16 @@ server in tests/acceptance/test_m4_tracing.py."""
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
 
-import pytest
 from typer.testing import CliRunner
 
-from k8s_agent import tracking_server
 from k8s_agent.agent import core
 from k8s_agent.cli import app
 from k8s_agent.config import get_settings
-from tests.fakes import FakeCluster, FakeKube, ScriptedModel, answer, call, critic, diagnosis
+from tests.fakes import FakeCluster, ScriptedModel, answer, call, critic, diagnosis
 
 STOPPED = "http://127.0.0.1:9"  # nothing listens: every connection is refused
 
@@ -83,38 +80,3 @@ def test_a_tracking_server_that_goes_away_cannot_hold_up_exit(tmp_path):
     )  # fmt: skip
     assert done.returncode == 0, done.stderr
     assert time.monotonic() - t0 < 15, done.stderr  # with MLflow's defaults: minutes
-
-
-@pytest.mark.parametrize(
-    ("helm", "run", "error"),
-    [
-        (None, None, "helm not found: install Helm 4"),
-        (
-            "/bin/helm",
-            subprocess.CompletedProcess([], 1, "", "Error: UPGRADE FAILED: context deadline\n"),
-            "helm could not install the MLflow tracking server: Error: UPGRADE FAILED: context",
-        ),
-    ],
-)
-def test_a_failed_tracking_server_install_says_why(monkeypatch, helm, run, error):
-    monkeypatch.setattr(tracking_server.shutil, "which", lambda _name: helm)
-    monkeypatch.setattr(tracking_server.subprocess, "run", lambda *_args, **_kw: run)
-    with pytest.raises(tracking_server.InstallError, match=error):
-        tracking_server.install(get_settings(), FakeKube().clients, lambda _msg: None)
-
-
-def test_the_tracking_server_chart_is_pinned_by_digest(monkeypatch):
-    ran = []
-
-    def helm(command, **_kwargs):
-        ran.append(command)
-        return subprocess.CompletedProcess(command, 1, "", "Error: stop here\n")
-
-    monkeypatch.setattr(tracking_server.shutil, "which", lambda _name: "/bin/helm")
-    monkeypatch.setattr(tracking_server.subprocess, "run", helm)
-    with pytest.raises(tracking_server.InstallError):
-        tracking_server.install(get_settings(), FakeKube().clients, lambda _msg: None)
-    [command] = ran
-    chart = command[command.index("--install") + 2]
-    assert re.fullmatch(r"oci://ghcr\.io/mlflow/charts/mlflow@sha256:[0-9a-f]{64}", chart)
-    assert command[command.index("--version") + 1] == "3.18.0"  # its digest must match the pin

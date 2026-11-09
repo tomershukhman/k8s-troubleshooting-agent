@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.text import Text
 from urllib3.exceptions import HTTPError
 
-from k8s_agent import access, scenarios, tracing, tracking_server
+from k8s_agent import access, scenarios, tracing
 from k8s_agent.config import Settings, get_settings
 from k8s_agent.kube import KubeError, admin_clients
 from k8s_agent.logs import LOGGER, setup_logging
@@ -38,7 +38,6 @@ NameArg = Annotated[str, typer.Argument(help="Scenario name, e.g. selector")]
 EXIT_FAILED, EXIT_NOT_STARTED = 1, 2
 CLUSTER_ERRORS = (
     scenarios.ScenarioError,
-    tracking_server.InstallError,
     KubeError,
     TimeoutError,
     ApiException,
@@ -288,12 +287,11 @@ def eval_(
 
 @app.command()
 def setup() -> None:
-    """Create the agent's identities and install the tracking server (safe to re-run).
+    """Create the agent's identities (safe to re-run).
 
     Applies deploy/rbac.yaml (the read-only `reader` and the fix-only `remediator` in
     namespace k8s-agent) and writes a short-lived kubeconfig for each; re-run to refresh
-    expired tokens. Then installs or upgrades the MLflow tracking server with Helm
-    (deploy/mlflow-values.yaml), returning once it's ready."""
+    expired tokens."""
     s = _settings()
     with _clean_errors():
         c = admin_clients(s)
@@ -306,14 +304,8 @@ def setup() -> None:
             kubeconfigs=paths,
             progress=_say,
         )
-        port = tracking_server.install(s, c, _say)
     expires = min(cred.expires for cred in creds)
     _say(f"setup done; tokens expire {expires.isoformat()} (re-run `agent setup` to refresh)")
-    if port:
-        _say(
-            f"traces: set MLFLOW_TRACKING_URI to the server's LoadBalancer address, port {port} "
-            f"(OrbStack: http://localhost:{port})"
-        )
 
 
 @scenario_app.command("list")

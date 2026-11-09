@@ -107,18 +107,9 @@ class Settings(BaseSettings):
     mlflow_disable_telemetry: bool = Field(
         default=True, validation_alias="MLFLOW_DISABLE_TELEMETRY"
     )
-    # The tracking server `agent setup` installs in the cluster, with MLflow's Helm chart.
-    # Pinned by digest; Helm 4 also resolves the version and refuses it if the digests differ.
-    mlflow_chart: str = (
-        "oci://ghcr.io/mlflow/charts/mlflow"
-        "@sha256:14838bbc4d897fd1675edef7930c5eb0135f0791d4479be2c3357dde5d5b259e"
-    )
-    mlflow_chart_version: str = "3.18.0"
-    mlflow_release: str = "mlflow"
-    mlflow_namespace: str = "mlflow"
-    mlflow_values_file: Path = Path("deploy/mlflow-values.yaml")
-    # The first install pulls a ~1.4 GB image (it took about 2.5 min when measured).
-    mlflow_install_timeout_seconds: PositiveInt = 600
+    # The code's git commit, recorded on traces and eval runs (it pins the prompts). Unset = the
+    # working directory's .git; the image has none, so its build sets this.
+    git_commit: str | None = None
 
     # Evals (SPEC 2.3, 3.6): each scenario's question, asked this many times. One run checks
     # nothing broke; more runs measure how reliable the agent is. The diagnosis and the two

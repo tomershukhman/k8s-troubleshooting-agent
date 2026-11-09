@@ -6,7 +6,8 @@ imported only when it's on.
   decides what an unreachable server means: `investigate` warns and runs untraced.
 - `run()`: one trace per run, under a root span with the request and the result. The user and
   session are MLflow's own trace fields; the run ID and model settings are trace metadata
-  (MLflow adds the git commit itself, via GitPython).
+  (MLflow adds the git commit itself, via GitPython; AGENT_GIT_COMMIT, which the image sets,
+  replaces it).
 - `flush()`: sends what's left before exit, bounded by the HTTP timeout and retries.
 """
 
@@ -27,6 +28,7 @@ class TracingUnavailable(Exception):
 class Tracing:
     uri: str
     experiment_id: str
+    git_commit: str | None = None
 
     def url(self, trace_id: str) -> str:
         """The trace in the MLflow UI."""
@@ -70,7 +72,7 @@ def enable(settings: Settings) -> Tracing | None:
         reason = (str(e).strip().splitlines() or [type(e).__name__])[0]
         raise TracingUnavailable(f"cannot use the MLflow tracking server at {uri}: {reason}") from e
     mlflow.langchain.autolog()
-    _on = Tracing(uri, experiment.experiment_id)
+    _on = Tracing(uri, experiment.experiment_id, settings.git_commit)
     return _on
 
 
@@ -85,7 +87,10 @@ def run(
         return
     import mlflow
     from mlflow.entities import NoOpSpan, SpanStatus, SpanStatusCode, SpanType
+    from mlflow.utils.mlflow_tags import MLFLOW_GIT_COMMIT
 
+    if _on.git_commit:  # the caller's metadata wins over what MLflow found in .git
+        metadata = {**metadata, MLFLOW_GIT_COMMIT: _on.git_commit}
     with (
         mlflow.tracing.context(session_id=session, user=user, metadata=metadata),
         mlflow.start_span(name, span_type=SpanType.AGENT) as span,

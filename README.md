@@ -9,10 +9,8 @@ Design, with each decision and the alternatives rejected: [SPEC.md](SPEC.md). Bu
 ## Requirements
 
 - **A local Kubernetes cluster.** Tested on [OrbStack](https://orbstack.dev/) (macOS) with its Kubernetes cluster turned on. kind, minikube and Docker Desktop should work but are untested ([other clusters](#other-clusters-kind-minikube)).
-- [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 if needed).
-- [Helm 4](https://helm.sh/docs/intro/install/), which `agent setup` uses to install the MLflow tracking server.
-- Docker with Compose and host networking (built in on OrbStack and Linux; on Docker Desktop 4.34+: Settings → Resources → Network → Enable host networking).
-- On native Linux Docker only: set `AGENT_CONTAINER_USER` in `.env` to your `id -u`:`id -g`, so the MCP container can read the credential file `agent setup` writes.
+- Docker with Compose and host networking (built in on OrbStack and Linux; on Docker Desktop 4.34+: Settings → Resources → Network → Enable host networking). Everything else (Python, the agent, Helm 4) is in the image.
+- On native Linux Docker only: set `AGENT_CONTAINER_USER` in `.env` to your `id -u`:`id -g`, so the containers can read your kubeconfig and the credential files `agent setup` writes (all 0600).
 - An [Anthropic API key](https://console.anthropic.com/), as `ANTHROPIC_API_KEY` in `.env` or your environment. Runs are billed to that key's API account.
 
 ## Setup
@@ -20,17 +18,25 @@ Design, with each decision and the alternatives rejected: [SPEC.md](SPEC.md). Bu
 With OrbStack's Kubernetes running:
 
 ```bash
-uv sync                                  # Python 3.14 and every dependency, the evals' included
 cp .env.example .env && chmod 600 .env   # then set ANTHROPIC_API_KEY (the file holds your key)
-uv run agent setup                       # the agent's identities and the tracking server (re-run to refresh tokens)
+docker compose pull                      # the app image from ghcr.io (or build it here: docker compose build)
+docker compose run --rm admin setup      # the agent's identities and the tracking server (re-run to refresh tokens)
 docker compose up -d --wait k8s-mcp      # the read-only MCP server
 ```
 
-`agent setup`, `agent scenario` and `agent eval` use your own kubeconfig and its current context (`orbstack` on OrbStack); set `AGENT_KUBE_CONTEXT` for another. `agent investigate` never uses your kubeconfig: it reads the cluster only through the MCP server, as the read-only `reader` ([safety boundary](#safety-boundary)). Every setting and its default is in [`.env.example`](.env.example).
+Three containers, each with only the credentials it needs ([SPEC 3.5](SPEC.md#35-safety-boundary-cluster-enforced)):
+
+| Service | Runs | Holds |
+|---|---|---|
+| `admin` | `agent setup`, `agent scenario`, `agent eval` | your kubeconfig (`AGENT_KUBECONFIG`, default `~/.kube/config`, read-only); writes the agent's credentials to `.kube-agent/` and results to `eval-results/` |
+| `agent` | `agent investigate` | the remediator's credentials only. Your kubeconfig is never mounted here: it reads the cluster only through the MCP server, as the read-only `reader` ([safety boundary](#safety-boundary)) |
+| `k8s-mcp` | the MCP server | the reader's credentials only |
+
+`admin` uses your kubeconfig's current context (`orbstack` on OrbStack); set `AGENT_KUBE_CONTEXT` for another. The eval runner holds both your kubeconfig and the agent's credentials: it resets the scenarios and runs the agent. Every setting and its default is in [`.env.example`](.env.example); compose passes `.env` to every container.
 
 ### Other clusters (kind, minikube)
 
-Untested, but the same steps should work. These clusters give LoadBalancer Services no address, so forward the tracking server before `agent investigate` or `agent eval`:
+Untested locally (CI runs the evals on kind), but the same steps should work. These clusters give LoadBalancer Services no address, so forward the tracking server before `agent investigate` or `agent eval`:
 
 ```bash
 kubectl port-forward -n mlflow svc/mlflow-mlflow 5050 &
@@ -48,9 +54,9 @@ Each scenario is a folder in `scenarios/` (plain Kubernetes YAML plus a `scenari
 | `healthy` | Nothing (the control case). The right answer is "no fault". | `shop-inventory` | Is the inventory service healthy? |
 
 ```bash
-uv run agent scenario list               # the four scenarios and their namespaces
-uv run agent scenario up selector        # recreate it with the agent's access, wait until the fault is live
-uv run agent scenario down selector      # delete the namespace and wait until it's gone
+docker compose run --rm admin scenario list            # the four scenarios and their namespaces
+docker compose run --rm admin scenario up selector     # recreate it with the agent's access, wait until the fault is live
+docker compose run --rm admin scenario down selector   # delete the namespace and wait until it's gone
 ```
 
 `up` waits until the fault can be observed (for `crashloop`, two restarts: about 40 seconds). Both commands refuse a namespace without the ownership label `app.kubernetes.io/part-of=k8s-agent-demo`.
@@ -58,13 +64,15 @@ uv run agent scenario down selector      # delete the namespace and wait until i
 ## Running the agent
 
 ```bash
-uv run agent scenario up selector
-uv run agent investigate "The checkout service isn't reachable from other pods. Why?"
+docker compose run --rm admin scenario up selector
+docker compose run --rm agent "The checkout service isn't reachable from other pods. Why?"
 ```
 
+- The `agent` service runs only `agent investigate`: pass the question and its options. It starts `k8s-mcp` if it isn't running.
 - The agent finds the namespace itself; `-n <namespace>` points it at one.
 - `--user NAME` records who asked (default: `AGENT_USER_ID`, else your OS user).
 - `--quiet` turns off the progress; `--json` prints the result as JSON even in a terminal.
+- To pipe the JSON, add `-T` (`docker compose run --rm -T agent "…" > result.json`): with a terminal, Docker sends the progress to stdout too. Without a terminal there's no y/N prompt, so a fix is rejected.
 
 In a terminal you see each stage, each tool call and the critic's verdict, then the diagnosis. On the selector scenario (trimmed):
 
@@ -137,8 +145,8 @@ Piped, or with `--json`, stdout is the result JSON: the diagnosis (`fault_found`
 ## Running the evaluations
 
 ```bash
-uv run agent eval                                # every scenario once, plus the selector fix run
-uv run agent eval --scenario selector --runs 3   # measure reliability: 2 of 3 must pass
+docker compose run --rm admin eval                                # every scenario once, plus the selector fix run
+docker compose run --rm admin eval --scenario selector --runs 3   # measure reliability: 2 of 3 must pass
 ```
 
 For each scenario, `agent eval` recreates it, asks its question without naming the namespace, and scores the answer with MLflow's [`mlflow.genai.evaluate`](https://mlflow.org/docs/latest/genai/eval-monitor/). The selector scenario also gets one fix run, approved automatically (the only automatic approval anywhere) and checked to work. It prints a pass/fail table, writes `eval-results/<time>.json`, and exits non-zero if any scenario fails. Every score is on its run's trace in MLflow (experiment `k8s-agent-evals`).
@@ -207,7 +215,14 @@ The cluster enforces it, through two identities from [`deploy/rbac.yaml`](deploy
 
 Details: [SPEC 3.5](SPEC.md#35-safety-boundary-cluster-enforced).
 
+## CI
+
+- **[`ci.yml`](.github/workflows/ci.yml), on every push and pull request:** `make check`, the image build and a run of it as non-root. Pushes to `main` publish the image (`linux/amd64`, `linux/arm64`) to `ghcr.io/tomershukhman/k8s-troubleshooting-agent`, tagged `latest` and with the commit SHA.
+- **[`eval.yml`](.github/workflows/eval.yml), on every pull request to `main` and from the Actions tab's "Run workflow" button:** a throwaway kind cluster, then this README's commands through `docker compose` (`admin setup`, `k8s-mcp`, `admin eval`) with the real model, on the image built from the pull request. It fails if any scenario misses its thresholds, and keeps `eval-results/` as a workflow artifact. Pull requests from forks get no secrets, so there it stops with a notice.
+
 ## Development
+
+Needs [uv](https://docs.astral.sh/uv/) and, for `agent setup`, [Helm 4](https://helm.sh/docs/intro/install/). `uv sync` installs Python 3.14 and every dependency; then `uv run agent …` runs any command without the containers.
 
 ```bash
 make check         # lint, type check + unit tests (no cluster, Docker or network; never reads your .env)

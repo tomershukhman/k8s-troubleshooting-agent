@@ -6,7 +6,6 @@ call) gets one retry."""
 
 import json
 import subprocess
-import urllib.request
 
 import mlflow
 import pytest
@@ -18,10 +17,7 @@ from k8s_agent.scenarios import get_scenario
 
 from .conftest import (
     ROOT,
-    agent,
-    eventually,
     investigate_cli,
-    mlflow_deployment,
     run_selector,
     selector_question,
     stored,
@@ -226,30 +222,6 @@ def test_a_refused_tool_call_is_an_error_span_with_the_refusal(uri):
 
 
 # --- the tracking server ----------------------------------------------------------------------
-
-
-def test_setup_returns_only_once_the_tracking_server_is_ready(kube, uri):
-    apps, deployment = mlflow_deployment(kube)
-    ns, name = deployment.metadata.namespace, deployment.metadata.name
-    pods = kube.core.list_namespaced_pod(ns, label_selector="app.kubernetes.io/name=mlflow")
-    for pod in pods.items:  # the server restarts: setup has something to wait for
-        kube.core.delete_namespaced_pod(pod.metadata.name, ns)
-
-    def down():
-        assert not apps.read_namespaced_deployment_status(name, ns).status.available_replicas
-
-    eventually(down)
-    agent("setup")
-    # no waiting: the server passed its readiness check (GET /health) before setup returned
-    assert apps.read_namespaced_deployment_status(name, ns).status.available_replicas == 1
-
-    def reachable():  # from this machine too (OrbStack's localhost route lags by ~1 s)
-        try:
-            assert urllib.request.urlopen(f"{uri}/health", timeout=5).status == 200
-        except OSError as e:
-            raise AssertionError(e) from e
-
-    eventually(reachable)
 
 
 def test_with_the_tracking_server_stopped_investigate_works_with_one_warning(

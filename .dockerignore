@@ -1,0 +1,8 @@
+# Only what the image build copies. Secrets and credentials never enter the build context.
+*
+!pyproject.toml
+!uv.lock
+!src/
+!scenarios/
+!deploy/
+**/__pycache__
