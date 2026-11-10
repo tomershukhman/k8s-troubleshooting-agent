@@ -7,12 +7,12 @@ Ask it what is wrong with a service in plain words ("Why is the checkout service
 ## How the agent works
 
 ```mermaid
-flowchart LR
-    q(["Your question"]) --> inv["Investigator<br/>reads the cluster"]
-    inv --> critic{"Critic<br/>is every claim<br/>supported?"}
+flowchart TD
+    q(["Your question"]) --> inv["<b>Investigator</b><br/>reads the cluster with read-only tools"]
+    inv --> critic{"<b>Critic</b><br/>is every claim<br/>supported by evidence?"}
     critic -- "no: once more" --> inv
-    critic -- "yes" --> ans(["Root cause,<br/>evidence,<br/>next step"])
-    ans -. "one kind of fault,<br/>after you approve" .-> rem["Remediator<br/>applies the fix"]
+    critic -- "yes" --> ans(["<b>Answer</b><br/>root cause, evidence, next step"])
+    ans -. "one kind of fault, after you approve" .-> rem["<b>Remediator</b><br/>applies the fix"]
 ```
 
 Three roles, each a separate model call with its own prompt:
