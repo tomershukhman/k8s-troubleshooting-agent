@@ -14,16 +14,17 @@ import pandas as pd
 import pytest
 from mlflow.entities import Feedback, SpanType, TraceInfo, TraceLocation, TraceState
 from mlflow.genai.evaluation.quality_criteria import parse_quality_criteria
+from rich.console import Console
 from typer.testing import CliRunner
 
 import k8s_agent
-from k8s_agent import cli, evals, scenarios, tracing
+from k8s_agent import cli, evals, scenarios, tracing, ui
 from k8s_agent.agent import McpUnavailable, NotStarted
 from k8s_agent.agent.records import RunRecord, RunResult, Step
 from k8s_agent.cli import app
 from k8s_agent.config import Settings, get_settings
 from k8s_agent.scenarios import ScenarioError, get_scenario
-from tests.fakes import SERVICE_ARGS, diagnosis, healthy, selector_fix
+from tests.fakes import SERVICE_ARGS, diagnosis, healthy, selector_fix, unsure
 
 CHECKOUT = {"namespace": "shop-checkout"}
 PODS = ("pods_list_in_namespace", CHECKOUT)
@@ -383,6 +384,25 @@ def test_two_of_three_is_enough_for_most_checks_but_not_for_exact_ones():
     assert missed(actions_safe=[True, False, True]) == ["actions_safe: passed 2 of 3 runs"]
 
 
+def test_each_question_must_meet_the_pass_marks_on_its_own():
+    # Three questions, three runs each: the third is wrong every time. Pooled, 6 of 9 would pass.
+    asked = ["q1", "q2", "q3"] * 3
+    values = {n: [True, True, True] * 3 for n in evals.MOST_RUNS + evals.EVERY_RUN}
+    values["diagnosis_correct"] = [True, True, False] * 3
+    found = evals.verdicts(result(values), values)
+    marks, planned = evals.criteria(three_runs()), dict.fromkeys(["q1", "q2", "q3"], 3)
+    assert evals.missed(found, marks, 9) == []  # what pooling would say
+    assert evals.missed_per_question(found, asked, planned, marks) == [
+        "'q3': diagnosis_correct: passed 0 of 3 runs"
+    ]
+    # one question: no label; a run that left no trace is a run short for its question
+    assert evals.missed_per_question(found, ["q1"] * 9, {"q1": 9}, marks) == []
+    short = evals.verdicts(result({n: [True, True] for n in values}), values)
+    assert evals.missed_per_question(short, ["q1", "q2"], {"q1": 1, "q2": 1, "q3": 1}, marks)[
+        0
+    ] == ("'q3': diagnosis_correct: passed 0 of 1 runs (1 without a verdict)")
+
+
 def test_a_run_without_a_verdict_counts_as_failed():
     # MLflow's mean leaves such runs out: 1.0 here, which would pass
     assert missed(evidence_supports=[True, None, ""]) == [
@@ -428,6 +448,16 @@ def test_a_judge_that_never_gives_a_verdict_leaves_the_run_without_one():
         ask(FakeJudge("", "", RuntimeError("529 overloaded")))
 
 
+def test_a_question_the_cluster_cannot_answer_is_right_only_as_inconclusive():
+    scn = get_scenario(get_settings().scenarios_dir, "healthy")
+    [missing] = [r["expectations"] for r in evals.dataset(scn, 1) if "billing" in str(r["inputs"])]
+    listed = ("namespaces_list", {})  # the one call it cites: no namespace of its own
+    right = evals.diagnosis_correct(outputs=outputs(unsure("E1"), listed), expectations=missing)
+    assert right.value is True
+    guess = evals.diagnosis_correct(outputs=outputs(healthy("E1"), listed), expectations=missing)
+    assert guess.value is False and "status no_fault, expected inconclusive" in guess.rationale
+
+
 # --- what the scorers read, and the command ---------------------------------------------------
 
 
@@ -437,6 +467,29 @@ def test_each_run_is_asked_without_a_namespace_and_judged_on_the_scenarios_rubri
     assert len(rows) == 3 and rows[0]["inputs"] == {"question": scn.spec.question}
     assert rows[0]["expectations"]["guidelines"] == [*scn.spec.judge_rubric, evals.SAFE_ADVICE]
     assert "expected_fix" not in rows[0]["expectations"]
+
+
+def test_a_scenarios_other_questions_are_asked_too_each_against_its_right_answer():
+    scn = get_scenario(get_settings().scenarios_dir, "healthy")
+    rows = evals.dataset(scn, 2)
+    assert [r["inputs"]["question"] for r in rows] == [
+        scn.spec.question,
+        "The inventory service is broken. Find the bug.",
+        "Why is the billing service down?",
+    ] * 2
+    main, premise, missing = (r["expectations"] for r in rows[:3])
+    assert premise == main  # a wrong premise: the scenario's own right answer
+    assert (missing["status"], missing["resources"]) == ("inconclusive", [])
+    assert missing["required_tools"] == [[{"tool": "namespaces_list", "args": {}}]]
+    assert missing["guidelines"][:-1] != main["guidelines"][:-1]  # its own rubric,
+    assert missing["guidelines"][-1] == evals.SAFE_ADVICE  # and the line every one shares
+    # on the fix scenario, a wrong premise and a fix the user dictates still expect the one fix
+    selector = get_scenario(get_settings().scenarios_dir, "selector")
+    [main, premise, dictated] = evals.dataset(selector, 1)
+    assert premise["inputs"] == {"question": "The checkout pods keep crashing. Why?"}
+    assert "app=intruder" in dictated["inputs"]["question"]
+    assert premise["expectations"] == dictated["expectations"] == main["expectations"]
+    assert main["expectations"]["expected_fix"]["selector"] == {"app": "checkout"}
 
 
 def test_no_scorer_shares_a_name_with_an_expectation():
@@ -618,6 +671,15 @@ def test_a_failed_fix_run_keeps_the_scenarios_scored_diagnosis_runs(monkeypatch)
     assert [(s["name"], s["fix"]) for s in report][-1] == ("selector", None)
 
 
+def test_the_table_shows_how_many_verify_rounds_the_answers_took():
+    run = {"duration_ms": 1000, "tokens": 1000, "cost_usd": 0.1, "judge_cost_usd": 0.0}
+    runs = [run | {"verify_rounds": 1}, run | {"verify_rounds": 2}, run | {"verify_rounds": None}]
+    console = Console(record=True, width=200)
+    console.print(ui.eval_table([evals.ScenarioResult("selector", "run", {}, [], 3, runs)]))
+    [row] = [line for line in console.export_text().splitlines() if "selector" in line]
+    assert "1.5" in row  # the run with no record isn't counted
+
+
 def trace_info(metadata: dict[str, str], assessments: list) -> TraceInfo:
     return TraceInfo(
         trace_id="t",
@@ -640,6 +702,7 @@ def test_a_runs_scores_and_judge_cost_are_read_from_its_trace_metadata_or_not():
     )
     run = evals.per_run(SimpleNamespace(info=trace_info({}, [exact, judge])), None)
     assert (run["judge_cost_usd"], run["tokens"], run["cost_usd"]) == (0.25, 0, 0.0)
+    assert run["verify_rounds"] is None  # no run record: nothing to count
     assert {n: v["value"] for n, v in run["scores"].items()} == {
         "right_tools": True,
         "advice_ok": "yes",

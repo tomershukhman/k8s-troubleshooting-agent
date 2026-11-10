@@ -6,7 +6,8 @@ expected:
   resources:
     - {kind: Deployment, name: catalog}
 required_tools:  # each entry: alternatives, any one satisfies it
-  - [{tool: events_list}]
+  # that the probe fails: the Unhealthy event, or the 404 in the app's own log
+  - [{tool: events_list}, {tool: pods_log}]
   # the probe spec: in the Deployment, or in a pod made from it
   - [{tool: resources_get, args: {kind: Deployment}}, {tool: pods_get}, {tool: resources_get, args: {kind: Pod}}]
 judge_rubric:

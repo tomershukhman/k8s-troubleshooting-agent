@@ -24,6 +24,7 @@ import contextvars
 import json
 import logging
 import os
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -44,7 +45,7 @@ from k8s_agent.agent.middleware import EVIDENCE_REF
 from k8s_agent.config import Settings
 from k8s_agent.kube import AdminClients
 from k8s_agent.policy import FIX_TOOL, READ_ONLY_TOOLS, REMEDIATOR_READ_TOOLS
-from k8s_agent.scenarios import Scenario
+from k8s_agent.scenarios import Ask, Scenario
 
 # Every scenario's advice rubric also has this line (DESIGN 3.8).
 SAFE_ADVICE = (
@@ -118,11 +119,12 @@ def diagnosis_correct(outputs: dict[str, Any], expectations: dict[str, Any]) -> 
             problems.append(
                 f"affected resource {res}, expected one of {sorted(accepted)} in {namespace}"
             )
-    else:  # no fault (the healthy scenario): no resource, and evidence from its namespace
+    else:  # nothing to name: no fault, or a question the cluster can't answer
         if res is not None:
             problems.append(f"affected resource {res}, expected none")
         looked = {step["args"].get("namespace") for step in outputs["evidence_steps"]}
-        if namespace not in looked:  # "healthy" from evidence of another namespace
+        # "healthy" from evidence of another namespace
+        if expectations["status"] == "no_fault" and namespace not in looked:
             problems.append(f"no cited evidence from {namespace}")
     return _verdict(problems, f"{d['status']} / {d['fault_category']}, as expected")
 
@@ -314,25 +316,47 @@ def missed(found: Verdicts, marks: dict[str, float], runs: int) -> list[str]:
     return problems
 
 
-def expectations(scn: Scenario) -> dict[str, Any]:
-    """What the scorers check a run of the scenario against."""
+def missed_per_question(
+    found: Verdicts, asked: list[str | None], planned: dict[str, int], marks: dict[str, float]
+) -> list[str]:
+    """The pass marks each question missed (`missed`): a scenario with several questions passes
+    only if each one does, so no question can fail every time behind the others. `asked`: the
+    question behind each scored run, in `found`'s order; `planned`: runs asked for, per
+    question. A failure names its question when there are several."""
+    problems = []
+    for question, runs in planned.items():
+        rows = [n for n, q in enumerate(asked) if q == question]
+        own = {check: [got[n] for n in rows if n < len(got)] for check, got in found.items()}
+        label = f"{question!r}: " if len(planned) > 1 else ""
+        problems += [label + problem for problem in missed(own, marks, runs)]
+    return problems
+
+
+def expectations(scn: Scenario, ask: Ask | None = None) -> dict[str, Any]:
+    """What the scorers check a run against: the scenario's right answer, tools and rubric, or
+    `ask`'s own where it brings them."""
     spec = scn.spec
+    want = (ask and ask.expected) or spec.expected
+    tools = (ask and ask.required_tools) or spec.required_tools
+    rubric = (ask and ask.judge_rubric) or spec.judge_rubric
     expected = {
-        "status": spec.expected.status.value,
-        "fault_categories": [c.value for c in spec.expected.fault_categories],
-        "resources": [r.model_dump() for r in spec.expected.resources],
+        "status": want.status.value,
+        "fault_categories": [c.value for c in want.fault_categories],
+        "resources": [r.model_dump() for r in want.resources],
         "namespace": scn.namespace,
-        "required_tools": [[t.model_dump() for t in alts] for alts in spec.required_tools],
-        "guidelines": [*spec.judge_rubric, SAFE_ADVICE],
+        "required_tools": [[t.model_dump() for t in alts] for alts in tools],
+        "guidelines": [*rubric, SAFE_ADVICE],
     }
-    if spec.expected_fix is not None:
+    if spec.expected_fix is not None and want is spec.expected:
         expected["expected_fix"] = spec.expected_fix.model_dump()
     return expected
 
 
 def dataset(scn: Scenario, runs: int) -> list[dict[str, Any]]:
-    """The scenario's question `runs` times, each with what the scorers check it against."""
-    return [{"inputs": {"question": scn.spec.question}, "expectations": expectations(scn)}] * runs
+    """Each of the scenario's questions `runs` times, with what the scorers check it against."""
+    asks = [(scn.spec.question, None), *((ask.question, ask) for ask in scn.spec.also_ask)]
+    rows = [{"inputs": {"question": q}, "expectations": expectations(scn, ask)} for q, ask in asks]
+    return rows * runs
 
 
 def outputs_of(record: RunRecord) -> dict[str, Any]:
@@ -473,11 +497,15 @@ def _evaluate(
     ids = [] if result.result_df is None else list(result.result_df["trace_id"])
     traces = [mlflow.get_trace(trace_id) for trace_id in ids]  # with the scores logged on them
     found = verdicts(result, [metric.rsplit("/", 1)[0] for metric in marks])
+    records = [predict.records.get(trace_id) for trace_id in ids]
+    asked = [record.result.question if record else None for record in records]
+    planned = Counter(row["inputs"]["question"] for row in data)
     return ScenarioResult(
         name=name,
         run_id=run.info.run_id,
         metrics={k: float(v) for k, v in result.metrics.items()},
-        failures=missed(found, marks, runs),  # a run without a trace has no verdicts: failed
+        # a run without a trace has no verdicts, so its question is a run short: failed
+        failures=missed_per_question(found, asked, planned, marks),
         planned=runs,
         runs=[per_run(t, predict.records.get(t.info.trace_id)) for t in traces if t is not None],
         passes={check: got.count(True) for check, got in found.items()},
@@ -495,6 +523,7 @@ def per_run(trace: Any, record: RunRecord | None) -> dict[str, Any]:
             for f in feedback
         },
         "duration_ms": info.execution_duration,
+        "verify_rounds": len(record.result.verification) if record else None,
         "tokens": (info.token_usage or {}).get("total_tokens", 0),
         "cost_usd": (info.cost or {}).get("total_cost", 0.0),
         "judge_cost_usd": sum(
@@ -533,7 +562,8 @@ class Suite:
         try:
             for scn in found:
                 self.up(scn)
-                self.progress(f"{scn.name}: {s.eval_runs_per_scenario} runs, then scoring")
+                runs = (1 + len(scn.spec.also_ask)) * s.eval_runs_per_scenario
+                self.progress(f"{scn.name}: {runs} runs, then scoring")
                 result = evaluate(scn, s, predict)
                 self.scored = True
                 self.verdict(result)
