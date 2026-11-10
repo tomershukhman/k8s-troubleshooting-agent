@@ -8,11 +8,11 @@ Ask it what is wrong with a service in plain words ("Why is the checkout service
 
 ```mermaid
 flowchart TD
-    q(["Your question"]) --> inv["<b>Investigator</b>: reads the cluster, read-only"]
-    inv --> critic["<b>Critic</b>: is every claim supported?"]
-    critic -- "no: once more" --> inv
-    critic -- "yes" --> ans(["<b>Answer</b>: root cause, evidence, next step"])
-    ans -. "one kind of fault, after you approve" .-> rem["<b>Remediator</b>: applies the fix"]
+    q(["Your question"]) --> inv["<b>Investigator</b><br/>reads the cluster"]
+    inv --> critic["<b>Critic</b><br/>checks the evidence"]
+    critic -- "not supported: once more" --> inv
+    critic -- "supported" --> ans(["<b>Answer</b><br/>cause, evidence, next step"])
+    ans -. "one kind of fault, with your approval" .-> rem["<b>Remediator</b><br/>applies the fix"]
 ```
 
 Three roles, each a separate model call with its own prompt:
