@@ -277,11 +277,14 @@ def final_diagnosis(state: InvestigationState) -> Diagnosis:
     if draft.status is DiagnosisStatus.inconclusive and any(
         s.error and tool_output.REFUSED.search(s.output) for s in steps
     ):
+        # Advice, so it goes with the next step: the root cause states only what the evidence
+        # shows, and this is about the setup, which no tool output shows.
         note = (
             " The agent can read only namespaces that grant its reader a RoleBinding (see the "
-            "README); add one to investigate this namespace."
+            "README): to investigate a namespace it was refused, add one there."
         )
-        draft = draft.model_copy(update={"root_cause": draft.root_cause.rstrip() + note})
+        action = draft.recommended_action.rstrip() + note
+        draft = draft.model_copy(update={"recommended_action": action})
     return draft
 
 

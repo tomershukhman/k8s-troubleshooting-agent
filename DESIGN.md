@@ -260,7 +260,7 @@ The investigator's only access to the cluster is 7 read tools on an MCP server t
 
 - **The server** ([kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server), pinned) runs in read-only mode with Secrets denied and listens only on this machine, since it has no login. Its [config](mcp/config.toml) allows exactly the 7 tools, and the agent loads only those 7 again on its side.
 - **Each result is prepared before the model sees it:** an oversized output is cut with a marker, and the evidence ID is added. The server already leaves out `managedFields`, often half an object's YAML.
-- **Failed calls** are retried unless a retry can't help (refused, not found). The model then sees the server's error text. If a refused read leaves the agent unable to tell, the answer is `inconclusive` and says how to grant access.
+- **Failed calls** are retried unless a retry can't help (refused, not found). The model then sees the server's error text. If a refused read leaves the agent unable to tell, the answer is `inconclusive`, and its next step says how to grant access.
 - **The remediator's tools are separate:** small functions over the official Kubernetes client, using only the remediator's credentials.
 
 ### 3.5 Safety model

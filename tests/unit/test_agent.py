@@ -220,9 +220,10 @@ def test_refused_access_is_tagged_evidence_and_the_reason_says_how_to_grant_it(t
         and result.content.startswith("[E1] ")
         and "forbidden" in result.content
     )
-    root_cause = record.result.diagnosis.root_cause
-    assert root_cause.startswith("Access to the namespace was refused.")
-    assert "RoleBinding" in root_cause
+    d = record.result.diagnosis
+    # how to grant access is advice: the root cause stays what the evidence shows
+    assert d.root_cause == "Access to the namespace was refused."
+    assert "add one there" in d.recommended_action and "RoleBinding" in d.recommended_action
 
 
 def test_a_tool_that_times_out_is_retried_then_comes_back_as_a_tool_error(env):

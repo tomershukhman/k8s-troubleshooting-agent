@@ -193,7 +193,7 @@ def test_a_namespace_the_agent_cannot_read_gives_inconclusive_not_a_guess():
             and d.status == "inconclusive"
             and not record.forced_reason
             and refused
-            and "RoleBinding" in d.root_cause
+            and "RoleBinding" in d.recommended_action
         )
         return [] if ok else [d]
 
