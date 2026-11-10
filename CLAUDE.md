@@ -16,8 +16,8 @@ Design: `DESIGN.md`.
   `AGENT_ACCEPT_REUSE_SCENARIOS=false` = fresh and removed (needed after deleting an object from a
   manifest). The `scenarios` suite always deploys and deletes: that's its test.
 - One test: `uv run pytest tests/unit/test_agent.py::test_founded_evidence_passes_straight_through -q`
-- **Tuning prompts, with Claude Code reading the answers itself:** `uv run agent scenario list` for the
-  questions, then `uv run agent investigate "<question>" --json` per scenario (agent only, ~$0.09 a
+- **Tuning prompts (`src/k8s_agent/prompts/`), with Claude Code reading the answers itself:** `uv run agent scenario list` for the
+  questions (each scenario's `also_ask` has more), then `uv run agent investigate "<question>" --json` per scenario (agent only, ~$0.09 a
   run), or `uv run agent eval --runs 1` (adds the judges): `eval-results/<time>.json` holds each run's
   full record (every tool call and output, the critic's verdicts) beside every score and judge reason.
 - Run from the repo root (`AGENT_SCENARIOS_DIR` defaults to `./scenarios`). Unit tests run in an empty

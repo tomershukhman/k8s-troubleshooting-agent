@@ -2,18 +2,18 @@
 tool outputs the draft cites, and returns a structured `CriticVerdict`."""
 
 import json
-from importlib import resources
 from typing import cast
 
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 
+from k8s_agent import prompts
 from k8s_agent.agent import tool_output
 from k8s_agent.agent.records import Step
 from k8s_agent.schemas import CriticVerdict, Diagnosis
 
-PROMPT = resources.files("k8s_agent.agent").joinpath("critic.md").read_text()
+PROMPT = prompts.load("critic_system")
 # The tag around each cited output. Inside untrusted text (a log line, the model's words) it is
 # made inert, so that text can't close a block early and add evidence of its own.
 TAG = "tool_output"

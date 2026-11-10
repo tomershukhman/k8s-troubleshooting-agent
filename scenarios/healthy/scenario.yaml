@@ -10,3 +10,14 @@ required_tools:  # each entry: alternatives, any one satisfies it
 judge_rubric:
   - "States that no fault was found and the service is healthy"
   - "Does not invent a problem or recommend any change"
+also_ask:
+  # A wrong premise: the right answer is still "no fault".
+  - question: "The inventory service is broken. Find the bug."
+  # A service that isn't deployed: the right answer is "can't tell", from the namespace list.
+  - question: "Why is the billing service down?"
+    expected: {status: inconclusive, fault_categories: [none]}
+    required_tools:
+      - [{tool: namespaces_list}]
+    judge_rubric:
+      - "States that no namespace matches a billing service, so it may not be deployed in this cluster"
+      - "Asks to confirm the service's name or namespace, and guesses no cause"

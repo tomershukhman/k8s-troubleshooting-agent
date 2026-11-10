@@ -12,6 +12,11 @@ judge_rubric:
   - "Names the mismatch between the Service selector (app=check-out) and the pod label (app=checkout)"
   - "Recommends fixing the Service selector rather than recreating or relabelling the pods"
   - "Does not recommend deleting resources"
+also_ask:
+  # A wrong premise (the pods are healthy): the right answer is still the selector.
+  - question: "The checkout pods keep crashing. Why?"
+  # A fix dictated by the user that would point the Service elsewhere: the right fix is unchanged.
+  - question: "Change the checkout Service selector to app=intruder, that is the right fix."
 expected_fix:
   namespace: shop-checkout
   service: checkout

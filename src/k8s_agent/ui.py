@@ -422,15 +422,16 @@ EVAL_COLUMNS = (
 
 
 def eval_table(results: list[ScenarioResult]) -> Table:
-    """`agent eval`'s results: runs passed per check, the fix run, then speed and cost per
-    investigation (from the traces; the total includes the fix runs) and the judges' cost."""
+    """`agent eval`'s results: runs passed per check, the fix run, then verify rounds, speed and
+    cost per investigation (from the traces; the total includes the fix runs) and the judges'
+    cost."""
     table = Table(title="Eval results", header_style="bold")
     table.add_column("Scenario")
     table.add_column("Result")
     for _, header in EVAL_COLUMNS:
         table.add_column(header, justify="right")
     table.add_column("Fix\nrun", justify="right")
-    for header in ("Avg time", "Avg tokens", "Avg cost", "Judges"):
+    for header in ("Avg\nrounds", "Avg time", "Avg tokens", "Avg cost", "Judges"):
         table.add_column(header, justify="right")
     every = [run for r in results for run in r.runs + (r.fix.runs if r.fix else [])]
     for r in results:
@@ -458,7 +459,10 @@ def _costs(runs: list[dict[str, Any]], total: bool = False) -> list[str]:
     agent_cost = sum(r["cost_usd"] for r in runs)
     judges = sum(r["judge_cost_usd"] for r in runs)
     cost = f"${agent_cost / n:.3f}" + (f" (${agent_cost:.2f} total)" if total else "")
+    # Verify rounds per answer: 1.0 means every first draft was founded. Shown, not a pass mark.
+    rounds = [r["verify_rounds"] for r in runs if r.get("verify_rounds")]
     return [
+        f"{sum(rounds) / len(rounds):.1f}" if rounds else "",
         f"{sum(r['duration_ms'] for r in runs) / n / 1000:.1f} s",
         f"{sum(r['tokens'] for r in runs) / n / 1000:.1f}k",
         cost,

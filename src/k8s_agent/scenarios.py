@@ -72,6 +72,17 @@ class ReadyWhen(Strict):
         return ", ".join(f"{k} >= {v}" for k, v in self.model_dump(exclude_defaults=True).items())
 
 
+class Ask(Strict):
+    """Another question about the same cluster state (evals). What it leaves out is the
+    scenario's: a question with a wrong premise has the scenario's right answer, and one about
+    something else brings its own."""
+
+    question: str
+    expected: Expected | None = None
+    required_tools: list[list[ToolUse]] | None = None
+    judge_rubric: list[str] | None = None
+
+
 class ScenarioSpec(Strict):
     question: str
     ready_when: ReadyWhen
@@ -81,6 +92,7 @@ class ScenarioSpec(Strict):
     required_tools: list[list[ToolUse]] = Field(min_length=1)
     judge_rubric: list[str] = Field(min_length=1)  # the advice judge's guidelines (evals)
     expected_fix: ExpectedFix | None = None
+    also_ask: list[Ask] = []
 
 
 class Scenario(Strict):

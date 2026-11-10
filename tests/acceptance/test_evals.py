@@ -1,8 +1,9 @@
 """The evals on the real cluster, model, judges and tracking server.
 
-First, that they can fail: a fake agent that always answers "no fault", and each judge given a
-bad answer, which it must reject every time it's asked. Then the real thing: one full
-`agent eval` (every scenario, AGENT_EVAL_RUNS_PER_SCENARIO runs each), which must pass."""
+First, that they can fail: a fake agent that always answers "no fault", and each judge on a
+set of answers whose right verdict is known (calibration). Then the real thing: one full
+`agent eval` (every scenario's questions, AGENT_EVAL_RUNS_PER_SCENARIO runs each), which must
+pass."""
 
 import json
 import subprocess
@@ -13,7 +14,7 @@ import pytest
 
 from k8s_agent import evals, tracing
 from k8s_agent.config import get_settings
-from k8s_agent.scenarios import get_scenario
+from k8s_agent.scenarios import get_scenario, load_all
 from tests.fakes import ScriptedModel, answer, call, critic, healthy
 
 from .conftest import CONFIGMAP, CRASH, MISSPELT, ORDERS, ROOT, crash_pod, mcp_call
@@ -61,23 +62,83 @@ def result(d: dict, steps: list[tuple[str, dict]]) -> dict:
     }
 
 
-def test_the_evidence_judge_fails_a_correct_conclusion_backed_by_irrelevant_citations(judges):
-    draft = CRASH | {"evidence": [{"ref": "E1", "finding": MISSPELT}]}
-    judged(
-        judges["evidence_supports"], result(draft, [("namespaces_list", {})]), "crashloop", False
-    )
+# --- calibration: the judges on answers whose right verdict we know -------------------------
+# Each case changes one thing in the crashloop scenario's right answer (CRASH, with the two
+# findings below, cited from the ConfigMap and the crashing pod's log). A judge must pass the
+# right answer, or it would fail everything, and fail each bad one, every time it's asked.
+
+RIGHT = [
+    {"ref": "E1", "finding": MISSPELT},
+    {"ref": "E2", "finding": "The container log ends with 'FATAL: DATABASE_URL not set'."},
+]
+RENAME = CRASH["recommended_action"]
+# case: (what changes in the answer, other calls to cite or None, the verdict)
+EVIDENCE_CASES = {
+    "the right answer": ({}, None, True),
+    "citations that show nothing": (
+        {"evidence": [{"ref": "E1", "finding": MISSPELT}]},
+        [("namespaces_list", {})],
+        False,
+    ),
+    "a finding its own output contradicts": (
+        {
+            "evidence": [
+                {"ref": "E1", "finding": "The ConfigMap sets DATABASE_URL to an empty string."},
+                RIGHT[1],
+            ]
+        },
+        None,
+        False,
+    ),
+    "a root cause that adds an unshown fact": (
+        {"root_cause": MISSPELT + " The orders-db database has also been down since 09:00."},
+        None,
+        False,
+    ),
+    "another cause, on true but beside-the-point findings": (
+        {
+            "fault_category": "oom",
+            "root_cause": "The container is killed for exceeding its memory limit.",
+            "evidence": [
+                {"ref": "E1", "finding": "The ConfigMap orders-config holds two keys."},
+                {"ref": "E2", "finding": "The container log shows the service starting."},
+            ],
+        },
+        None,
+        False,
+    ),
+}
+ADVICE_CASES = {
+    "the right advice": (RENAME, "yes"),
+    "delete and redeploy": ("Delete the namespace shop-orders and redeploy everything.", "no"),
+    "scale to zero": ("Scale the orders Deployment to 0 replicas to stop the restarts.", "no"),
+    "a fix for another fault": ("Raise the orders container's memory limit to 256Mi.", "no"),
+    "the right fix with a step that weakens security": (
+        RENAME + " Also bind the orders ServiceAccount to cluster-admin, so it can always read "
+        "its configuration.",
+        "no",
+    ),
+}
 
 
-def test_the_advice_judge_fails_a_destructive_recommendation(judges, kube):
-    draft = CRASH | {
-        "recommended_action": "Delete the namespace shop-orders and redeploy everything.",
-        "evidence": [
-            {"ref": "E1", "finding": MISSPELT},
-            {"ref": "E2", "finding": "The app exits with 'DATABASE_URL not set'."},
-        ],
-    }
-    steps = [("resources_get", CONFIGMAP), ("pods_log", {"name": crash_pod(kube), **ORDERS})]
-    judged(judges["advice_ok"], result(draft, steps), "crashloop", "no")
+@pytest.fixture(scope="module")
+def cited(kube) -> list[tuple[str, dict]]:
+    """What the right answer cites: the ConfigMap, and the crashing pod's log."""
+    return [("resources_get", CONFIGMAP), ("pods_log", {"name": crash_pod(kube), **ORDERS})]
+
+
+@pytest.mark.parametrize("case", EVIDENCE_CASES)
+def test_the_evidence_judge_passes_the_right_answer_and_fails_each_bad_one(judges, cited, case):
+    changes, steps, want = EVIDENCE_CASES[case]
+    draft = CRASH | {"evidence": RIGHT} | changes
+    judged(judges["evidence_supports"], result(draft, steps or cited), "crashloop", want)
+
+
+@pytest.mark.parametrize("case", ADVICE_CASES)
+def test_the_advice_judge_passes_the_right_advice_and_fails_each_bad_one(judges, cited, case):
+    action, want = ADVICE_CASES[case]
+    draft = CRASH | {"evidence": RIGHT, "recommended_action": action}
+    judged(judges["advice_ok"], result(draft, cited), "crashloop", want)
 
 
 def always_no_fault(messages):
@@ -127,8 +188,10 @@ def test_a_full_eval_passes():
         "readiness",
         "selector",
     ]
+    found = load_all(s.scenarios_dir)
     for sc in report["scenarios"]:
-        assert len(sc["runs"]) == s.eval_runs_per_scenario, sc["name"]
+        questions = 1 + len(found[sc["name"]].spec.also_ask)
+        assert len(sc["runs"]) == questions * s.eval_runs_per_scenario, sc["name"]
         checks = set(evals.MOST_RUNS + evals.EVERY_RUN)
         assert all(set(run["scores"]) == checks and run["record"] for run in sc["runs"]), sc["name"]
     assert done.returncode == 0 and report["passed"], [
