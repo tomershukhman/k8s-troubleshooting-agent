@@ -8,19 +8,11 @@ Ask it what is wrong with a service in plain words ("Why is the checkout service
 
 ```mermaid
 flowchart LR
-    q(["Your question"]) --> inv
-    subgraph agent["The agent: a LangGraph workflow"]
-        inv["Investigator<br/>gathers evidence"] --> critic{"Critic<br/>does the evidence<br/>support it?"}
-        critic -- "no: try again" --> inv
-        critic -- "yes" --> diag["Diagnosis<br/>root cause, evidence,<br/>next step"]
-        diag -- "selector fault only" --> rem["Remediator<br/>requests the fix"]
-    end
-    inv <-- "7 read-only tools" --> mcp["MCP server"]
-    mcp -- "read-only identity" --> k8s[("Kubernetes<br/>cluster")]
-    rem --> ok{"You approve<br/>the exact change?"}
-    ok -- "yes: patch, as a 2nd identity" --> k8s
-    diag --> out(["Answer to you"])
-    agent -. "every step traced" .-> ml["MLflow<br/>traces + evals"]
+    q(["Your question"]) --> inv["Investigator<br/>reads the cluster"]
+    inv --> critic{"Critic<br/>is every claim<br/>supported?"}
+    critic -- "no: once more" --> inv
+    critic -- "yes" --> ans(["Root cause,<br/>evidence,<br/>next step"])
+    ans -. "one kind of fault,<br/>after you approve" .-> rem["Remediator<br/>applies the fix"]
 ```
 
 Three roles, each a separate model call with its own prompt:
@@ -58,10 +50,12 @@ cp .env.example .env && chmod 600 .env   # the file will hold your key
 Set `ANTHROPIC_API_KEY` in `.env`, then:
 
 ```bash
-docker compose pull                          # the app image from ghcr.io (or build it: docker compose build)
-docker compose run --rm admin setup          # create the agent's two identities in the cluster
-docker compose up -d --wait k8s-mcp mlflow   # start the read-only MCP server and the tracking server
+docker compose pull                          # the images
+docker compose run --rm admin setup          # the agent's two identities
+docker compose up -d --wait k8s-mcp mlflow   # MCP server and tracking server
 ```
+
+To build the app image yourself instead of pulling it: `docker compose build`.
 
 ### What runs
 
@@ -91,7 +85,8 @@ Start a scenario, then ask:
 
 ```bash
 docker compose run --rm admin scenario up selector
-docker compose run --rm agent "The checkout service isn't reachable from other pods. Why?"
+docker compose run --rm agent \
+  "The checkout service isn't reachable from other pods. Why?"
 ```
 
 - The agent finds the namespace itself. `-n <namespace>` points it at one.
@@ -208,9 +203,12 @@ One thing that looks odd in a fix run's trace: the spans that end with `Interrup
 Each scenario is a folder in [`scenarios/`](scenarios): plain Kubernetes YAML, plus a `scenario.yaml` with its questions and right answers. Each runs in its own namespace.
 
 ```bash
-docker compose run --rm admin scenario list            # the four scenarios and their namespaces
-docker compose run --rm admin scenario up selector     # create it, and wait until the fault is live
-docker compose run --rm admin scenario down selector   # delete its namespace
+# list the four scenarios
+docker compose run --rm admin scenario list
+# create one, and wait until its fault is live
+docker compose run --rm admin scenario up selector
+# delete its namespace
+docker compose run --rm admin scenario down selector
 ```
 
 Nothing the agent can see hints at the fault: the namespaces look like a normal shop, and the folder name never reaches the cluster.
@@ -262,8 +260,10 @@ There are four scenarios and eight questions. For each scenario below: what happ
 ## How to run the evaluations
 
 ```bash
-docker compose run --rm admin eval                                # every question once, plus the selector fix run
-docker compose run --rm admin eval --scenario selector --runs 3   # every question three times: 2 of 3 must pass
+# every question once, plus the selector fix run
+docker compose run --rm admin eval
+# one scenario, every question three times: 2 of 3 must pass
+docker compose run --rm admin eval --scenario selector --runs 3
 ```
 
 A run recreates each scenario, asks its questions without naming the namespace, and scores every answer. It prints a pass/fail table, writes `eval-results/<time>.json`, and exits non-zero if anything fails. One run is nine investigations: the eight questions above, plus one where the selector fix is approved automatically and must work.
@@ -361,10 +361,14 @@ More, and what would come next: [DESIGN 5](DESIGN.md#5-known-limitations-and-fut
 Everything this project created, in the cluster and in Docker:
 
 ```bash
-kubectl delete namespace -l app.kubernetes.io/part-of=k8s-agent-demo   # the scenarios
-kubectl delete namespace k8s-agent                                      # the agent's identities
-kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/managed-by=k8s-agent-setup
-docker compose down -v   # the containers, and MLflow's volume
+# the scenarios
+kubectl delete namespace -l app.kubernetes.io/part-of=k8s-agent-demo
+# the agent's identities
+kubectl delete namespace k8s-agent
+kubectl delete clusterrole,clusterrolebinding \
+  -l app.kubernetes.io/managed-by=k8s-agent-setup
+# the containers, and MLflow's volume
+docker compose down -v
 ```
 
 ## Development
@@ -372,8 +376,8 @@ docker compose down -v   # the containers, and MLflow's volume
 Needs [uv](https://docs.astral.sh/uv/). `uv sync` installs Python 3.14 and every dependency. Then `uv run agent …` runs any command without the app containers (`k8s-mcp` and `mlflow` still run in compose).
 
 ```bash
-make check                    # lint, type check and unit tests: no cluster, Docker or network
-make accept SUITE=remediate   # one acceptance suite, against your cluster and the real model
+make check                    # lint, types and unit tests; no cluster needed
+make accept SUITE=remediate   # one acceptance suite, on your cluster
 make accept                   # every acceptance suite
 ```
 
@@ -382,10 +386,10 @@ make accept                   # every acceptance suite
 ```
 scenarios/<folder>/   manifests/*.yaml + scenario.yaml, one folder per scenario
 deploy/rbac.yaml      the agent's identities
-mcp/config.toml       the MCP server's configuration (read-only, tool allowlist, Secrets denied)
+mcp/config.toml       the MCP server's settings (read-only, tool allowlist)
 src/k8s_agent/        the `agent` CLI, settings, scenarios, setup, evals
   agent/              the LangGraph workflow, critic, remediator, approval gate
-  prompts/            every prompt a model reads, one Markdown file each, named for its agent
+  prompts/            every prompt, one Markdown file each, named for its agent
 tests/unit/           fast tests, no cluster
 tests/acceptance/     tests against a real cluster, one file per area
 ```
