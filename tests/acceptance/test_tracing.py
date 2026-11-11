@@ -97,7 +97,7 @@ def selector(uri, cluster, selector_run):
             return run.result, run.stderr, trace
 
 
-# --- the brief's observability list, line by line, on a real stored trace (DESIGN 3.9) ------
+# --- what a trace must capture, line by line, on a real stored trace (DESIGN 3.9) ----------
 
 
 def test_the_flow_request_agent_model_tool_calls_response(selector):

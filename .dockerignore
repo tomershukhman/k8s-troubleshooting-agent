@@ -2,6 +2,9 @@
 *
 !pyproject.toml
 !uv.lock
+# The package metadata names them (pyproject.toml: readme, license-files)
+!README.md
+!LICENSE
 !src/
 !scenarios/
 !deploy/

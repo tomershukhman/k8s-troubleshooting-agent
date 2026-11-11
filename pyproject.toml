@@ -1,7 +1,11 @@
 [project]
 name = "k8s-agent"
 version = "0.1.0"
-description = "Kubernetes troubleshooting agent: read-only investigation, evals, one approved fix"
+description = "LLM agent that diagnoses broken Kubernetes services with cited evidence, a critic and approved remediation"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["kubernetes", "llm", "agent", "langgraph", "mcp", "mlflow", "sre"]
 authors = [
     { name = "Tomer Shukhman", email = "tomer.shukhman@gmail.com" }
 ]
@@ -25,6 +29,9 @@ dependencies = [
     "typer>=0.28.0",
     "urllib3>=2.8.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/tomershukhman/k8s-troubleshooting-agent"
 
 [project.optional-dependencies]
 # `agent eval` only: mlflow.genai.evaluate and its judges. The agent itself traces with the slim

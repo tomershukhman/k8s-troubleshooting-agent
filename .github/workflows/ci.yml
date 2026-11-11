@@ -1,8 +1,12 @@
 # The pipeline, one stage after another (DESIGN 3.11):
-#   lint → unit tests → build image → publish image → mlflow evals
-# The evals pull the image just published, so they grade the artifact that ships. Pull requests
-# to main run every stage; pushes to main and v* tags stop after publishing (latest on main); the
-# Actions tab's "Run workflow" button runs every stage.
+#   lint → unit tests → build image → publish image → mlflow evals → mark evaluated
+# Pull requests to main (and the Actions tab's "Run workflow" button) run every stage. The image
+# is published as a candidate under its commit SHA; the evals pull that image, and once they pass
+# it is also tagged with the hash of its files (the git tree), marking it evaluated.
+# Pushes to main and v* tags build nothing: they promote the evaluated image whose files are the
+# commit's own (latest on main, the tag's name for v*), so what ships is the image that was graded.
+# Main only takes pull requests that are up to date with it, so a merge commit has exactly the
+# files a pull request's last run evaluated.
 name: ci
 
 on:
@@ -23,9 +27,15 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  # The commit stamped into the image (AGENT_GIT_COMMIT, on traces): a pull request's own head,
+  # which stays in main's history after the merge, rather than GitHub's temporary test merge.
+  # Up to date with main, both have the same files.
+  SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
+  # Pushes (main, v* tags) only promote; every later stage needs this one, so they skip too.
   lint:
+    if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -62,7 +72,7 @@ jobs:
           context: .
           load: true
           tags: ${{ env.IMAGE }}:ci
-          build-args: GIT_COMMIT=${{ github.sha }}
+          build-args: GIT_COMMIT=${{ env.SOURCE_COMMIT }}
           # The same amd64 layers publish builds: one cache scope per platform, shared.
           cache-from: type=gha,scope=linux-amd64
           cache-to: type=gha,mode=max,scope=linux-amd64
@@ -73,7 +83,7 @@ jobs:
           test "$uid" != 0
           docker run --rm "$IMAGE:ci" scenario list
 
-  # Every run publishes under its commit SHA; main also as latest, a v* tag under its name.
+  # Publishes the candidate under its commit SHA only: latest and v* tags come from promote.
   # Pull requests from forks get no write token (or secrets): publish and evals don't run there.
   # Each platform builds natively on its own runner and pushes by digest (no QEMU); publish-image
   # then joins the digests into one multi-arch image under the tags (Docker's multi-runner pattern).
@@ -106,10 +116,8 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          tags: |
-            type=raw,value=${{ github.sha }}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
+          tags: type=raw,value=${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ env.SOURCE_COMMIT }}
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -118,7 +126,7 @@ jobs:
           tags: ${{ env.IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
-          build-args: GIT_COMMIT=${{ github.sha }}
+          build-args: GIT_COMMIT=${{ env.SOURCE_COMMIT }}
           cache-from: type=gha,scope=linux-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=linux-${{ matrix.arch }}
       - name: Export the digest
@@ -139,7 +147,7 @@ jobs:
   publish-image:
     needs: publish-platform
     if: >-
-      !cancelled() &&
+      !cancelled() && github.event_name != 'push' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -164,10 +172,7 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          tags: |
-            type=raw,value=${{ github.sha }}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
+          tags: type=raw,value=${{ github.sha }}
       - name: Create the multi-arch image under the tags
         working-directory: ${{ runner.temp }}/digests
         run: |
@@ -185,7 +190,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The settings a reviewer puts in .env. Native Linux Docker: the containers run as the
+      # The settings a user puts in .env. Native Linux Docker: the containers run as the
       # owner of the 0600 kubeconfigs.
       - name: Write .env
         env:
@@ -221,3 +226,58 @@ jobs:
           name: eval-results
           path: eval-results/*.json
           if-no-files-found: ignore
+
+  # The candidate passed: tag the same image (no rebuild) with the hash of its files, so a push
+  # with exactly these files can promote it. Its own job, so the evals never hold a write token.
+  mark-evaluated:
+    needs: mlflow-evals
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag the evaluated image with its tree
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          docker buildx imagetools create -t "$IMAGE:tree-$tree" "$IMAGE:$GITHUB_SHA"
+          echo "evaluated: $IMAGE:tree-$tree"
+
+  # Pushes to main and v* tags: no build. Promote the evaluated image whose files are this
+  # commit's, under latest (main) or the tag's name (v*), and the commit's SHA. No evaluated
+  # image (a fork's pull request, which skips the evals): fail, rather than ship one unevaluated.
+  promote:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote the evaluated image
+        env:
+          NAME: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          if ! docker buildx imagetools inspect "$IMAGE:tree-$tree" > /dev/null; then
+            echo "::error::No evaluated image has this commit's files (tree $tree)." \
+              "Run the evals on a pull request with exactly these files, then merge it."
+            exit 1
+          fi
+          docker buildx imagetools create -t "$IMAGE:$NAME" -t "$IMAGE:$GITHUB_SHA" \
+            "$IMAGE:tree-$tree"
+          docker buildx imagetools inspect "$IMAGE:$NAME"

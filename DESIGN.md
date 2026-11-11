@@ -366,7 +366,7 @@ investigation                       your question and the result; who asked, the
    └─ recheck
 ```
 
-| The brief asks to capture | Where it is in the trace |
+| What a trace must capture | Where it is in the trace |
 |---|---|
 | The flow: request → agent → model → tool calls → response | The root span holds the question and the result; inside it, each stage, model call and tool call |
 | What the agent did, which tools it used | Every tool call, named, with its evidence ID |
@@ -397,7 +397,7 @@ Nothing carries over between runs: each run starts a fresh conversation. Re-runn
 
 **The pipeline is staged** so the cheap checks run first and only a change that passes them pays for the evals (about $1.50 per full run: eight questions, the remediation run and the judges).
 
-The last stage pulls the image just published, by its commit, and runs the full eval on a fresh kind cluster through the README's own commands, so the artifact that ships is the one graded.
+The last stage pulls the image just published, by its commit, and runs the full eval on a fresh kind cluster through the README's own commands, so the image that ships is the one evaluated.
 
 **Each platform builds natively:** amd64 and arm64 build in parallel, each on a runner of its own architecture, and a last step joins them into one multi-arch image (arm64 emulated on an Intel runner took 6–8 minutes; now about 1). That last step is the required `publish-image` check. It runs even when a platform build failed, and fails then, because GitHub would count a skipped required check as passed.
 
@@ -423,7 +423,7 @@ The last stage pulls the image just published, by its commit, and runs the full 
 - **Trade-off:** on the same model it may be lenient, so it is tested to reject irrelevant evidence, and it can be switched to a stronger model. The eval judges, on a stronger model, caught three overreaches it had passed.
 
 **The remediation has its own agent, the remediator**
-- **Why:** the brief asks that the agent execute the approved change through a narrowly scoped tool. The remediator is the only agent that holds that tool. It is given only the proposed remediation, never the logs and events the investigator reads, so write access stays out of the loop that reads untrusted text. The pause before its tool call is LangChain's human-in-the-loop middleware, not our code. A new remediation type would be one more remediator tool behind the same gates.
+- **Why:** the approved change should run through a narrowly scoped tool, held by an agent that never reads untrusted text. The remediator is the only agent that holds that tool. It is given only the proposed remediation, never the logs and events the investigator reads, so write access stays out of the loop that reads untrusted text. The pause before its tool call is LangChain's human-in-the-loop middleware, not our code. A new remediation type would be one more remediator tool behind the same gates.
 - **Rejected:** the remediation tool in the investigator's hands (see above); code applying the remediation with no agent (simpler, but then nothing executes the change through a tool, and each new remediation would be new orchestration code); a generic "patch anything" tool behind approval.
 - **Trade-off:** for today's single remediation, a code step would be simpler. We accept one model holding one narrow write tool, gated on every call.
 
@@ -458,7 +458,7 @@ The last stage pulls the image just published, by its commit, and runs the full 
 - **Trade-off:** the tracking server has no login, and open-source MLflow doesn't enforce pass criteria, so `agent eval` checks them itself.
 
 **Models**
-- **Why Sonnet 5.5 at high effort:** strong at tool use, cheaper and faster than Opus for a loop of many calls. At medium effort it mostly skipped thinking, so traces lost the reasoning the brief asks for. The judges use Opus 5.5, so the system isn't graded by itself.
+- **Why Sonnet 5.5 at high effort:** strong at tool use, cheaper and faster than Opus for a loop of many calls. At medium effort it mostly skipped thinking, so traces lost the reasoning that shows how a conclusion was reached. The judges use Opus 5.5, so the system isn't graded by itself.
 - **Trade-off:** a few seconds more per run.
 
 **Prompts: one folder, and every rule tested**

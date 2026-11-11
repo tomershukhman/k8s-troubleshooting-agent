@@ -4,9 +4,6 @@
 .kube-agent/*
 !.kube-agent/.gitkeep
 
-# Assignment brief (employer's document; kept out of the repo)
-*.pdf
-
 # Python
 __pycache__/
 *.py[cod]
